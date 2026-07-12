@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.core.time import utcnow
 from app.db.models import Artifact, ResearchConsent, ResearchEvent, ResearchReport, Tenant
@@ -107,6 +108,29 @@ def delete_report(
     return deleted_artifacts
 
 
+def _cleanup_candidate_statement(*, limit: int) -> Select[tuple[ResearchReport]]:
+    """Select each report with artifacts once without comparing JSON values.
+
+    PostgreSQL cannot apply ``DISTINCT`` to a full ``ResearchReport`` row because
+    the row includes the JSON ``filters`` column. A correlated ``EXISTS`` keeps
+    the query bounded while avoiding both that comparison and duplicate reports
+    when one report has multiple artifacts.
+    """
+
+    has_artifact = (
+        select(Artifact.id)
+        .where(Artifact.report_id == ResearchReport.id)
+        .correlate(ResearchReport)
+        .exists()
+    )
+    return (
+        select(ResearchReport)
+        .where(has_artifact)
+        .order_by(ResearchReport.created_at, ResearchReport.id)
+        .limit(limit)
+    )
+
+
 def cleanup_expired_report_artifacts(
     db: Session,
     artifact_root: Path,
@@ -117,15 +141,7 @@ def cleanup_expired_report_artifacts(
 
     if not 1 <= limit <= 1_000:
         raise ValueError("Cleanup limit must be between 1 and 1000")
-    candidates = list(
-        db.scalars(
-            select(ResearchReport)
-            .join(Artifact, Artifact.report_id == ResearchReport.id)
-            .distinct()
-            .order_by(ResearchReport.created_at)
-            .limit(limit)
-        ).all()
-    )
+    candidates = list(db.scalars(_cleanup_candidate_statement(limit=limit)).all())
     reports_cleaned = 0
     artifacts_deleted = 0
     for report in candidates:

@@ -234,6 +234,8 @@ if ! jq --exit-status '
   .services.caddy.build == null and .services.postgres.build == null and .services.backup.build == null and .services.restore.build == null and
   .services.backup.environment.BACKUP_IMAGE_REF == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
   .services.backup.entrypoint == ["/usr/local/bin/backup.sh"] and
+  .services.backup.read_only == true and
+  .services.backup.tmpfs == ["/tmp:rw,nosuid,nodev,noexec"] and
   (.services.backup.networks | keys == ["data"]) and (.services.restore.networks | keys == ["data"]) and
   (.services.backup.cap_add | index("DAC_OVERRIDE") | not) and
   .services.backup.cap_add == ["DAC_READ_SEARCH"] and
@@ -241,6 +243,8 @@ if ! jq --exit-status '
   ([.services.backup.volumes[] | select(.target == "/source/exports" or (.target | startswith("/source/hermes-"))) | .read_only] | all) and
   ([.services.restore.volumes[] | select(.target == "/source/exports" or (.target | startswith("/source/hermes-"))) | .read_only] | any | not) and
   ([.services.restore.volumes[] | select(.target == "/backups") | .read_only] == [true]) and
+  .services.restore.read_only == true and
+  .services.restore.tmpfs == ["/tmp:rw,nosuid,nodev,noexec"] and
   .services.api.environment.APP_ENV == "production" and
   .services.api.environment.WHATSAPP_BACKEND == "disabled" and
   .services.api.environment.AGENT_BACKEND == "disabled" and
@@ -257,8 +261,8 @@ if ! jq --exit-status '
     caddy_init: (.services["caddy-init"] | {image, build, network_mode}),
     postgres: (.services.postgres | {image, build, stop_grace_period}),
     backup_data_init: (.services["backup-data-init"] | {image, build, user, entrypoint, network_mode, read_only, cap_drop, cap_add, volumes}),
-    backup: (.services.backup | {image, build, user, networks, cap_add, environment}),
-    restore: (.services.restore | {image, build, user, entrypoint, networks, cap_add}),
+    backup: (.services.backup | {image, build, user, networks, read_only, tmpfs, cap_add, environment}),
+    restore: (.services.restore | {image, build, user, entrypoint, networks, read_only, tmpfs, cap_add}),
     api: (.services.api | {environment}),
     worker: (.services.worker | {environment, healthcheck, cap_drop}),
     scheduler: (.services.scheduler | {environment, healthcheck, cap_drop})
@@ -370,6 +374,11 @@ grep -Fq 'ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh' infra/systemd/
 # Match literal shell source rather than expanding this test process's array.
 # shellcheck disable=SC2016
 grep -Fq 'stop --timeout 60 "${running_services[@]}"' scripts/scheduled_backup.sh
+grep -Fq 'writer_services=(api worker scheduler hermes)' scripts/scheduled_backup.sh
+if grep -Eq 'writer_services=\([^)]*(caddy|web)' scripts/scheduled_backup.sh; then
+  echo "Scheduled backup must keep the non-writing public edge services online" >&2
+  exit 1
+fi
 grep -Fq 'run --rm --no-deps backup' scripts/scheduled_backup.sh
 scheduled_backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/scheduled_backup.sh | cut -d: -f1)"
 scheduled_backup_line="$(grep -n -F 'run --rm --no-deps backup' scripts/scheduled_backup.sh | tail -1 | cut -d: -f1)"
