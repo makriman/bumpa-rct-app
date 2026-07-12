@@ -323,6 +323,9 @@ services:
       BACKUP_IMAGE_REF: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec
     cap_drop: ["ALL"]
     cap_add: ["DAC_READ_SEARCH"]
     volumes: !override
@@ -351,6 +354,9 @@ services:
       BACKUP_IMAGE_REF: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     security_opt:
       - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
     volumes: !override

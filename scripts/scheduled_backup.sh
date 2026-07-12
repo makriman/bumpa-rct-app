@@ -13,7 +13,10 @@ compose=(
   -f compose.yaml -f compose.prod.yaml
   --profile async --profile tools
 )
-writer_services=(caddy web api worker scheduler hermes)
+# Caddy and the web frontend do not write the database-linked export or Hermes
+# volumes. Keep them serving the application shell while every process that can
+# mutate backup state is quiesced.
+writer_services=(api worker scheduler hermes)
 running_services=()
 writers_quiesced=0
 

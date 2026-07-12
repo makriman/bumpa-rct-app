@@ -338,6 +338,8 @@ docker run --rm \
 docker run --rm \
   --network "$network" \
   --user 0:0 \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec \
   --cap-drop ALL \
   --cap-add DAC_READ_SEARCH \
   --security-opt no-new-privileges:true \
@@ -399,6 +401,8 @@ docker exec "$restore" psql --username bumpabestie --dbname bumpabestie \
 docker run --rm \
   --network "$network" \
   --user 0:0 \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec \
   --cap-drop ALL \
   --cap-add CHOWN \
   --cap-add DAC_OVERRIDE \
