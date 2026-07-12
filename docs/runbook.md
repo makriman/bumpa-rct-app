@@ -110,8 +110,8 @@ This is not an off-host durability mechanism.
 
 ```bash
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
-"${compose[@]}" --profile tools run --rm backup
-"${compose[@]}" --profile tools run --rm backup sh -c \
+"${compose[@]}" --profile tools run --rm --no-deps backup
+"${compose[@]}" --profile tools run --rm --no-deps backup sh -c \
   'latest=$(find /backups -mindepth 1 -maxdepth 1 -type d | sort | tail -1); test -n "$latest"; cd "$latest"; sha256sum -c SHA256SUMS; cat manifest.json'
 ```
 
@@ -194,7 +194,7 @@ compose=(docker compose --env-file .env.production -f compose.yaml -f compose.pr
 backup_id=YYYYMMDDTHHMMSSZ
 
 "${compose[@]}" stop caddy web api
-"${compose[@]}" --profile restore run --rm \
+"${compose[@]}" --profile restore run --rm --no-deps \
   -e RESTORE_CONFIRM=restore-bumpabestie \
   -e BACKUP_PATH="/backups/$backup_id" \
   restore

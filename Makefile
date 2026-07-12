@@ -88,11 +88,11 @@ smoke: ## Smoke-test an already running stack
 	./scripts/smoke_test.sh
 
 backup: ## Create a database/export backup in the backups volume
-	$(COMPOSE) --profile tools run --rm backup
+	$(COMPOSE) --profile tools run --rm --no-deps backup
 
 restore: ## Restore BACKUP_PATH after explicit confirmation
 	@test -n "$(BACKUP_PATH)" || (echo "Set BACKUP_PATH" >&2; exit 2)
-	$(COMPOSE) --profile restore run --rm \
+	$(COMPOSE) --profile restore run --rm --no-deps \
 		-e RESTORE_CONFIRM=restore-bumpabestie \
 		-e BACKUP_PATH="$(BACKUP_PATH)" \
 		restore

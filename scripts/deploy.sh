@@ -224,7 +224,7 @@ if [[ -n "$postgres_container" ]]; then
     exit 1
   fi
   echo "Creating a pre-deployment database and artifact backup."
-  "${compose[@]}" --profile tools run --rm \
+  "${compose[@]}" --profile tools run --rm --no-deps \
     --env "APPLICATION_REVISION=${previous_application_revision:-unknown}" \
     --env "BACKUP_IMAGE_REF=$BACKUP_IMAGE" \
     backup

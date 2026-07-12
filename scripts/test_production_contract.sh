@@ -112,6 +112,8 @@ if grep -Fq "export CADDY_IMAGE=\"\$previous_caddy_image\"" scripts/deploy.sh; t
 fi
 grep -Fq -- '--exit-code-from caddy-init caddy-init' scripts/deploy.sh
 grep -Fq "docker image inspect --format '{{json .RepoDigests}}'" scripts/deploy.sh
+grep -Fq "\"\${compose[@]}\" --profile tools run --rm --no-deps" scripts/deploy.sh
+grep -Fq -- '--profile tools run --rm --no-deps backup' infra/systemd/bumpabestie-backup.service
 
 test "$(
   jq --raw-output '.services | to_entries[] | select(.value.ports != null) | .key' <<<"$rendered"
