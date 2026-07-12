@@ -1,11 +1,57 @@
 "use client";
 import { useState } from "react";
 import { PublicShell } from "@/components/public-shell";
-import { Toast } from "@/components/ui";
+import { apiRequest } from "@/lib/api";
+
+const RESEARCH_POLICY_VERSION = "v1";
+type ConsentChoice = "granted" | "withdrawn";
+
 export default function ConsentPage() {
   const [checks, setChecks] = useState([false, false]);
-  const [toast, setToast] = useState("");
+  const [submitting, setSubmitting] = useState<ConsentChoice | null>(null);
+  const [feedback, setFeedback] = useState<{
+    kind: "success" | "error";
+    message: string;
+  } | null>(null);
   const accepted = checks.every(Boolean);
+
+  const recordChoice = async (choice: ConsentChoice) => {
+    setSubmitting(choice);
+    setFeedback(null);
+    try {
+      const result = await apiRequest<{ status: ConsentChoice }>(
+        "/tenants/current/research-consent",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            status: choice,
+            policy_version: RESEARCH_POLICY_VERSION,
+          }),
+        },
+      );
+      if (result.status !== choice) {
+        throw new Error("The saved consent choice did not match your request.");
+      }
+      setFeedback({
+        kind: "success",
+        message:
+          choice === "granted"
+            ? "Your research participation consent has been saved."
+            : "Your choice to continue without research participation has been saved.",
+      });
+    } catch (reason) {
+      setFeedback({
+        kind: "error",
+        message:
+          reason instanceof Error
+            ? reason.message
+            : "Your research choice could not be saved. Please try again.",
+      });
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   return (
     <PublicShell>
       <div className="legal-wrap">
@@ -16,18 +62,20 @@ export default function ConsentPage() {
           Participation is voluntary, and declining does not remove your access
           to the product.
         </p>
-        <div className="consent-card">
+        <div className="consent-card" aria-busy={submitting !== null}>
           <h2>What participation means</h2>
           <p>
             Researchers may analyse pseudonymised questions, classifications,
-            channels, response timings, and outcome signals. Raw chats remain
-            hidden by default and require a separate permission.
+            channels, response timings, and outcome signals. Default research
+            exports are redacted. Access to raw chat content is restricted,
+            reason-gated, and audited.
           </p>
           <div className="check-row">
             <input
               id="understand"
               type="checkbox"
               checked={checks[0]}
+              disabled={submitting !== null}
               onChange={(e) => setChecks([e.target.checked, checks[1]])}
             />
             <label htmlFor="understand">
@@ -40,6 +88,7 @@ export default function ConsentPage() {
               id="voluntary"
               type="checkbox"
               checked={checks[1]}
+              disabled={submitting !== null}
               onChange={(e) => setChecks([checks[0], e.target.checked])}
             />
             <label htmlFor="voluntary">
@@ -51,28 +100,45 @@ export default function ConsentPage() {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button
             className="button button-primary"
-            disabled={!accepted}
-            onClick={() => setToast("Research consent recorded for this demo.")}
+            disabled={!accepted || submitting !== null}
+            onClick={() => void recordChoice("granted")}
           >
-            I agree to participate
+            {submitting === "granted"
+              ? "Saving agreement…"
+              : "I agree to participate"}
           </button>
           <button
             className="button button-secondary"
-            onClick={() =>
-              setToast("Your choice to decline has been recorded.")
-            }
+            disabled={submitting !== null}
+            onClick={() => void recordChoice("withdrawn")}
           >
-            Continue without research
+            {submitting === "withdrawn"
+              ? "Saving choice…"
+              : "Continue without research"}
           </button>
         </div>
+        {feedback && (
+          <div
+            className={`alert ${feedback.kind === "success" ? "alert-success" : "alert-danger"}`}
+            role={feedback.kind === "error" ? "alert" : "status"}
+            aria-live={feedback.kind === "error" ? "assertive" : "polite"}
+          >
+            {feedback.message}
+          </div>
+        )}
+        <p className="table-secondary">
+          You must be signed in as a workspace owner or administrator to save
+          this choice. Declining does not restrict normal product access.
+        </p>
         <h2>Questions or withdrawal</h2>
         <p>
           Contact the study team through your Bumpa Bestie operator. Withdrawing
-          stops future research processing; retention of previously anonymised
-          results follows the final approved study protocol.
+          stops new research classification and blocks access to tenant research
+          data and generated artifacts. It does not delete operational product
+          records; ask your operator about a separate privacy or deletion
+          request.
         </p>
       </div>
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </PublicShell>
   );
 }

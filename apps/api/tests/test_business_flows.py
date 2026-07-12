@@ -23,7 +23,7 @@ def test_sync_chat_research_report_flow(client: TestClient) -> None:
         json={"message": "What sold best and how are sales?", "client_message_id": "web-1"},
     )
     assert chat.status_code == 200, chat.text
-    assert "Sales:" in chat.json()["answer"]
+    assert "Total sales:" in chat.json()["answer"]
     duplicate = client.post(
         "/v1/chat/web",
         headers=owner,

@@ -14,8 +14,11 @@ adapter is implemented.
 - [API server](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server/) —
   intended source for API authentication, request shape and health behavior.
 
-Hermes has not yet been integrated. Revalidate these references against the pinned
-Hermes release before writing configuration or claiming profile isolation.
+The runtime image is derived from the immutable Hermes image index pinned in
+`infra/hermes/Dockerfile`. CI exercises its secret-file entrypoint, networkless
+profile importer, private runtime, profile permissions and backup/restore contract.
+Per-tenant functional and isolation canaries are still required after every live
+profile activation; an image-level contract is not a substitute for those canaries.
 
 ## Bumpa
 
@@ -23,10 +26,12 @@ Hermes release before writing configuration or claiming profile isolation.
 - [Bumpa product/API landing page](https://www.bumpa.io/) — product context and the
   route to provider support/access.
 
-The repository must use a direct server-side Bumpa REST adapter; Bumpa MCP is out of
-scope. Public landing material does not prove the precise commerce analytics
-contract. Obtain provider-approved documentation or sandbox access and capture
-versioned redacted fixtures before enabling the adapter.
+The repository uses a direct server-side Bumpa REST adapter; Bumpa MCP is out of
+scope. The adapter has authenticated all five supplied business credentials. Four
+completed every analytics-dataset and paginated-orders canary; one encountered a
+transient timeout on a single overview endpoint after the remaining calls passed.
+Public landing material still does not prove a stable provider contract, so retain
+versioned redacted fixtures and re-run live canaries before each activation.
 
 ## Meta WhatsApp Cloud API
 

@@ -2,28 +2,27 @@
 
 ## Current implementation boundary
 
-This file describes the provider and end-to-end contracts. The in-process commerce,
-messaging, classifier and agent mocks cover the deterministic local path, including
-webhook retry and delivery status tests. `make integration` exercises Postgres-backed
-OTP, commerce sync, chat, research logging and PDF reports through the same-origin
-Next.js proxy. Redis-backed queues/rate limits, generated OpenAPI clients/MSW
-handlers and full browser E2E against every API surface remain unimplemented.
-Production user/settings/admin/research views use authenticated APIs; an explicit,
-labelled demo-cookie path remains only for credential-free local UI testing. Live
-providers are intentionally deferred.
+This file describes the provider and end-to-end contracts. In-process commerce,
+messaging, classifier and agent adapters cover the deterministic local path. The
+production path has direct Meta, Bumpa, and authenticated Hermes adapters, durable
+Redis-backed jobs, a transactional outbox, rate limits, and worker/scheduler health.
+`make integration` exercises Postgres-backed OTP, commerce sync, chat, research
+logging and PDF reports through the same-origin Next.js proxy. Production
+user/settings/admin/research views use authenticated APIs; an explicit, labelled
+demo-cookie path remains only for credential-free local UI testing. Generated
+OpenAPI clients/MSW handlers remain outside the current implementation.
 
-The pre-integration production baseline uses `disabled` selectors for WhatsApp,
-Bumpa and agent providers. Provider-dependent routes must fail closed, report an
-honest unavailable state and never fall back to these local adapters. Worker and
-scheduler remain local shells until a production queue exists.
+Production can use `disabled` selectors independently for WhatsApp, Bumpa, or the
+agent while an external activation gate is incomplete. Provider-dependent routes
+fail closed, report an honest unavailable state, and never fall back to local
+adapters. The production worker and scheduler use the durable queue runtime.
 
 ## Local mode
 
 Local development is credential free. Copy `.env.example` to `.env`, then run
 `make bootstrap` and `make dev`. Production configuration rejects every mock
-adapter. The current settings validator checks required Meta values when the Meta
-selector is used; equivalent credential/health validation must be added with the
-future Bumpa and Hermes adapters before either live selector is allowed.
+adapter. The settings validator checks required, file-backed Meta, Bumpa, and
+Hermes configuration when the corresponding selector is used.
 
 The development OTP `246810` and OTP log sink are synthetic conveniences. Config
 validation must prevent either value from being loaded outside `local` or `test`.
@@ -36,41 +35,41 @@ Domain services depend on interfaces, not HTTP clients:
 - `WhatsAppGateway`: template/text send and normalized delivery result.
 - `AgentGateway`: tenant-profile chat and health/profile lifecycle operations.
 
-The target is a deterministic fake and live adapter for each port. Current mocks
-are in-process happy-path implementations and do not yet consume all versioned
-fixtures or expose the documented failure scenarios (`timeout`, `rate_limited`,
-`malformed`, `unavailable`).
+Each port has a deterministic fake and a production adapter. Contract tests cover
+bounded timeout, retry, rate-limit, malformed/unavailable, idempotency, and ambiguous
+send behavior at the adapter/job boundaries.
 
 ## Bumpa contract
 
 The defined read surface is ten analytics datasets plus paginated orders. Code and
-documentation must not ambiguously call all eleven items “datasets.” The local fake
-returns ten datasets and six synthetic orders, and unit tests cover basic Decimal
-money, availability and top-level redaction. The checked-in fixture set is not yet
-the required contract matrix. It must add both scope types, unknown statuses,
-partial/body errors, 401/403/429/5xx, multi-page boundaries and nested sensitive
-fields. Live contract verification remains pending until a sandbox/test store is
-supplied.
+documentation must not ambiguously call all eleven items “datasets.” The direct
+adapter enforces allowlisted endpoints, response/page limits, bounded retries,
+Decimal money, unknown-value preservation, and deep redaction. All five supplied
+business credentials have been authenticated; four completed every dataset and
+orders canary, while one had a transient timeout on a single overview endpoint.
+That provider observation is not production activation evidence.
 
 ## WhatsApp contract
 
 Local webhook tests use canonical raw JSON bytes and compute real HMAC signatures.
-They cover verification challenge, wrong/missing signature, unknown number, known
-number, duplicates, one delivery callback, STOP/START and retry after failed inline
-processing. Outbound sends are recorded by the fake adapter. Out-of-order delivery
-states and the full payload/type matrix remain open. Live verification requires a
-Meta app, verified callback, approved templates and a test recipient.
+They cover verification challenge, wrong/missing signature, unknown and known
+senders, duplicates, durable acknowledgement, delivery callbacks, STOP/START, and
+retry after job failure. The live adapter has a versioned sender, service-window
+rules, idempotency, and an ambiguous-send guard. Meta account validation succeeded,
+but phone verification, callback subscription, approved templates, and a live
+delivery receipt remain external activation gates.
 
 ## Agent contract
 
 The fake agent returns deterministic, tenant-tagged responses and captures only the
-redacted context envelope. Contract tests assert that provider credentials and raw
-PII never appear in the request. Live Hermes verification must prove profile process
-topology, port allocation, authentication, restart behavior and cross-profile
-isolation before the adapter is enabled.
+redacted context envelope. The Hermes runtime uses a pinned upstream-derived image,
+an authenticated private gateway per profile, staged profile directories, and a
+Hermes-only Anthropic secret. Contract tests cover authentication, lifecycle,
+redacted context, and profile isolation; a production profile and Claude canary are
+still required before claiming the production path live.
 
-Claude is the planned model provider through Hermes. The Anthropic key belongs only
-to the future Hermes runtime secret boundary; FastAPI passes tenant-scoped,
+Claude is the model provider through Hermes. The Anthropic key belongs only to the
+Hermes runtime secret boundary; FastAPI passes tenant-scoped,
 redacted context to Hermes and does not call Claude directly for the SME chat path.
 No Hermes database row, profile directory, port allocation or credential alone is
 live-profile evidence.

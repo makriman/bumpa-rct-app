@@ -7,8 +7,17 @@ cd "$ROOT_DIR"
 contract_env="$(mktemp)"
 invalid_env="$(mktemp)"
 duplicate_env="$(mktemp)"
+live_env="$(mktemp)"
+contract_secrets="$(mktemp -d)"
+runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
+offsite_env="$(mktemp)"
+offsite_hook="$(mktemp)"
+offsite_marker="$(mktemp)"
 cleanup() {
-  rm -f "$contract_env" "$invalid_env" "$duplicate_env"
+  rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
+    "$offsite_env" "$offsite_hook" "$offsite_marker"
+  rm -rf "$contract_secrets"
+  docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -51,7 +60,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     MIGRATION_DATABASE_URL) value=postgresql+psycopg://bumpabestie:contract-postgres-password-0000000000@postgres:5432/bumpabestie ;;
     SYNC_DATABASE_URL) value=postgresql://bumpabestie:contract-postgres-password-0000000000@postgres:5432/bumpabestie ;;
     WHATSAPP_BACKEND | AGENT_BACKEND | BUMPA_BACKEND) value=disabled ;;
-    EXPOSE_LOCAL_OTP | SEED_DEMO_DATA | NEXT_PUBLIC_DEMO_MODE | ASYNC_RUNTIME_ENABLED) value=false ;;
+    EXPOSE_LOCAL_OTP | SEED_DEMO_DATA | NEXT_PUBLIC_DEMO_MODE) value=false ;;
+    ASYNC_RUNTIME_ENABLED) value=true ;;
+    META_APP_ID) value=123456789012345 ;;
+    META_BUSINESS_ID) value=234567890123456 ;;
+    META_WABA_ID) value=345678901234567 ;;
+    META_PHONE_NUMBER_ID) value=456789012345678 ;;
+    META_PHONE_NUMBER) value=+2348000000000 ;;
     DEPLOY_REF) value=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
     IMAGE_TAG) value=sha-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
     INFRA_IMAGE_TAG) value=sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
@@ -60,17 +75,61 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     CADDY_IMAGE) value=ghcr.io/makriman/bumpabestie-caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ;;
     POSTGRES_IMAGE) value=ghcr.io/makriman/bumpabestie-postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff ;;
     BACKUP_IMAGE) value=ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab ;;
+    HERMES_IMAGE) value=ghcr.io/makriman/bumpabestie-hermes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
+    SECRETS_DIR) value="$contract_secrets" ;;
   esac
   printf '%s=%s\n' "$key" "$value"
 done < .env.example > "$contract_env"
 chmod 0600 "$contract_env"
+for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_verify_token hermes_anthropic_api_key; do
+  printf 'contract-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
+  chmod 0600 "$contract_secrets/$secret_name"
+done
+
+cat > "$offsite_hook" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+test -z "${JWT_SECRET:-}"
+printf 'handoff-ran' > "$OFFSITE_TEST_MARKER"
+EOF
+chmod 0700 "$offsite_hook"
+printf 'JWT_SECRET=must-not-be-exported\nOFFSITE_BACKUP_SCRIPT=%s\n' \
+  "$offsite_hook" > "$offsite_env"
+chmod 0600 "$offsite_env"
+OFFSITE_TEST_MARKER="$offsite_marker" env -u OFFSITE_BACKUP_SCRIPT \
+  ./scripts/offsite_backup.sh --env-file "$offsite_env"
+test "$(cat "$offsite_marker")" = handoff-ran
+
+# Compose file secrets are bind mounts and do not honor service uid/gid/mode on
+# local engines. Exercise the one-shot copy boundary and prove the final API UID
+# can read only the private runtime copies without weakening host permissions.
+docker volume create "$runtime_secret_volume" >/dev/null
+docker run --rm --network none --user 0:0 --read-only \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+  --volume "$contract_secrets:/run/secrets:ro" \
+  --volume "$runtime_secret_volume:/runtime-secrets" \
+  --volume "$ROOT_DIR/scripts/init_runtime_secrets.sh:/usr/local/bin/init-runtime-secrets:ro" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  /usr/local/bin/init-runtime-secrets
+docker run --rm --network none --user 100:101 --read-only \
+  --security-opt no-new-privileges:true --cap-drop ALL \
+  --volume "$runtime_secret_volume:/run/runtime-secrets:ro" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  sh -eu -c '
+    for name in meta_app_secret meta_system_user_access_token meta_webhook_verify_token; do
+      test -r "/run/runtime-secrets/$name"
+      test "$(stat -c %a "/run/runtime-secrets/$name")" = 400
+    done
+    test "$(find /run/runtime-secrets -mindepth 1 -maxdepth 1 -type f | wc -l)" = 3
+  '
 
 ./scripts/validate_env.sh "$contract_env" production
-compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile tools --profile restore)
+compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile async --profile tools --profile restore)
 "${compose[@]}" config --quiet
 rendered="$("${compose[@]}" config --format json)"
 
-jq --exit-status '
+if ! jq --exit-status '
   .services.caddy.image == "ghcr.io/makriman/bumpabestie-caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" and
   .services["caddy-init"].image == "ghcr.io/makriman/bumpabestie-caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" and
   .services["caddy-init"].build == null and .services["caddy-init"].network_mode == "none" and
@@ -82,21 +141,105 @@ jq --exit-status '
   .services.restore.image == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
   .services.caddy.build == null and .services.postgres.build == null and .services.backup.build == null and .services.restore.build == null and
   .services.backup.environment.BACKUP_IMAGE_REF == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
+  .services.backup.entrypoint == ["/usr/local/bin/backup.sh"] and
   (.services.backup.networks | keys == ["data"]) and (.services.restore.networks | keys == ["data"]) and
   (.services.backup.cap_add | index("DAC_OVERRIDE") | not) and
+  .services.backup.cap_add == ["DAC_READ_SEARCH"] and
   (.services.restore.cap_add | index("DAC_OVERRIDE") != null) and
+  ([.services.backup.volumes[] | select(.target == "/source/exports" or (.target | startswith("/source/hermes-"))) | .read_only] | all) and
+  ([.services.restore.volumes[] | select(.target == "/source/exports" or (.target | startswith("/source/hermes-"))) | .read_only] | any | not) and
+  ([.services.restore.volumes[] | select(.target == "/backups") | .read_only] == [true]) and
   .services.api.environment.APP_ENV == "production" and
   .services.api.environment.WHATSAPP_BACKEND == "disabled" and
   .services.api.environment.AGENT_BACKEND == "disabled" and
   .services.api.environment.BUMPA_BACKEND == "disabled" and
+  .services.worker.environment.ASYNC_RUNTIME_ENABLED == "true" and
+  .services.scheduler.environment.ASYNC_RUNTIME_ENABLED == "true" and
+  .services.worker.healthcheck.test == ["CMD", "python", "-m", "app.jobs.health", "worker"] and
+  .services.scheduler.healthcheck.test == ["CMD", "python", "-m", "app.jobs.health", "scheduler"] and
+  .services.worker.cap_drop == ["ALL"] and .services.scheduler.cap_drop == ["ALL"] and
   (.services.api.environment | has("MIGRATION_DATABASE_URL") | not)
-' <<<"$rendered" >/dev/null
+' <<<"$rendered" >/dev/null; then
+  jq '{
+    caddy: (.services.caddy | {image, build, cap_drop, cap_add, security_opt}),
+    caddy_init: (.services["caddy-init"] | {image, build, network_mode}),
+    postgres: (.services.postgres | {image, build, stop_grace_period}),
+    backup: (.services.backup | {image, build, networks, cap_add, environment}),
+    restore: (.services.restore | {image, build, networks, cap_add}),
+    api: (.services.api | {environment}),
+    worker: (.services.worker | {environment, healthcheck, cap_drop}),
+    scheduler: (.services.scheduler | {environment, healthcheck, cap_drop})
+  }' <<<"$rendered" >&2
+  exit 1
+fi
+
+if ! jq --exit-status '
+  .services.hermes.image == "ghcr.io/makriman/bumpabestie-hermes@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" and
+  .services.hermes.build == null and
+  .services.hermes.cap_drop == ["ALL"] and .services.hermes.read_only == true and
+  .services.hermes.stop_grace_period == "1m0s" and
+  (.services.hermes.ports == null) and (.services.hermes.networks | keys == ["app", "egress"]) and
+  .services.hermes.environment.ANTHROPIC_API_KEY_FILE == "/run/secrets/hermes_anthropic_api_key" and
+  (.services.hermes.environment | has("ANTHROPIC_API_KEY") | not) and
+  (.services.hermes.secrets | length == 1) and
+  .services.hermes.secrets[0].source == "hermes_anthropic_api_key" and
+  .services.hermes.secrets[0].target == "hermes_anthropic_api_key" and
+  .services.hermes.secrets[0].uid == "0" and .services.hermes.secrets[0].gid == "0" and
+  .services.hermes.secrets[0].mode == "0400" and
+  .services["hermes-import"].image == .services.hermes.image and
+  .services["hermes-import"].network_mode == "none" and
+  .services["hermes-import"].read_only == true and
+  (.services["hermes-import"].networks == null) and
+  (.services["hermes-import"].secrets == null) and
+  .services["hermes-staging-init"].image == .services.api.image and
+  .services["hermes-staging-init"].network_mode == "none" and
+  .services["app-secrets-init"].image == .services.api.image and
+  .services["app-secrets-init"].network_mode == "none" and
+  .services["app-secrets-init"].read_only == true and
+  .services["app-secrets-init"].cap_drop == ["ALL"] and
+  .services["app-secrets-init"].cap_add == ["CHOWN", "DAC_OVERRIDE", "FOWNER"] and
+  (.services["app-secrets-init"].secrets | length == 3) and
+  ([.services["app-secrets-init"].secrets[] | .source] | sort == ["meta_app_secret", "meta_system_user_access_token", "meta_webhook_verify_token"]) and
+  .services.api.depends_on["hermes-staging-init"].condition == "service_completed_successfully" and
+  .services.api.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
+  .services.worker.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
+  .services.api.environment.META_APP_SECRET_FILE == "/run/runtime-secrets/meta_app_secret" and
+  .services.worker.environment.META_SYSTEM_USER_ACCESS_TOKEN_FILE == "/run/runtime-secrets/meta_system_user_access_token" and
+  (.services.api.secrets == null) and (.services.worker.secrets == null) and
+  ([.services.api.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services.worker.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets" and .read_only != true)] | length == 1) and
+  ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .target == "/usr/local/bin/init-runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services.api.volumes[] | select(.target == "/run/runtime-secrets") | .source] == [.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets") | .source]) and
+  (.services.scheduler.secrets == null) and (.services.migrate.secrets == null) and
+  ([.services.backup.volumes[] | select(.target == "/source/hermes-runtime") | .source] == ["hermes_data"]) and
+  ([.services.backup.volumes[] | select(.target == "/source/hermes-staging") | .source] == ["hermes_staging_data"]) and
+  ([.services.backup.volumes[] | select(.target | startswith("/source/hermes-"))] | length == 2) and
+  ([.services[]?.volumes[]? | select(.source == "/var/run/docker.sock")] | length == 0)
+' <<<"$rendered" >/dev/null; then
+  jq '{
+    hermes: (.services.hermes | {image, build, cap_drop, read_only, stop_grace_period, ports, networks, environment, secrets}),
+    hermes_import: (.services["hermes-import"] | {image, network_mode, networks, read_only, secrets, volumes}),
+    hermes_staging_init: (.services["hermes-staging-init"] | {image, network_mode, networks, read_only}),
+    app_secrets_init: (.services["app-secrets-init"] | {image, network_mode, networks, read_only, cap_drop, cap_add, secrets, volumes}),
+    api_meta_file: .services.api.environment.META_APP_SECRET_FILE,
+    worker_meta_file: .services.worker.environment.META_SYSTEM_USER_ACCESS_TOKEN_FILE,
+    api_volumes: .services.api.volumes,
+    worker_volumes: .services.worker.volumes,
+    backup_volumes: .services.backup.volumes
+  }' <<<"$rendered" >&2
+  exit 1
+fi
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
 role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh | cut -d: -f1)"
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
+reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
+# The following patterns intentionally match literal shell source.
+# shellcheck disable=SC2016
+application_start_line="$(grep -n -F '"${compose[@]}" --profile async up -d --wait' scripts/deploy.sh | tail -1 | cut -d: -f1)"
 if [[ -z "$stop_line" || -z "$backup_line" || -z "$quiesced_line" \
   || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_line" ]]; then
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
@@ -106,6 +249,11 @@ if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migr
   echo "Deployment does not reconcile the application role before migrations" >&2
   exit 1
 fi
+if [[ -z "$reconcile_line" || -z "$application_start_line" \
+  || "$migrate_line" -ge "$reconcile_line" || "$reconcile_line" -ge "$application_start_line" ]]; then
+  echo "Deployment does not reconcile staged Hermes profiles between migration and application startup" >&2
+  exit 1
+fi
 if grep -Fq "export CADDY_IMAGE=\"\$previous_caddy_image\"" scripts/deploy.sh; then
   echo "Deployment attempts a backward infrastructure rollback" >&2
   exit 1
@@ -113,7 +261,31 @@ fi
 grep -Fq -- '--exit-code-from caddy-init caddy-init' scripts/deploy.sh
 grep -Fq "docker image inspect --format '{{json .RepoDigests}}'" scripts/deploy.sh
 grep -Fq "\"\${compose[@]}\" --profile tools run --rm --no-deps" scripts/deploy.sh
-grep -Fq -- '--profile tools run --rm --no-deps backup' infra/systemd/bumpabestie-backup.service
+grep -Fq 'ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh' infra/systemd/bumpabestie-backup.service
+# Match literal shell source rather than expanding this test process's array.
+# shellcheck disable=SC2016
+grep -Fq 'stop --timeout 60 "${running_services[@]}"' scripts/scheduled_backup.sh
+grep -Fq 'run --rm --no-deps backup' scripts/scheduled_backup.sh
+grep -Fq 'ExecStartPost=/opt/bumpabestie/scripts/offsite_backup.sh --env-file /opt/bumpabestie/.env.production' infra/systemd/bumpabestie-backup.service
+if grep -Fq 'EnvironmentFile=' infra/systemd/bumpabestie-backup.service; then
+  echo "Backup unit must not export the application environment to the off-host hook" >&2
+  exit 1
+fi
+grep -Fq -- '--profile async up -d --wait' scripts/deploy.sh
+# Match literal deploy-script variables.
+# shellcheck disable=SC2016
+grep -Fq 'cmp --silent "$repository_unit" "$installed_unit"' scripts/deploy.sh
+# These assertions intentionally match literal shell source.
+# shellcheck disable=SC2016
+grep -Fq 'verify_image_revision "$HERMES_IMAGE" "$deploy_commit" hermes' scripts/deploy.sh
+# shellcheck disable=SC2016
+grep -Fq 'previous_hermes_image="$(running_image hermes)"' scripts/deploy.sh
+# shellcheck disable=SC2016
+grep -Fq 'export HERMES_IMAGE="$previous_hermes_image"' scripts/deploy.sh
+if grep -Fq 'rm -f worker scheduler 2>/dev/null || true' scripts/deploy.sh; then
+  # The rollback-only cleanup is allowed; the forward deployment must not remove them.
+  test "$(grep -Fc 'rm -f worker scheduler 2>/dev/null || true' scripts/deploy.sh)" = 1
+fi
 
 test "$(
   jq --raw-output '.services | to_entries[] | select(.value.ports != null) | .key' <<<"$rendered"
@@ -132,11 +304,51 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+awk '
+  /^ASYNC_RUNTIME_ENABLED=/ { print "ASYNC_RUNTIME_ENABLED=false"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted a disabled async runtime" >&2
+  exit 1
+fi
+
+awk '
+  /^ASYNC_HEARTBEAT_TTL_SECONDS=/ { print "ASYNC_HEARTBEAT_TTL_SECONDS=5"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted an unsafe async heartbeat TTL" >&2
+  exit 1
+fi
+
 cp "$contract_env" "$duplicate_env"
 printf '%s\n' 'API_IMAGE=ghcr.io/makriman/bumpabestie-api:latest' >> "$duplicate_env"
 chmod 0600 "$duplicate_env"
 if ./scripts/validate_env.sh "$duplicate_env" production >/dev/null 2>&1; then
   echo "Production validation accepted a duplicate override" >&2
+  exit 1
+fi
+
+awk '
+  /^WHATSAPP_BACKEND=/ { print "WHATSAPP_BACKEND=meta"; next }
+  /^AGENT_BACKEND=/ { print "AGENT_BACKEND=hermes"; next }
+  /^BUMPA_BACKEND=/ { print "BUMPA_BACKEND=bumpa"; next }
+  { print }
+' "$contract_env" > "$live_env"
+chmod 0600 "$live_env"
+./scripts/validate_env.sh "$live_env" production >/dev/null
+
+awk '
+  /^HERMES_PROFILE_PORT_START=/ { print "HERMES_PROFILE_PORT_START=9000"; next }
+  /^HERMES_PROFILE_PORT_END=/ { print "HERMES_PROFILE_PORT_END=8999"; next }
+  { print }
+' "$live_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted an inverted Hermes profile port range" >&2
   exit 1
 fi
 

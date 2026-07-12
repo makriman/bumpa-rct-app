@@ -23,6 +23,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 RUN addgroup --system app && adduser --system --ingroup app app
 COPY --from=builder --chown=app:app /app /app
+COPY --chmod=0555 scripts/init_runtime_secrets.sh /usr/local/bin/init-runtime-secrets
 RUN mkdir -p /app/.data/exports && chown -R app:app /app
 USER app
 EXPOSE 8000

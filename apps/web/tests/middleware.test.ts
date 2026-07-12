@@ -80,4 +80,75 @@ describe("host routing", () => {
     );
     expect(response.headers.get("location")).toBeNull();
   });
+
+  it("rejects an SME owner from the research surface", async () => {
+    process.env.NEXT_PUBLIC_DEMO_MODE = "false";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            platform_roles: [],
+            memberships: [{ role: "owner", status: "active" }],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const response = await middleware(
+      new NextRequest("https://research.bumpabestie.com/research/questions", {
+        headers: {
+          host: "research.bumpabestie.com",
+          cookie: "bb_session=signed-token",
+        },
+      }),
+    );
+    expect(response.headers.get("location")).toContain("/login");
+  });
+
+  it("allows a researcher onto the research surface", async () => {
+    process.env.NEXT_PUBLIC_DEMO_MODE = "false";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ platform_roles: ["researcher"] }), {
+          status: 200,
+        }),
+      ),
+    );
+    const response = await middleware(
+      new NextRequest("https://research.bumpabestie.com/research/reports", {
+        headers: {
+          host: "research.bumpabestie.com",
+          cookie: "bb_session=signed-token",
+        },
+      }),
+    );
+    expect(response.headers.get("location")).toBeNull();
+  });
+
+  it("requires an active tenant membership on the user surface", async () => {
+    process.env.NEXT_PUBLIC_DEMO_MODE = "false";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            platform_roles: [],
+            memberships: [{ role: "owner", status: "disabled" }],
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const response = await middleware(
+      new NextRequest("https://bumpabestie.com/chat", {
+        headers: {
+          host: "bumpabestie.com",
+          cookie: "bb_session=signed-token",
+        },
+      }),
+    );
+    expect(response.headers.get("location")).toContain("/login?next=%2Fchat");
+  });
 });

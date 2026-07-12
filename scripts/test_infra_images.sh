@@ -11,25 +11,31 @@ restore_data="bumpabestie-infra-restore-$suffix"
 backup_data="bumpabestie-infra-backups-$suffix"
 exports_data="bumpabestie-infra-exports-$suffix"
 hermes_data="bumpabestie-infra-hermes-$suffix"
+hermes_staging="bumpabestie-infra-hermes-staging-$suffix"
 caddy_data="bumpabestie-infra-caddy-data-$suffix"
 caddy_config="bumpabestie-infra-caddy-config-$suffix"
 primary="bumpabestie-infra-primary-$suffix"
 restore="bumpabestie-infra-restore-$suffix"
 edge="bumpabestie-infra-edge-$suffix"
+hermes_runtime="bumpabestie-infra-hermes-runtime-$suffix"
+hermes_secret_dir="$(mktemp -d)"
 
 postgres_image="bumpabestie-postgres:infra-test"
 backup_image="bumpabestie-backup:infra-test"
 caddy_image="bumpabestie-caddy:infra-test"
+hermes_image="bumpabestie-hermes:infra-test"
 legacy_postgres_image="postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7"
 database_password="infra-test-postgres-only"
 
 cleanup() {
   result=$?
-  docker rm -f "$primary" "$restore" "$edge" >/dev/null 2>&1 || true
+  docker rm -f "$primary" "$restore" "$edge" "$hermes_runtime" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   docker volume rm -f \
     "$primary_data" "$restore_data" "$backup_data" \
-    "$exports_data" "$hermes_data" "$caddy_data" "$caddy_config" >/dev/null 2>&1 || true
+    "$exports_data" "$hermes_data" "$hermes_staging" \
+    "$caddy_data" "$caddy_config" >/dev/null 2>&1 || true
+  rm -rf "$hermes_secret_dir"
   exit "$result"
 }
 trap cleanup EXIT
@@ -38,10 +44,13 @@ if [[ "${SKIP_INFRA_BUILD:-false}" != "true" ]]; then
   docker build --target runtime --tag "$postgres_image" --file infra/postgres/Dockerfile .
   docker build --target backup --tag "$backup_image" --file infra/postgres/Dockerfile .
   docker build --tag "$caddy_image" --file infra/caddy/Dockerfile .
+  docker build --target runtime --tag "$hermes_image" --file infra/hermes/Dockerfile .
 fi
 
 docker network create "$network" >/dev/null
-for volume in "$primary_data" "$restore_data" "$backup_data" "$exports_data" "$hermes_data" "$caddy_data" "$caddy_config"; do
+for volume in \
+  "$primary_data" "$restore_data" "$backup_data" "$exports_data" \
+  "$hermes_data" "$hermes_staging" "$caddy_data" "$caddy_config"; do
   docker volume create "$volume" >/dev/null
 done
 
@@ -53,6 +62,207 @@ docker run --rm \
   --volume "$hermes_data:/artifacts" \
   --entrypoint sh "$backup_image" \
   -c 'mkdir -p /artifacts/profile && printf expected-hermes > /artifacts/profile/expected.txt && chmod -R a+rX /artifacts'
+
+# Exercise the derived Hermes image without network access or a provider call.
+# The profile fixture matches the control-plane handoff contract and contains
+# only inert test credentials.
+docker run --rm \
+  --volume "$hermes_staging:/staged" \
+  --entrypoint sh "$backup_image" -eu -c '
+    profile=/staged/profiles/tenant_contract
+    mkdir -p "$profile"
+    : > "$profile/.no-skills"
+    printf "%s\n" \
+      "API_SERVER_ENABLED=true" \
+      "API_SERVER_HOST=0.0.0.0" \
+      "API_SERVER_PORT=8799" \
+      "API_SERVER_KEY=contract-profile-key-000000000000000000000000" \
+      > "$profile/.env"
+    printf "%s\n" \
+      "model:" \
+      "  provider: anthropic" \
+      "  default: claude-sonnet-5" \
+      "agent:" \
+      "  disabled_toolsets:" \
+      "    - terminal" \
+      "security:" \
+      "  allow_private_urls: false" \
+      > "$profile/config.yaml"
+    printf "%s\n" "Contract-only isolated tenant profile." > "$profile/SOUL.md"
+    printf "%s\n" "must-not-be-imported" > "$profile/unexpected.txt"
+    chmod 0700 /staged /staged/profiles "$profile"
+    chmod 0600 "$profile"/* "$profile"/.no-skills "$profile"/.env
+  '
+
+imported="$(
+  docker run --rm \
+    --network none \
+    --read-only \
+    --tmpfs /tmp:rw,exec,nosuid,nodev \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE \
+    --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env HERMES_STAGING_ROOT=/staged/profiles \
+    --env HERMES_RUNTIME_ROOT=/opt/data/profiles \
+    --volume "$hermes_staging:/staged:ro" \
+    --volume "$hermes_data:/opt/data" \
+    --entrypoint /usr/local/bin/bumpabestie-hermes-import \
+    "$hermes_image"
+)"
+test "$imported" = 1
+docker run --rm \
+  --volume "$hermes_data:/opt/data:ro" \
+  --entrypoint sh "$hermes_image" -eu -c '
+    profile=/opt/data/profiles/tenant_contract
+    test "$(stat -c %a "$profile")" = 700
+    test "$(stat -c %a "$profile/.env")" = 600
+    test "$(stat -c %U "$profile")" = hermes
+    test -f "$profile/.no-skills"
+    test -f "$profile/config.yaml"
+    test -f "$profile/SOUL.md"
+    test ! -e "$profile/unexpected.txt"
+  '
+
+docker run --rm \
+  --volume "$hermes_staging:/staged" \
+  --entrypoint sh "$backup_image" -eu -c '
+    mkdir -p /staged/profiles/tenant_rejected
+    ln -s /etc/passwd /staged/profiles/tenant_rejected/config.yaml
+  '
+if docker run --rm \
+  --network none \
+  --read-only \
+  --tmpfs /tmp:rw,exec,nosuid,nodev \
+  --cap-drop ALL \
+  --cap-add CHOWN \
+  --cap-add DAC_OVERRIDE \
+  --cap-add FOWNER \
+  --security-opt no-new-privileges:true \
+  --env HERMES_STAGING_ROOT=/staged/profiles \
+  --env HERMES_RUNTIME_ROOT=/opt/data/profiles \
+  --volume "$hermes_staging:/staged:ro" \
+  --volume "$hermes_data:/opt/data" \
+  --entrypoint /usr/local/bin/bumpabestie-hermes-import \
+  "$hermes_image" >"$hermes_secret_dir/rejected.out" 2>&1; then
+  echo "Hermes importer accepted a symlinked profile" >&2
+  exit 1
+fi
+grep -Fx 'Hermes staging profiles must not contain symlinks' "$hermes_secret_dir/rejected.out" >/dev/null
+docker run --rm \
+  --volume "$hermes_staging:/staged" \
+  --entrypoint sh "$backup_image" -c 'rm -rf /staged/profiles'
+test "$(
+  docker run --rm \
+    --network none \
+    --read-only \
+    --tmpfs /tmp:rw,exec,nosuid,nodev \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE \
+    --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env HERMES_STAGING_ROOT=/staged/profiles \
+    --env HERMES_RUNTIME_ROOT=/opt/data/profiles \
+    --volume "$hermes_staging:/staged:ro" \
+    --volume "$hermes_data:/opt/data" \
+    --entrypoint /usr/local/bin/bumpabestie-hermes-import \
+    "$hermes_image"
+)" = 0
+docker run --rm \
+  --volume "$hermes_staging:/staged" \
+  --entrypoint sh "$backup_image" -eu -c '
+    mkdir -p /staged/control-plane
+    printf "%s" expected-hermes-staging > /staged/control-plane/expected.txt
+    chmod 0700 /staged /staged/control-plane
+    chmod 0600 /staged/control-plane/expected.txt
+  '
+
+if docker run --rm "$hermes_image" sleep 0 >"$hermes_secret_dir/missing.out" 2>&1; then
+  echo "Hermes entrypoint accepted a missing Anthropic secret" >&2
+  exit 1
+fi
+grep -Fx 'Hermes Anthropic secret file is unavailable' "$hermes_secret_dir/missing.out" >/dev/null
+printf '%s' 'invalid-contract-secret-material-000000' > "$hermes_secret_dir/invalid"
+chmod 0600 "$hermes_secret_dir/invalid"
+if docker run --rm \
+  --volume "$hermes_secret_dir/invalid:/run/secrets/hermes_anthropic_api_key:ro" \
+  "$hermes_image" sleep 0 >"$hermes_secret_dir/invalid.out" 2>&1; then
+  echo "Hermes entrypoint accepted an invalid Anthropic secret" >&2
+  exit 1
+fi
+grep -Fx 'Hermes Anthropic secret is invalid' "$hermes_secret_dir/invalid.out" >/dev/null
+if grep -Fq 'invalid-contract-secret-material' "$hermes_secret_dir/invalid.out"; then
+  echo "Hermes entrypoint exposed rejected secret material" >&2
+  exit 1
+fi
+
+printf '%s' 'sk-ant-contract-placeholder-never-sent-000000000000000' \
+  > "$hermes_secret_dir/anthropic"
+chmod 0600 "$hermes_secret_dir/anthropic"
+docker run --detach \
+  --name "$hermes_runtime" \
+  --network none \
+  --read-only \
+  --tmpfs /run:rw,exec,nosuid,nodev \
+  --tmpfs /tmp:rw,exec,nosuid,nodev \
+  --cap-drop ALL \
+  --cap-add CHOWN \
+  --cap-add DAC_OVERRIDE \
+  --cap-add FOWNER \
+  --cap-add SETGID \
+  --cap-add SETUID \
+  --security-opt no-new-privileges:true \
+  --env ANTHROPIC_API_KEY_FILE=/run/secrets/hermes_anthropic_api_key \
+  --env HERMES_DASHBOARD=0 \
+  --volume "$hermes_secret_dir/anthropic:/run/secrets/hermes_anthropic_api_key:ro" \
+  --volume "$hermes_data:/opt/data" \
+  "$hermes_image" sleep infinity >/dev/null
+for _attempt in {1..60}; do
+  if docker exec "$hermes_runtime" sh -c \
+    "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"; then
+    break
+  fi
+  if [[ "$(docker inspect --format '{{.State.Running}}' "$hermes_runtime")" != true ]]; then
+    docker logs "$hermes_runtime" >&2
+    exit 1
+  fi
+  sleep 1
+done
+docker exec "$hermes_runtime" sh -c \
+  "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"
+docker exec "$hermes_runtime" sh -eu -c '
+  test -d /run/service/gateway-tenant_contract
+  hermes -p tenant_contract gateway start >/dev/null
+'
+for _attempt in {1..60}; do
+  if docker exec "$hermes_runtime" sh -eu -c '
+    /command/s6-svstat /run/service/gateway-tenant_contract | grep -q "^up"
+    curl --fail --silent --show-error \
+      --header "Authorization: Bearer contract-profile-key-000000000000000000000000" \
+      --max-time 3 \
+      http://127.0.0.1:8799/health/detailed >/dev/null 2>&1
+  '; then
+    break
+  fi
+  sleep 1
+done
+docker exec "$hermes_runtime" sh -eu -c '
+  /command/s6-svstat /run/service/gateway-tenant_contract | grep -q "^up"
+  curl --fail --silent --show-error \
+    --header "Authorization: Bearer contract-profile-key-000000000000000000000000" \
+    --max-time 3 \
+    http://127.0.0.1:8799/health/detailed >/dev/null
+'
+test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$hermes_runtime")" = true
+test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$hermes_runtime")" = none
+if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$hermes_runtime" | \
+  grep -q '^ANTHROPIC_API_KEY='; then
+  echo "Hermes secret leaked into Docker configuration" >&2
+  exit 1
+fi
+docker rm -f "$hermes_runtime" >/dev/null
 
 start_postgres() {
   local name="$1"
@@ -106,6 +316,7 @@ docker run --rm \
   --network "$network" \
   --cap-drop ALL \
   --cap-add CHOWN \
+  --cap-add DAC_READ_SEARCH \
   --cap-add FOWNER \
   --cap-add SETGID \
   --cap-add SETUID \
@@ -121,8 +332,10 @@ docker run --rm \
   --env BACKUP_IMAGE_TAG=infra-test \
   --env BACKUP_IMAGE_REF=bumpabestie-backup@sha256:infra-test \
   --volume "$backup_data:/backups" \
-  --volume "$exports_data:/source/exports" \
-  --volume "$hermes_data:/source/hermes" \
+  --volume "$exports_data:/source/exports:ro" \
+  --volume "$hermes_data:/source/hermes-runtime:ro" \
+  --volume "$hermes_staging:/source/hermes-staging:ro" \
+  --entrypoint /usr/local/bin/backup.sh \
   "$backup_image"
 
 backup_path="$(
@@ -130,14 +343,18 @@ backup_path="$(
     -c 'find /backups -mindepth 1 -maxdepth 1 -type d | sort | tail -1'
 )"
 test -n "$backup_path"
+docker run --rm --volume "$backup_data:/backups:ro" --entrypoint sh "$backup_image" -eu -c \
+  "test -f '$backup_path/hermes-runtime.tar.gz' && test -f '$backup_path/hermes-staging.tar.gz'"
 manifest_json="$(
   docker run --rm --volume "$backup_data:/backups:ro" --entrypoint sh "$backup_image" -c \
     "cd '$backup_path' && sha256sum --check SHA256SUMS >/dev/null && cat manifest.json"
 )"
 jq --exit-status \
-  '.format == 2 and .postgres.server_version_num == "160014" and
+  '.format == 3 and .postgres.server_version_num == "160014" and
    .application_revision == "infra-test" and .backup_image_tag == "infra-test" and
-   .backup_image_ref == "bumpabestie-backup@sha256:infra-test"' \
+   .backup_image_ref == "bumpabestie-backup@sha256:infra-test" and
+   (.includes | index("hermes_runtime") != null) and
+   (.includes | index("hermes_staging") != null)' \
   <<<"$manifest_json" >/dev/null
 
 docker run --rm \
@@ -146,6 +363,10 @@ docker run --rm \
   -c 'rm -rf /artifacts/* && mkdir /artifacts/stale && printf stale > /artifacts/stale/value && chown -R 1000:1000 /artifacts && chmod 0700 /artifacts /artifacts/stale'
 docker run --rm \
   --volume "$hermes_data:/artifacts" \
+  --entrypoint sh "$backup_image" \
+  -c 'rm -rf /artifacts/* && mkdir /artifacts/stale && printf stale > /artifacts/stale/value && chown -R 1000:1000 /artifacts && chmod 0700 /artifacts /artifacts/stale'
+docker run --rm \
+  --volume "$hermes_staging:/artifacts" \
   --entrypoint sh "$backup_image" \
   -c 'rm -rf /artifacts/* && mkdir /artifacts/stale && printf stale > /artifacts/stale/value && chown -R 1000:1000 /artifacts && chmod 0700 /artifacts /artifacts/stale'
 
@@ -175,7 +396,8 @@ docker run --rm \
   --env BACKUP_PATH="$backup_path" \
   --volume "$backup_data:/backups:ro" \
   --volume "$exports_data:/source/exports" \
-  --volume "$hermes_data:/source/hermes" \
+  --volume "$hermes_data:/source/hermes-runtime" \
+  --volume "$hermes_staging:/source/hermes-staging" \
   --entrypoint /usr/local/bin/restore.sh \
   "$backup_image" >/dev/null
 
@@ -234,6 +456,8 @@ docker run --rm --volume "$exports_data:/artifacts:ro" --entrypoint sh "$backup_
   -c 'test "$(cat /artifacts/reports/expected.txt)" = expected-export && test ! -e /artifacts/stale'
 docker run --rm --volume "$hermes_data:/artifacts:ro" --entrypoint sh "$backup_image" \
   -c 'test "$(cat /artifacts/profile/expected.txt)" = expected-hermes && test ! -e /artifacts/stale'
+docker run --rm --volume "$hermes_staging:/artifacts:ro" --entrypoint sh "$backup_image" \
+  -c 'test "$(cat /artifacts/control-plane/expected.txt)" = expected-hermes-staging && test ! -e /artifacts/stale'
 
 docker run --rm --entrypoint gosu "$postgres_image" --version | grep -F 'go1.26.5' >/dev/null
 docker run --rm --entrypoint postgres "$postgres_image" --version | grep -F 'PostgreSQL) 16.14' >/dev/null

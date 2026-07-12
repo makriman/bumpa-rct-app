@@ -24,8 +24,8 @@ class ProviderOrder:
     status: str
     payment_status: str
     currency_code: str
-    total_amount: Decimal
-    order_date: datetime
+    total_amount: Decimal | None
+    order_date: datetime | None
     payload: dict[str, Any]
 
 

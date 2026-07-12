@@ -17,6 +17,15 @@ const ALLOWED_ROOTS = new Set([
   "bumpa",
   "mcp",
 ]);
+const MAX_REQUEST_BYTES = 1024 * 1024;
+// These application-level headers are required by specific API contracts. Keep
+// this list deliberately narrow: arbitrary browser headers (including
+// Authorization and hop-by-hop transport headers) must never cross the BFF.
+const FORWARDED_APPLICATION_HEADERS = [
+  "idempotency-key",
+  "x-tenant-id",
+  "x-access-reason",
+] as const;
 
 async function proxy(
   request: NextRequest,
@@ -38,6 +47,24 @@ async function proxy(
   const headers = new Headers({ Accept: "application/json" });
   const cookie = request.headers.get("cookie");
   if (cookie) headers.set("cookie", cookie);
+  // Caddy is the only public listener and normalises these headers before the
+  // request reaches Next. Preserve them across the internal BFF hop so API-side
+  // abuse controls rate-limit the actual edge client, not the shared web pod.
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  if (forwardedFor) headers.set("x-forwarded-for", forwardedFor);
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) headers.set("x-real-ip", realIp);
+  // Preserve the browser's source metadata. Production cookie-authenticated
+  // mutations are validated by the API, so the private BFF hop must not erase
+  // an attacker-controlled Origin and accidentally turn it into trusted traffic.
+  const origin = request.headers.get("origin");
+  if (origin) headers.set("origin", origin);
+  const referer = request.headers.get("referer");
+  if (referer) headers.set("referer", referer);
+  for (const name of FORWARDED_APPLICATION_HEADERS) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
   const correlationId =
     request.headers.get("x-correlation-id") ?? crypto.randomUUID();
   headers.set("x-correlation-id", correlationId);
@@ -48,10 +75,17 @@ async function proxy(
       request.headers.get("content-type") ?? "application/json",
     );
   try {
+    const body = hasBody ? await request.arrayBuffer() : undefined;
+    if (body && body.byteLength > MAX_REQUEST_BYTES) {
+      return NextResponse.json(
+        { detail: "Request body is too large" },
+        { status: 413, headers: { "x-correlation-id": correlationId } },
+      );
+    }
     const upstream = await fetch(target, {
       method: request.method,
       headers,
-      body: hasBody ? await request.text() : undefined,
+      body,
       cache: "no-store",
       redirect: "manual",
     });
@@ -66,6 +100,14 @@ async function proxy(
     });
     const setCookie = upstream.headers.get("set-cookie");
     if (setCookie) response.headers.set("set-cookie", setCookie);
+    for (const name of [
+      "content-disposition",
+      "retry-after",
+      "www-authenticate",
+    ]) {
+      const value = upstream.headers.get(name);
+      if (value) response.headers.set(name, value);
+    }
     return response;
   } catch {
     return NextResponse.json(

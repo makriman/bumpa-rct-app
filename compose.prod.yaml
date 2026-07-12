@@ -1,4 +1,24 @@
 services:
+  app-secrets-init:
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
+    build: !reset null
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/init-runtime-secrets"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    volumes:
+      - runtime_app_secrets:/runtime-secrets
+      - ./scripts/init_runtime_secrets.sh:/usr/local/bin/init-runtime-secrets:ro
+    secrets:
+      - meta_app_secret
+      - meta_system_user_access_token
+      - meta_webhook_verify_token
+    restart: "no"
+
   caddy-init:
     image: ${CADDY_IMAGE:?Set immutable CADDY_IMAGE}
     build: !reset null
@@ -37,7 +57,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 768M
     logging:
       driver: json-file
       options:
@@ -59,16 +79,31 @@ services:
       SEED_DEMO_DATA: "false"
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+      ASYNC_RUNTIME_ENABLED: "true"
+      META_APP_SECRET: ""
+      META_APP_SECRET_FILE: /run/runtime-secrets/meta_app_secret
+      META_SYSTEM_USER_ACCESS_TOKEN: ""
+      META_SYSTEM_USER_ACCESS_TOKEN_FILE: /run/runtime-secrets/meta_system_user_access_token
+      META_WEBHOOK_VERIFY_TOKEN: ""
+      META_WEBHOOK_VERIFY_TOKEN_FILE: /run/runtime-secrets/meta_webhook_verify_token
+      HERMES_PROFILE_ROOT: /data/hermes/profiles
     read_only: true
     tmpfs:
       - /tmp
     security_opt:
       - no-new-privileges:true
     cap_drop: ["ALL"]
+    depends_on:
+      app-secrets-init:
+        condition: service_completed_successfully
+      hermes-staging-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime_app_secrets:/run/runtime-secrets:ro
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 1G
     logging:
       driver: json-file
       options:
@@ -89,14 +124,26 @@ services:
       SEED_DEMO_DATA: "false"
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+      ASYNC_RUNTIME_ENABLED: "true"
+      META_APP_SECRET: ""
+      META_APP_SECRET_FILE: /run/runtime-secrets/meta_app_secret
+      META_SYSTEM_USER_ACCESS_TOKEN: ""
+      META_SYSTEM_USER_ACCESS_TOKEN_FILE: /run/runtime-secrets/meta_system_user_access_token
+      META_WEBHOOK_VERIFY_TOKEN: ""
+      META_WEBHOOK_VERIFY_TOKEN_FILE: /run/runtime-secrets/meta_webhook_verify_token
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    depends_on:
+      app-secrets-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime_app_secrets:/run/runtime-secrets:ro
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 1G
 
   scheduler:
     image: ${API_IMAGE:?Set immutable API_IMAGE}
@@ -112,6 +159,10 @@ services:
       SEED_DEMO_DATA: "false"
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+      ASYNC_RUNTIME_ENABLED: "true"
+      WHATSAPP_BACKEND: disabled
+      BUMPA_BACKEND: disabled
+      AGENT_BACKEND: disabled
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
@@ -119,7 +170,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
 
   migrate:
     image: ${API_IMAGE:?Set immutable API_IMAGE}
@@ -129,6 +180,90 @@ services:
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+      WHATSAPP_BACKEND: disabled
+      BUMPA_BACKEND: disabled
+      AGENT_BACKEND: disabled
+
+  hermes:
+    image: ${HERMES_IMAGE:?Set immutable HERMES_IMAGE}
+    build: !reset null
+    command: ["sleep", "infinity"]
+    environment:
+      ANTHROPIC_API_KEY_FILE: /run/secrets/hermes_anthropic_api_key
+      HERMES_DASHBOARD: "0"
+    volumes:
+      - hermes_data:/opt/data
+    secrets:
+      - source: hermes_anthropic_api_key
+        target: hermes_anthropic_api_key
+        uid: "0"
+        gid: "0"
+        mode: 0400
+    networks:
+      - app
+      - egress
+    read_only: true
+    tmpfs:
+      - /run:rw,exec,nosuid,nodev
+      - /tmp:rw,exec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    healthcheck:
+      test: ["CMD-SHELL", "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+    restart: unless-stopped
+    stop_grace_period: 60s
+
+  hermes-import:
+    image: ${HERMES_IMAGE:?Set immutable HERMES_IMAGE}
+    build: !reset null
+    entrypoint: ["/usr/local/bin/bumpabestie-hermes-import"]
+    environment:
+      HERMES_STAGING_ROOT: /staged/profiles
+      HERMES_RUNTIME_ROOT: /opt/data/profiles
+    volumes:
+      - hermes_staging_data:/staged:ro
+      - hermes_data:/opt/data
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    restart: "no"
+
+  hermes-staging-init:
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
+    build: !reset null
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["chown -R 100:101 /staged && chmod 0700 /staged"]
+    volumes:
+      - hermes_staging_data:/staged
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    restart: "no"
 
   postgres:
     image: ${POSTGRES_IMAGE:?Set immutable POSTGRES_IMAGE}
@@ -142,7 +277,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 2G
     logging:
       driver: json-file
       options:
@@ -153,7 +288,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 512M
     logging:
       driver: json-file
       options:
@@ -163,6 +298,7 @@ services:
   backup:
     image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     build: !reset null
+    entrypoint: ["/usr/local/bin/backup.sh"]
     environment:
       APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
       BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:?Set immutable INFRA_IMAGE_TAG}
@@ -170,7 +306,12 @@ services:
     security_opt:
       - no-new-privileges:true
     cap_drop: ["ALL"]
-    cap_add: ["CHOWN", "FOWNER", "SETGID", "SETUID"]
+    cap_add: ["DAC_READ_SEARCH"]
+    volumes: !override
+      - backups_data:/backups
+      - exports_data:/source/exports:ro
+      - hermes_data:/source/hermes-runtime:ro
+      - hermes_staging_data:/source/hermes-staging:ro
     deploy:
       resources:
         limits:
@@ -192,6 +333,11 @@ services:
       - no-new-privileges:true
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
+    volumes: !override
+      - backups_data:/backups:ro
+      - exports_data:/source/exports
+      - hermes_data:/source/hermes-runtime
+      - hermes_staging_data:/source/hermes-staging
     deploy:
       resources:
         limits:
@@ -201,3 +347,16 @@ services:
       options:
         max-size: 20m
         max-file: "5"
+
+secrets:
+  meta_app_secret:
+    file: ${SECRETS_DIR:-./.secrets}/meta_app_secret
+  meta_system_user_access_token:
+    file: ${SECRETS_DIR:-./.secrets}/meta_system_user_access_token
+  meta_webhook_verify_token:
+    file: ${SECRETS_DIR:-./.secrets}/meta_webhook_verify_token
+  hermes_anthropic_api_key:
+    file: ${SECRETS_DIR:-./.secrets}/hermes_anthropic_api_key
+
+volumes:
+  runtime_app_secrets:

@@ -1,13 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, extract_token, get_principal
-from app.core.security import create_access_token, issue_otp, revoke_token, verify_otp
+from app.core.rate_limit import enforce_auth_rate_limit
+from app.core.security import (
+    create_access_token,
+    issue_otp,
+    normalize_phone,
+    revoke_token,
+    verify_otp,
+)
+from app.core.time import utcnow
 from app.db.models import PlatformRole, TenantMembership
 from app.db.session import get_db
 from app.providers.local import LocalMessagingProvider
+from app.providers.meta import MetaProviderError, MetaWhatsAppClient
 from app.schemas import AuthResponse, MessageResponse, OtpRequest, OtpRequested, OtpVerify
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -16,16 +25,41 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/request-otp", response_model=OtpRequested, status_code=202)
 def request_otp(
     payload: OtpRequest,
+    request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> OtpRequested:
-    if settings.whatsapp_backend != "mock":
+    if settings.whatsapp_backend == "disabled":
         raise HTTPException(
             status_code=503,
-            detail="WhatsApp OTP delivery is not configured yet",
+            detail="WhatsApp OTP delivery is not configured",
         )
-    _otp, code = issue_otp(db, payload.phone_e164, settings)
-    LocalMessagingProvider().send_otp(payload.phone_e164, code)
+    phone_e164 = normalize_phone(payload.phone_e164)
+    enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="request", settings=settings)
+    otp, code = issue_otp(db, phone_e164, settings)
+    try:
+        if settings.whatsapp_backend == "meta":
+            MetaWhatsAppClient.from_settings(settings).send_otp(phone_e164, code)
+        else:
+            LocalMessagingProvider().send_otp(phone_e164, code)
+    except MetaProviderError as exc:
+        otp.consumed_at = utcnow()
+        db.commit()
+        raise HTTPException(
+            status_code=503 if exc.retryable else 502,
+            detail=(
+                "WhatsApp OTP delivery is temporarily unavailable"
+                if exc.retryable
+                else "WhatsApp rejected OTP delivery"
+            ),
+        ) from exc
+    except ValueError as exc:
+        otp.consumed_at = utcnow()
+        db.commit()
+        raise HTTPException(
+            status_code=503,
+            detail="WhatsApp OTP delivery is not configured",
+        ) from exc
     return OtpRequested(
         expires_in_seconds=settings.otp_ttl_minutes * 60,
         dev_code=code if settings.is_local and settings.expose_local_otp else None,
@@ -35,11 +69,14 @@ def request_otp(
 @router.post("/verify-otp", response_model=AuthResponse)
 def verify_code(
     payload: OtpVerify,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> AuthResponse:
-    user = verify_otp(db, payload.phone_e164, payload.code, settings)
+    phone_e164 = normalize_phone(payload.phone_e164)
+    enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="verify", settings=settings)
+    user = verify_otp(db, phone_e164, payload.code, settings)
     token, _session = create_access_token(db, user, settings)
     response.set_cookie(
         settings.session_cookie_name,
@@ -65,7 +102,14 @@ def logout(
     settings: Settings = Depends(get_settings),
 ) -> MessageResponse:
     revoke_token(db, token, settings)
-    response.delete_cookie(settings.session_cookie_name, path="/")
+    response.delete_cookie(
+        settings.session_cookie_name,
+        path="/",
+        domain=settings.cookie_domain,
+        secure=settings.cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
     return MessageResponse(message="Logged out")
 
 

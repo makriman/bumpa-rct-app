@@ -35,8 +35,12 @@ if [[ -d /source/exports ]]; then
   tar -C /source/exports -czf "$working/exports.tar.gz" .
 fi
 
-if [[ -d /source/hermes ]]; then
-  tar -C /source/hermes -czf "$working/hermes.tar.gz" .
+if [[ -d /source/hermes-runtime ]]; then
+  tar -C /source/hermes-runtime -czf "$working/hermes-runtime.tar.gz" .
+fi
+
+if [[ -d /source/hermes-staging ]]; then
+  tar -C /source/hermes-staging -czf "$working/hermes-staging.tar.gz" .
 fi
 
 psql -X --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
@@ -50,7 +54,7 @@ psql -X --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
   <<'SQL' > "$working/manifest.json"
 SELECT jsonb_pretty(
   jsonb_build_object(
-    $$format$$, 2,
+    $$format$$, 3,
     $$created_at$$, :'created_at',
     $$database$$, :'database',
     $$postgres$$, jsonb_build_object(
@@ -62,7 +66,12 @@ SELECT jsonb_pretty(
     $$application_revision$$, :'application_revision',
     $$backup_image_tag$$, :'backup_image_tag',
     $$backup_image_ref$$, :'backup_image_ref',
-    $$includes$$, jsonb_build_array($$postgres$$, $$exports$$, $$hermes$$)
+    $$includes$$, jsonb_build_array(
+      $$postgres$$,
+      $$exports$$,
+      $$hermes_runtime$$,
+      $$hermes_staging$$
+    )
   )
 );
 SQL

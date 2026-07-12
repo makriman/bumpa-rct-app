@@ -2,23 +2,12 @@
 
 ## Current release boundary
 
-The deployable target at this stage is a **provider-disabled infrastructure
-baseline**, not a production SME pilot. It is useful for proving host hardening,
-DNS/TLS, immutable image delivery, migrations, network boundaries, readiness and
-backup mechanics. It must not receive SME or research traffic.
-
-In this baseline:
-
-- Caddy, web, API, Postgres and Redis may run.
-- `WHATSAPP_BACKEND=disabled`, `BUMPA_BACKEND=disabled` and
-  `AGENT_BACKEND=disabled` are required.
-- `ASYNC_RUNTIME_ENABLED=false` is required.
-- worker and scheduler are not started because no production queue adapter exists.
-- no Hermes service or profile runtime exists.
-- OTP delivery, provider sync, agent chat and production report generation must
-  return a clear unavailable response instead of using local mocks.
-- `/health/ready` proves database access and reports configured provider modes; it
-  does not probe Meta, Bumpa or Hermes.
+The deployable target is a six-image production stack: API, web, Caddy, PostgreSQL,
+backup and the pinned Hermes runtime. Redis remains an upstream digest-pinned
+service. Worker and scheduler run from the API image and use Postgres jobs/outbox as
+the source of truth with Redis wake-ups and heartbeats. Production always requires
+`ASYNC_RUNTIME_ENABLED=true`; provider selectors may be disabled for containment or
+set to `meta`, `bumpa` and `hermes` only after their activation gates pass.
 
 As of 2026-07-12, hardened release
 `54bb8e9b29295171d65972e094e508d25a7bc53d` is live as this disabled baseline
@@ -33,7 +22,7 @@ Production verification found exactly five healthy services with zero restarts,
 Caddy 2.11.4 built with Go 1.26.5 running as UID 10001 with restricted
 capabilities, PostgreSQL 16.14, Redis 7.4.9, disabled-provider readiness, negative
 API-docs/OTP canaries and correct desktop/mobile presentation. Backup
-`20260712T140353Z` passed its format-2 manifest and checksum checks; the nightly
+`20260712T140353Z` passed its historical format-2 manifest and checksum checks; the nightly
 timer is enabled. This does not activate providers or authorize real traffic.
 
 Do not change a provider selector from `disabled` merely because a credential has
@@ -47,22 +36,22 @@ The following are outside the repository and are still required:
    deploy user. Never share or commit the private key.
 2. DNS-provider access to create A records for the apex, `www`, `api`, `admin` and
    `research` hosts.
-3. Published immutable API/web/Caddy/PostgreSQL/backup images and either public
+3. Published immutable API/web/Caddy/PostgreSQL/backup/Hermes images and either public
    GHCR packages or a least-privilege host credential with `read:packages` only.
 4. An encrypted off-host backup target and its host-only credential.
 5. An alert destination and an identified operator for deployment and restore.
 
-Meta, Bumpa and Anthropic/Hermes credentials are **not** prerequisites for the
-disabled baseline. They belong to later provider activation work. Claude is called
-through Hermes for the SME-agent path; its Anthropic key must be injected only into
-the future Hermes secret boundary, never the shared application environment.
+Meta and Anthropic credentials are host secret files under `SECRETS_DIR`; Bumpa keys
+are encrypted per tenant in Postgres. Claude is called through Hermes for the
+SME-agent path, and its Anthropic key is mounted only into Hermes—never the shared
+application environment.
 
 ## Host prerequisites
 
 - Ubuntu 24.04 LTS on `linux/amd64`, a stable IP, provider backups and monitoring.
 - Cloud firewall: public TCP 80/443; SSH 22 only from a trusted `/32` or VPN CIDR.
 - SSH keys only, non-root `bumpabestie` deploy user and `/opt/bumpabestie` mode 0750.
-- No public Postgres, Redis, Docker API or future Hermes ports.
+- No public Postgres, Redis, Docker API or Hermes ports.
 - Enough free disk for current data, image rollback, one local backup and restore
   staging without approaching a disk-full condition.
 
@@ -109,7 +98,9 @@ Create `/opt/bumpabestie/.env.production` directly on the server with mode `0600
 Start from `.env.example` as a list of names, not as a value source. Do not copy a
 local `.env`.
 
-For the provider-disabled baseline, the important mode controls are:
+Full provider launch mode uses the following controls. During a documented
+containment rollout, any provider selector may remain `disabled`; production mock
+selectors are always forbidden.
 
 ```bash
 APP_ENV=production
@@ -118,10 +109,11 @@ EXPOSE_LOCAL_OTP=false
 SEED_DEMO_DATA=false
 CADDY_SITE_SCHEME=https
 CADDY_BIND_ADDRESS=0.0.0.0
-WHATSAPP_BACKEND=disabled
-BUMPA_BACKEND=disabled
-AGENT_BACKEND=disabled
-ASYNC_RUNTIME_ENABLED=false
+WHATSAPP_BACKEND=meta
+BUMPA_BACKEND=bumpa
+AGENT_BACKEND=hermes
+ASYNC_RUNTIME_ENABLED=true
+SECRETS_DIR=/opt/bumpabestie/secrets
 ```
 
 Do not include `DEV_FIXED_OTP` or `DEV_OTP_SINK`. Set the five production domains
@@ -129,7 +121,7 @@ and HTTPS origins, independent high-entropy application/database secrets, intern
 database URLs, `GHCR_OWNER`, immutable `DEPLOY_REF`,
 `IMAGE_TAG=sha-<full-commit-sha>` and a separately promoted
 `INFRA_IMAGE_TAG=sha-<full-infrastructure-commit-sha>`. `latest` is forbidden.
-Set `API_IMAGE`, `WEB_IMAGE`, `CADDY_IMAGE`, `POSTGRES_IMAGE` and `BACKUP_IMAGE`
+Set `API_IMAGE`, `WEB_IMAGE`, `CADDY_IMAGE`, `POSTGRES_IMAGE`, `BACKUP_IMAGE` and `HERMES_IMAGE`
 to exact `ghcr.io/<owner>/<repository>@sha256:<64-hex-digest>` references. Tags
 identify releases; production Compose consumes digests.
 
@@ -139,11 +131,13 @@ WEB_IMAGE=ghcr.io/<owner>/bumpabestie-web@sha256:<index-digest>
 CADDY_IMAGE=ghcr.io/<owner>/bumpabestie-caddy@sha256:<index-digest>
 POSTGRES_IMAGE=ghcr.io/<owner>/bumpabestie-postgres@sha256:<index-digest>
 BACKUP_IMAGE=ghcr.io/<owner>/bumpabestie-backup@sha256:<index-digest>
+HERMES_IMAGE=ghcr.io/<owner>/bumpabestie-hermes@sha256:<index-digest>
 ```
 
-`ANTHROPIC_API_KEY` and model settings do not belong in the shared API/web/worker/
-scheduler environment. Per-tenant Bumpa keys do not belong in this file; the future
-admin workflow stores them encrypted in Postgres.
+`ANTHROPIC_API_KEY` does not belong in the shared API/web/worker/scheduler
+environment. `hermes_anthropic_api_key` is a `0600` file in the `0700` secrets
+directory. Per-tenant Bumpa keys do not belong in this file; the onboarding/admin
+workflow stores them encrypted in Postgres.
 
 Validate without printing values:
 
@@ -159,17 +153,17 @@ the rendered environment into a ticket or evidence artifact.
 
 ## Image release
 
-Pull-request CI builds `linux/amd64` API, web, Caddy, PostgreSQL and backup images
+Pull-request CI builds `linux/amd64` API, web, Caddy, PostgreSQL, backup and Hermes images
 without publishing them. It also boots the infrastructure images, adopts a 16.9
 data volume with 16.14, creates a backup and restores it into an isolated database.
-`.github/workflows/publish-images.yml` publishes all five images to GHCR after it
+`.github/workflows/publish-images.yml` publishes all six images to GHCR after it
 finds a successful CI run for the exact commit. The deployable tag is
 `sha-<full-commit-sha>`; a release tag is an alias, and `latest` is never emitted.
 The build requests provenance and SBOM attestations. CI scans every locally built
 runtime, and publication scans each exact registry digest for fixable critical/high
 findings; JSON reports are retained as workflow artifacts.
 
-Before deploy, put the exact published index digests in the five image-reference
+Before deploy, put the exact published index digests in the six image-reference
 settings, record the platform manifests and scan those exact images. A successful
 build or SBOM is not a vulnerability scan. If GHCR packages remain
 private, log in on the host using a dedicated pull-only credential and ensure the
@@ -188,21 +182,23 @@ work retain the official UID/GID 70 boundary. The destructive restore profile ru
 only on operator request as root with a separate narrow capability set, including
 `DAC_OVERRIDE`, so it can replace stale restricted artifact contents.
 
-## Provider-disabled deploy sequence
+## Production deploy sequence
 
 1. Confirm the exact revision's CI and local integration gates are green.
 2. Confirm SSH, DNS, firewall, free disk and GHCR pull access.
 3. Confirm `.env.production` validates and its mode is `0600`.
-4. Confirm no real user traffic or provider webhooks point to this baseline.
+4. Confirm webhook routing and provider selectors match the intended activation state.
 5. The deploy script verifies image revision labels, checks the PostgreSQL major,
    inventories extensions and affected legacy BRIN indexes, then creates and
    checksum-verifies a local pre-deploy backup while the old server is running.
-6. Run `./scripts/deploy.sh` as `bumpabestie` from a clean checkout.
-7. The script checks out the immutable `DEPLOY_REF`, pulls all required images
-   including backup, stops writers, upgrades PostgreSQL/Redis first, migrates,
-   removes worker/scheduler, starts the application/edge services, verifies
-   health/restart counts and runs HTTPS smoke checks.
-8. Inspect readiness and confirm all provider modes are `disabled`.
+6. Install any changed reviewed backup service/timer units as root, run
+   `systemctl daemon-reload`, then run `./scripts/deploy.sh` as `bumpabestie` from a
+   clean checkout. The deploy preflight rejects stale installed units.
+7. The script checks out the immutable `DEPLOY_REF`, pulls all required images,
+   stops writers, backs up the recovery point, reconciles the database role,
+   migrates, imports staged Hermes profiles through a networkless one-shot service,
+   starts Hermes gateways and then starts API/web/worker/scheduler/Caddy.
+8. Inspect readiness and confirm all provider modes match the intended release.
 9. Run and verify the first local backup, then start the timer.
 10. Preserve `.deployed-release.json`, DNS/TLS results, service state and backup ID.
 
@@ -220,17 +216,24 @@ Expected readiness shape:
 {
   "status": "ready",
   "database": "ok",
+  "async_runtime": {
+    "enabled": true,
+    "redis": "ok",
+    "worker": "ok",
+    "scheduler": "ok",
+    "queued_wakeups": 0
+  },
   "providers": {
-    "whatsapp": "disabled",
-    "bumpa": "disabled",
-    "agent": "disabled"
+    "whatsapp": "meta-or-disabled",
+    "bumpa": "bumpa-or-disabled",
+    "agent": "hermes-or-disabled"
   }
 }
 ```
 
-An unexpected `mock`, running worker/scheduler, or any Hermes port is a failed
-baseline verification. A readiness 200 with disabled providers is expected; it is
-not a provider health claim.
+An unexpected `mock` or any public Hermes port is a failed production verification.
+Worker and scheduler must be healthy. A configured provider mode is not by itself a
+live-provider canary.
 
 ## Backup timer activation
 
@@ -243,12 +246,12 @@ systemctl list-timers bumpabestie-backup.timer
 journalctl -u bumpabestie-backup.service --since today --no-pager
 ```
 
-The current offsite hook exits successfully when `OFFSITE_BACKUP_SCRIPT` is absent.
-The current systemd unit does not load that setting from `.env.production`; setting
-it there alone is not activation. Therefore a green systemd unit proves only the
-local backup unless a reviewed unit/credential boundary invokes the handoff and the
-journal contains a separately verified off-host object ID/checksum. See
-`docs/runbook.md`.
+The offsite hook exits successfully when `OFFSITE_BACKUP_SCRIPT` is absent. The
+systemd unit passes `.env.production` to a narrow parser that reads only this one
+executable path; it never sources or exports the application's secrets. A green unit
+still proves only the local stage unless a reviewed operator-owned handoff is
+configured and the journal contains a separately verified off-host object
+ID/checksum. See `docs/runbook.md`.
 
 For the hardened baseline, backup `20260712T140353Z` was verified against release
 `54bb8e9b29295171d65972e094e508d25a7bc53d` and the exact backup image reference.

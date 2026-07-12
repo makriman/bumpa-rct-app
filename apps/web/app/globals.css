@@ -614,6 +614,24 @@ a {
 .sidebar .brand {
   padding: 5px 8px 25px;
 }
+.sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.sidebar-head .brand {
+  flex: 1;
+}
+.sidebar-close {
+  display: none;
+  flex: 0 0 auto;
+  color: white;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.sidebar-close:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
 .sidebar .brand-mark {
   background: var(--lime);
   color: var(--forest-deep);
@@ -648,6 +666,23 @@ a {
 .side-link.active {
   background: var(--lime);
   color: var(--forest-deep);
+}
+.side-action {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.side-action:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+.sidebar-error {
+  margin: 8px;
+  color: #ffd8d3;
+  font-size: 0.75rem;
+  line-height: 1.4;
 }
 .nav-icon {
   width: 22px;
@@ -1586,6 +1621,10 @@ a {
   }
   .sidebar.open {
     left: 0;
+  }
+  .sidebar-close {
+    display: inline-grid;
+    place-items: center;
   }
   .sidebar-scrim {
     display: block;

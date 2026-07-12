@@ -1,5 +1,5 @@
-"""Background process entrypoints.
+"""Public API for durable jobs and worker-side handler registration."""
 
-The local build executes synchronous provider jobs in-process. These long-running entrypoints keep
-the deployment contract stable until Redis-backed dispatch is enabled.
-"""
+from app.jobs.runtime import PermanentJobError, enqueue_job, register_handler
+
+__all__ = ["PermanentJobError", "enqueue_job", "register_handler"]

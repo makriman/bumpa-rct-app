@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { LiveDataBanner } from "@/components/live-data-banner";
 import { Badge, Card, PageHeader, StatePanel, Toast } from "@/components/ui";
@@ -15,18 +15,64 @@ import {
 import { previewBumpaStatus, previewSyncRuns } from "@/lib/preview-fixtures";
 import { useApiResource } from "@/lib/use-api-resource";
 
+const previewTenantRuns = previewSyncRuns.filter(
+  (run) => run.tenant_id === "demo-kaia-home",
+);
+type TerminalSyncStatus = "success" | "partial" | "failed";
+type TerminalSyncRun = Omit<SyncRun, "status"> & {
+  status: TerminalSyncStatus;
+};
+const terminalSyncStatuses = new Set<TerminalSyncStatus>([
+  "success",
+  "partial",
+  "failed",
+]);
+const syncPollDelaysMs = [1000, 2000, 4000, 8000, 12000, 15000, 18000];
+
+function isTerminalSyncStatus(status: string): status is TerminalSyncStatus {
+  return terminalSyncStatuses.has(status as TerminalSyncStatus);
+}
+
+function abortError(): Error {
+  const error = new Error("Polling was cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+function waitForPoll(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const cancel = () => {
+      window.clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", cancel);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", cancel, { once: true });
+  });
+}
+
 export default function BumpaPage() {
   const connection = useApiResource<BumpaStatus>(
     "/settings/bumpa",
     previewBumpaStatus,
   );
-  const runs = useApiResource<SyncRun[]>(
-    "/bumpa/sync-runs",
-    previewSyncRuns.filter((run) => run.tenant_id === "demo-kaia-home"),
-  );
+  const runs = useApiResource<SyncRun[]>("/bumpa/sync-runs", previewTenantRuns);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const activePoll = useRef<AbortController | null>(null);
+  useEffect(
+    () => () => {
+      activePoll.current?.abort();
+    },
+    [],
+  );
   const combinedStatus =
     connection.status === "error" || runs.status === "error"
       ? "error"
@@ -39,25 +85,101 @@ export default function BumpaPage() {
       : connection.source === "live" && runs.source === "live"
         ? "live"
         : null;
+  const localSimulator =
+    demoFallbackEnabled && connection.data?.provider === "local";
   const refreshAvailable =
     connection.source === "live" &&
     connection.data?.status === "active" &&
-    demoFallbackEnabled;
+    runs.status === "ready" &&
+    (connection.data.provider === "bumpa" || localSimulator);
+
+  const pollForTerminalRun = async (
+    knownRunIds: Set<string>,
+    signal: AbortSignal,
+  ): Promise<TerminalSyncRun> => {
+    let lastPollError: Error | null = null;
+    for (const delayMs of syncPollDelaysMs) {
+      await waitForPoll(delayMs, signal);
+      let nextRuns: SyncRun[];
+      try {
+        nextRuns = await apiRequest<SyncRun[]>("/bumpa/sync-runs", { signal });
+        lastPollError = null;
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError")
+          throw reason;
+        lastPollError =
+          reason instanceof Error
+            ? reason
+            : new Error("The sync status request failed.");
+        continue;
+      }
+      runs.replace(nextRuns);
+      const requestedRun = nextRuns.find((run) => !knownRunIds.has(run.id));
+      if (requestedRun && isTerminalSyncStatus(requestedRun.status)) {
+        return { ...requestedRun, status: requestedRun.status };
+      }
+    }
+    if (lastPollError) {
+      throw new Error(
+        `The refresh may still be processing, but its status could not be confirmed: ${lastPollError.message}`,
+      );
+    }
+    throw new Error(
+      "The refresh is still processing after one minute. Check sync activity before requesting another refresh.",
+    );
+  };
+
   const refresh = async () => {
+    const controller = new AbortController();
+    activePoll.current?.abort();
+    activePoll.current = controller;
     setBusy(true);
     setError("");
+    setToast("");
     try {
-      await apiRequest("/bumpa/sync/latest", { method: "POST" });
-      await Promise.all([connection.reload(), runs.reload()]);
-      setToast("The local Bumpa sync completed.");
+      const accepted = await apiRequest<{
+        status: "queued" | "success" | "partial" | "failed";
+        job_id?: string;
+        error?: string | null;
+      }>("/bumpa/sync/latest", {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        signal: controller.signal,
+      });
+      let finalStatus = accepted.status;
+      let finalError = accepted.error;
+      if (accepted.status === "queued") {
+        const completedRun = await pollForTerminalRun(
+          new Set((runs.data ?? []).map((run) => run.id)),
+          controller.signal,
+        );
+        finalStatus = completedRun.status;
+        finalError = completedRun.error;
+      } else {
+        await runs.reload();
+      }
+      await connection.reload();
+      if (finalStatus === "failed") {
+        setError(finalError || "Bumpa refresh failed. Please try again.");
+      } else if (finalStatus === "partial") {
+        setToast(
+          "Bumpa refresh completed with unavailable datasets. Review the latest run for details.",
+        );
+      } else {
+        setToast("Bumpa refresh completed successfully.");
+      }
     } catch (reason) {
+      if (reason instanceof Error && reason.name === "AbortError") return;
       setError(
         reason instanceof Error
           ? reason.message
           : "The refresh could not be completed.",
       );
     } finally {
-      setBusy(false);
+      if (activePoll.current === controller) {
+        activePoll.current = null;
+        setBusy(false);
+      }
     }
   };
   const latest = runs.data?.[0];
@@ -72,7 +194,7 @@ export default function BumpaPage() {
             disabled={!refreshAvailable || busy}
             title={
               !refreshAvailable
-                ? "Refresh activates with the live Bumpa adapter; local demo APIs can exercise the simulator."
+                ? "Refresh requires an active live Bumpa connection."
                 : undefined
             }
             onClick={() => void refresh()}
@@ -87,11 +209,20 @@ export default function BumpaPage() {
         status={combinedStatus}
         error={connection.error ?? runs.error}
       />
-      {!demoFallbackEnabled && (
-        <div className="alert alert-warning">
-          Live Bumpa synchronisation has not been activated on this deployment.
-          Refresh controls remain disabled until the adapter and credentials are
-          configured.
+      {connection.source === "live" &&
+        connection.data &&
+        connection.data.provider !== "bumpa" &&
+        !localSimulator && (
+          <div className="alert alert-warning">
+            Live Bumpa synchronisation has not been activated on this
+            deployment. Refresh remains disabled until the provider is
+            configured.
+          </div>
+        )}
+      {connection.source === "live" && localSimulator && (
+        <div className="alert alert-info">
+          Local simulator active. Refreshes exercise the full API, database, and
+          sync workflow without contacting a live Bumpa account.
         </div>
       )}
       {error && (
@@ -99,6 +230,9 @@ export default function BumpaPage() {
           {error}
         </div>
       )}
+      <span className="sr-only" role="status" aria-live="polite">
+        {busy ? "Bumpa refresh is in progress." : ""}
+      </span>
       {connection.status === "loading" ? (
         <StatePanel type="loading" />
       ) : connection.status === "error" || !connection.data ? (

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from time import monotonic
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
+from app.core.crypto import FieldCipher
 from app.core.time import utcnow
 from app.db.models import (
     AgentMessage,
@@ -18,6 +22,12 @@ from app.db.models import (
     Tenant,
     UsageEvent,
     User,
+)
+from app.providers.hermes import (
+    HermesClient,
+    HermesEndpoint,
+    HermesError,
+    HermesResult,
 )
 from app.providers.local import LocalAgentRuntime, LocalClassifier
 from app.providers.redaction import redact_text
@@ -33,8 +43,8 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
             .limit(10)
         ).all()
     )
-    orders = list(
-        db.scalars(select(BumpaOrder).where(BumpaOrder.tenant_id == tenant_id).limit(100)).all()
+    order_count = db.scalar(
+        select(func.count()).select_from(BumpaOrder).where(BumpaOrder.tenant_id == tenant_id)
     )
     if not metrics:
         return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
@@ -43,13 +53,29 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
         unique.setdefault(metric.metric_key, metric)
     sales = unique.get("sales.total_sales")
     products = unique.get("products.products_sold")
+    freshness = connection.last_successful_sync_at if connection else None
     context = (
-        f"Sales: {sales.value_decimal if sales else 'unavailable'} NGN; "
-        f"products sold: {products.value_decimal if products else 'unavailable'}; "
-        f"orders in local snapshot: {len(orders)}; "
-        f"data freshness: {connection.last_successful_sync_at if connection else 'unavailable'}."
+        f"Total sales: {_format_decimal(sales.value_decimal if sales else None, money=True)}; "
+        f"products sold: {_format_decimal(products.value_decimal if products else None)}; "
+        f"orders in current snapshot: {order_count or 0}; "
+        f"data refreshed: {_format_timestamp(freshness)}."
     )
-    return context, connection.last_successful_sync_at if connection else None
+    return context, freshness
+
+
+def _format_decimal(value: Decimal | None, *, money: bool = False) -> str:
+    if value is None:
+        return "unavailable"
+    if money:
+        return f"NGN {value:,.2f}"
+    return format(value.normalize(), "f")
+
+
+def _format_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return "unavailable"
+    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return aware.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def handle_chat(
@@ -61,7 +87,9 @@ def handle_chat(
     channel: str,
     conversation_id: str | None = None,
     external_message_id: str | None = None,
+    settings: Settings | None = None,
 ) -> tuple[Conversation, AgentMessage, AgentMessage, object | None]:
+    effective_settings = settings or get_settings()
     profile = db.scalar(
         select(HermesProfile).where(
             HermesProfile.tenant_id == tenant.id,
@@ -97,10 +125,42 @@ def handle_chat(
     db.flush()
     context, freshness = build_business_context(db, tenant.id)
     started = monotonic()
-    if profile.provider != "local":
+    usage_metadata: dict[str, object] = {"provider": profile.provider}
+    if profile.provider == "local":
+        answer = LocalAgentRuntime().respond(profile.profile_name, message, context)
+        latency_ms = int((monotonic() - started) * 1000)
+    elif profile.provider == "hermes" and effective_settings.agent_backend == "hermes":
+        try:
+            api_key = FieldCipher(effective_settings.field_encryption_key).decrypt(
+                profile.encrypted_api_key
+            )
+            result: HermesResult = HermesClient(effective_settings).respond(
+                HermesEndpoint(
+                    profile_name=profile.profile_name,
+                    api_url=profile.api_internal_url,
+                    api_key=api_key,
+                ),
+                message=redact_text(message),
+                business_context=context,
+            )
+        except (HermesError, ValueError) as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="Agent service is temporarily unavailable",
+            ) from exc
+        answer = result.content
+        latency_ms = result.latency_ms
+        usage_metadata.update(
+            {
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "total_tokens": result.total_tokens,
+            }
+        )
+    else:
+        db.rollback()
         raise HTTPException(status_code=503, detail="Production agent runtime is not configured")
-    answer = LocalAgentRuntime().respond(profile.profile_name, message, context)
-    latency_ms = int((monotonic() - started) * 1000)
     outbound = AgentMessage(
         tenant_id=tenant.id,
         user_id=user.id,
@@ -128,7 +188,19 @@ def handle_chat(
                 **classification,
             )
         )
-    db.add(UsageEvent(tenant_id=tenant.id, user_id=user.id, event_name="chat.response"))
+    db.add(
+        UsageEvent(
+            tenant_id=tenant.id,
+            user_id=user.id,
+            event_name="chat.response",
+            units=(
+                Decimal(str(usage_metadata["total_tokens"]))
+                if "total_tokens" in usage_metadata
+                else None
+            ),
+            event_metadata={**usage_metadata, "latency_ms": latency_ms},
+        )
+    )
     db.commit()
     db.refresh(inbound)
     db.refresh(outbound)

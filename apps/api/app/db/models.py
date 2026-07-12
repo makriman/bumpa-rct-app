@@ -398,6 +398,7 @@ class WhatsappMessage(IdMixin, Base):
 
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
     meta_message_id: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
     wa_id: Mapped[str | None] = mapped_column(String(40))
     phone_e164: Mapped[str | None] = mapped_column(String(20))
@@ -577,6 +578,67 @@ class SystemError(IdMixin, Base):
     stack: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[JsonDict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AsyncJob(IdMixin, TimestampMixin, Base):
+    """Durable unit of asynchronous work.
+
+    Redis is only a wake-up transport. The job record, retry state and terminal
+    outcome live in PostgreSQL so a Redis restart cannot lose accepted work.
+    """
+
+    __tablename__ = "async_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'queued', 'running', 'retry', 'succeeded', "
+            "'dead_letter', 'cancelled')",
+            name="ck_async_jobs_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_async_jobs_attempts_nonnegative"),
+        CheckConstraint("max_attempts > 0", name="ck_async_jobs_max_attempts_positive"),
+        UniqueConstraint("queue_name", "idempotency_key", name="uq_async_jobs_idempotency"),
+        Index("ix_async_jobs_dispatch", "status", "available_at", "created_at"),
+        Index("ix_async_jobs_tenant_created", "tenant_id", "created_at"),
+    )
+
+    tenant_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True
+    )
+    queue_name: Mapped[str] = mapped_column(String(80), default="default")
+    kind: Mapped[str] = mapped_column(String(120), index=True)
+    payload: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    locked_by: Mapped[str | None] = mapped_column(String(160))
+    last_error: Mapped[str | None] = mapped_column(String(240))
+    result: Mapped[JsonDict | None] = mapped_column(JSON)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class JobOutbox(IdMixin, TimestampMixin, Base):
+    """Transactional handoff from PostgreSQL to the Redis wake-up queue."""
+
+    __tablename__ = "job_outbox"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'dispatched')", name="ck_job_outbox_status"),
+        CheckConstraint("dispatch_attempts >= 0", name="ck_job_outbox_attempts_nonnegative"),
+        UniqueConstraint("job_id", name="uq_job_outbox_job"),
+        Index("ix_job_outbox_due", "status", "available_at", "created_at"),
+    )
+
+    tenant_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    job_id: Mapped[str] = mapped_column(ForeignKey("async_jobs.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    dispatch_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(240))
 
 
 class UsageEvent(IdMixin, Base):

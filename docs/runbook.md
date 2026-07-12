@@ -2,10 +2,11 @@
 
 ## Safety boundary
 
-The current production target is an infrastructure-only baseline. Meta WhatsApp,
-Bumpa and Hermes/Claude are disabled; worker and scheduler are not production
-services yet. An incident procedure below marked **future activation** is a required
-procedure for the eventual adapter, not proof that the adapter exists.
+The repository's production target includes Meta WhatsApp, direct Bumpa sync,
+Hermes/Claude and the durable worker/scheduler runtime. The currently deployed
+revision may still be the earlier provider-disabled baseline; always determine the
+actual boundary from `.deployed-release.json`, Compose state and `/health/ready`
+before applying an incident procedure.
 
 Hardened release `54bb8e9b29295171d65972e094e508d25a7bc53d` is the live sslip.io
 baseline. Post-deployment safety follow-up PR 15 merged as
@@ -48,7 +49,8 @@ Run from `/opt/bumpabestie` as the `bumpabestie` user:
 docker compose --env-file .env.production \
   -f compose.yaml -f compose.prod.yaml ps
 docker compose --env-file .env.production \
-  -f compose.yaml -f compose.prod.yaml logs --since=30m --no-color caddy web api
+  -f compose.yaml -f compose.prod.yaml logs --since=30m --no-color \
+  caddy web api worker scheduler hermes
 curl -fsS https://api.bumpabestie.com/health/live | jq
 curl -fsS https://api.bumpabestie.com/health/ready | jq
 cat .deployed-revision
@@ -56,10 +58,10 @@ jq . .deployed-release.json
 df -h
 ```
 
-`/health/live` only proves that the API process answers. `/health/ready` currently
-proves a database query and reports configured provider modes. It is not a Meta,
-Bumpa, Redis or Hermes canary. Preserve the response and image digests with any
-production incident evidence.
+`/health/live` only proves that the API process answers. `/health/ready` proves a
+database query and, when enabled, Redis plus fresh worker/scheduler heartbeats. It
+reports configured provider modes but is not a Meta, Bumpa or Hermes canary.
+Preserve the response and image digests with any production incident evidence.
 
 The verified hardened production snapshot is exactly Caddy, web, API, PostgreSQL
 and Redis with zero restarts. Caddy is 2.11.4 built with Go 1.26.5 and runs as UID
@@ -68,7 +70,7 @@ five `*.bumpabestie.165-227-228-20.sslip.io` host variants have valid TLS and ro
 correctly. Readiness reports all providers disabled; API docs are unavailable and a
 synthetic OTP request fails closed with HTTP 503.
 
-## Provider-disabled baseline verification
+## Historical provider-disabled baseline verification
 
 Expected running application services are Caddy, web, API, Postgres and Redis.
 Worker and scheduler must be absent, and no Hermes service/port should exist.
@@ -105,9 +107,9 @@ containing:
 
 - `postgres.dump`, a custom-format dump with no ownership/privilege statements;
 - `exports.tar.gz` when the exports source exists;
-- `hermes.tar.gz` for the reserved Hermes volume, which is empty until Hermes is
-  implemented;
-- `manifest.json` (format 2, including server/dump versions, migration revision,
+- `hermes-runtime.tar.gz` for provisioned profiles and durable runtime state;
+- `hermes-staging.tar.gz` for the control-plane profile handoff volume;
+- `manifest.json` (format 3, including server/dump versions, migration revision,
   application revision, backup image tag and exact backup image reference); and
 - `SHA256SUMS`.
 
@@ -119,15 +121,16 @@ This is not an off-host durability mechanism.
 ```bash
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
 "${compose[@]}" --profile tools run --rm --no-deps backup
-"${compose[@]}" --profile tools run --rm --no-deps backup sh -c \
+"${compose[@]}" --profile tools run --rm --no-deps --entrypoint sh backup -c \
   'latest=$(find /backups -mindepth 1 -maxdepth 1 -type d | sort | tail -1); test -n "$latest"; cd "$latest"; sha256sum -c SHA256SUMS; cat manifest.json'
 ```
 
 Record the backup directory name, UTC time, revision, database name, server/dump
 versions, schema revision, backup image tag and exact digest reference, checksum
 result, duration and operator.
-The manifest lists the reserved Hermes and exports components by contract; inspect
-archive presence/size rather than assuming they contain usable runtime state.
+The manifest lists the Hermes and exports components by contract. Verify the Hermes
+archive inventory and permissions after restore; archive presence alone does not
+prove that a tenant profile is healthy.
 
 `caddy_data` and `caddy_config` are not included. Caddy can reissue certificates,
 but loss also discards its ACME account/state and can encounter issuer rate limits.
@@ -136,12 +139,12 @@ reviewed Caddy-state backup and prove recovery.
 
 ### Off-host handoff
 
-The repository does not currently choose or credential an off-host provider. If
+The repository does not choose or credential an off-host provider. If
 `OFFSITE_BACKUP_SCRIPT` is unset, `scripts/offsite_backup.sh` warns and exits zero.
-The current systemd unit also does not load that variable from `.env.production`,
-so adding it to the file alone does not configure a handoff. The unit and the
-operator-owned script need an explicitly reviewed credential/environment boundary
-and a tested latest-backup input before use.
+The systemd unit passes `.env.production` to a narrow parser that reads only this
+literal executable path without sourcing/exporting the file. The operator-owned
+script still needs an explicitly reviewed credential boundary and a tested
+latest-backup input before use.
 Consequently:
 
 - systemd success proves the local backup stage only;
@@ -164,7 +167,10 @@ journalctl -u bumpabestie-backup.service --since '2 days ago' --no-pager
 ```
 
 The timer runs at 02:30 UTC with up to 15 minutes randomized delay and is persistent
-across downtime. Alert if no verified backup ID appears within the expected window.
+across downtime. The scheduled wrapper records the running application services,
+quiesces Caddy/API/worker/scheduler/Hermes, creates the backup, and resumes exactly
+the recorded service set even when backup creation fails. Alert if no verified
+backup ID appears within the expected window or any service fails to resume.
 
 For the hardened deployment, backup `20260712T140353Z` passed format-2 manifest and
 SHA-256 verification with release
@@ -198,8 +204,8 @@ For production, use the exact production Compose files below. Do not use
 6. Confirm free space for the dump, extracted data and rollback material.
 7. Confirm the restore PostgreSQL image has the same major as the manifest and the
    backup client is not older than the recorded server.
-8. Stop all writers. In the current baseline that means Caddy, web and API; future
-   workers/scheduler/Hermes must also be stopped.
+8. Stop Caddy, web, API, worker, scheduler and Hermes before replacing database or
+   profile state.
 
 ### Restore command
 
@@ -207,13 +213,15 @@ For production, use the exact production Compose files below. Do not use
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
 backup_id=YYYYMMDDTHHMMSSZ
 
-"${compose[@]}" stop caddy web api
+"${compose[@]}" stop caddy web api worker scheduler hermes
 "${compose[@]}" --profile restore run --rm --no-deps \
   -e RESTORE_CONFIRM=restore-bumpabestie \
   -e BACKUP_PATH="/backups/$backup_id" \
   restore
 "${compose[@]}" --profile tools run --rm migrate
-"${compose[@]}" up -d caddy postgres redis api web
+"${compose[@]}" up -d --wait postgres redis hermes
+ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
+"${compose[@]}" --profile async up -d --wait api web worker scheduler hermes caddy
 SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
 ```
 
@@ -223,33 +231,32 @@ tenant restore with this whole-database script.
 
 ### Acceptance and evidence
 
-For the provider-disabled baseline, validate checksums, migration head, expected
+For a provider-disabled containment release, validate checksums, migration head, expected
 database counts, artifact checksums, service health, domain routing and disabled
 provider state. This proves baseline recovery only.
 
 The build plan's full restore acceptance remains open until an authenticated
 synthetic admin/researcher can load historical data and a known tenant can reach its
-restored Hermes profile. After Hermes exists, also compare profile file inventory,
+restored Hermes profile. Also compare profile file inventory,
 permissions, state checksum and a cross-profile isolation canary. Record recovery
 time, recovery point, backup ID, source (local or off-host), revision and reviewer in
 `docs/verification.md` or the protected evidence system.
 
 ## Add a new SME
 
-### Current production state
+### Activation guard
 
-Do not onboard a production SME while any required provider is disabled. The
-current baseline cannot deliver OTP, perform a live Bumpa sync, provision a real
-Hermes profile or complete first chat. Creating only tenant rows would leave a
+Do not onboard a production SME while any required provider for that SME is
+disabled or lacks its activation evidence. Creating only tenant rows would leave a
 misleading and unusable account.
 
 Local synthetic onboarding is covered by backend tests and `make integration`; it
 is not a substitute for production onboarding evidence.
 
-### Future activation procedure
+### Onboarding procedure
 
-Use this only after Meta, Bumpa, Hermes/Claude, the queue and production auth have
-each passed their activation gate:
+Use this only after Meta, Bumpa, Hermes/Claude, the queue, and production auth have
+each passed their activation gate for the exact release:
 
 1. Authenticate as an operator/superadmin and record a change ticket.
 2. Create the tenant with canonical slug, timezone, currency and explicit research
@@ -278,13 +285,9 @@ failure or raw PII/secret in telemetry is a stop condition.
 
 ## Bumpa failure
 
-### Current baseline
-
-`BUMPA_BACKEND=disabled`; sync should be unavailable. There is no live Bumpa client
-to retry or credential to rotate. Treat a fabricated successful sync as a critical
-configuration defect.
-
-### Future activation
+If readiness reports `BUMPA_BACKEND=disabled`, sync must be unavailable; treat a
+fabricated success as a critical configuration defect. When the selector is
+`bumpa`, use the procedure below.
 
 1. Establish affected tenant, date range, sync run and correlation ID.
 2. Inspect HTTP status, body-level error, pagination checkpoint and rate-limit
@@ -302,13 +305,9 @@ configuration defect.
 
 ## WhatsApp/Meta failure
 
-### Current baseline
-
-`WHATSAPP_BACKEND=disabled`; callback verification, inbound processing and OTP
-delivery should be unavailable in production. Do not point a Meta callback at this
-baseline and do not tell users an OTP was sent.
-
-### Future activation
+If readiness reports `WHATSAPP_BACKEND=disabled`, callback verification, inbound
+processing and OTP delivery must be unavailable; do not point Meta at that state or
+tell users an OTP was sent. When the selector is `meta`, use the procedure below.
 
 1. Determine whether failure is callback verification, signature rejection, queue
    lag, sender/template error or delivery failure.
@@ -324,14 +323,6 @@ baseline and do not tell users an OTP was sent.
 
 ## Hermes/Claude failure
 
-### Current baseline
-
-`AGENT_BACKEND=disabled`; there is no Hermes container, profile process, restart API
-or production agent client. A local database profile record is not a real profile.
-Do not restart a nonexistent service or route traffic to the local agent mock.
-
-### Future activation
-
 1. Circuit-break only the affected profile and return a clear unavailable response.
 2. Verify tenant/profile mapping, private endpoint, authentication, process health,
    model availability, budget/limit state and redacted context size.
@@ -346,13 +337,8 @@ Do not restart a nonexistent service or route traffic to the local agent mock.
 
 ## Queue or scheduler failure
 
-Production worker/scheduler procedures become active only after the Redis queue,
-transactional handoff/outbox, bounded retries, dead-letter visibility and health
-metrics are implemented. Today, worker and scheduler are idle local shells and are
-intentionally removed by production deployment. If either is running in the
-provider-disabled baseline, stop it and treat that as configuration drift.
-
-After activation, never replay a job without checking its idempotency key and
+Postgres jobs/outbox are authoritative; Redis carries wake-up IDs and heartbeats.
+Never replay a job without checking its idempotency key and
 side-effect record. Redis recovery alone does not prove Postgres-to-queue handoff
 correctness.
 
@@ -365,9 +351,8 @@ correctness.
   under an approved retention decision.
 - After a container restart, verify revision/image digest, migration head,
   idempotency state, domain routes and the current provider modes.
-- Redis is not yet a production queue/rate-limit source of truth. Its health is
-  still useful infrastructure evidence, but restarting it cannot lose an assumed
-  job queue because that queue is not implemented.
+- Restarting Redis can discard wake-ups and heartbeats, but not authoritative jobs;
+  verify scheduler redispatch and both worker/scheduler heartbeats after recovery.
 
 ## Suspected secret or PII exposure
 

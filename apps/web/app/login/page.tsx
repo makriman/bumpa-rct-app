@@ -3,13 +3,15 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { Brand } from "@/components/ui";
-import { homeForRole } from "@/lib/navigation";
+import { homeForRole, safeNextPath } from "@/lib/navigation";
 import type { Role } from "@/lib/demo-data";
 import { apiRequest, demoFallbackEnabled } from "@/lib/api";
 
 export default function LoginPage() {
   const [step, setStep] = useState<"phone" | "otp">("phone");
-  const [phone, setPhone] = useState("+2348012345678");
+  const [phone, setPhone] = useState(
+    demoFallbackEnabled ? "+2348012345678" : "",
+  );
   const [digits, setDigits] = useState(["", "", "", "", "", ""]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -31,6 +33,7 @@ export default function LoginPage() {
         },
       );
       setDevCode(result.dev_code ?? null);
+      setDigits(["", "", "", "", "", ""]);
       setStep("otp");
     } catch (reason) {
       setError(
@@ -44,7 +47,8 @@ export default function LoginPage() {
     document.cookie = "bb_session=demo; path=/; SameSite=Lax";
     document.cookie = `bb_demo_role=${role}; path=/; SameSite=Lax`;
     const params = new URLSearchParams(window.location.search);
-    window.location.href = params.get("next") ?? homeForRole(role);
+    window.location.href =
+      safeNextPath(params.get("next")) ?? homeForRole(role);
   };
   const verify = async () => {
     setBusy(true);
@@ -63,7 +67,7 @@ export default function LoginPage() {
             ? "researcher"
             : "owner";
       const next = new URLSearchParams(window.location.search).get("next");
-      window.location.href = next ?? homeForRole(role);
+      window.location.href = safeNextPath(next) ?? homeForRole(role);
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -114,6 +118,12 @@ export default function LoginPage() {
                   type="tel"
                   value={phone}
                   onChange={(e) => setPhone(e.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !busy) {
+                      event.preventDefault();
+                      void requestOtp();
+                    }
+                  }}
                   autoComplete="tel"
                   aria-describedby={error ? "login-error" : "phone-help"}
                 />
@@ -204,8 +214,10 @@ export default function LoginPage() {
               <button
                 className="button button-ghost"
                 style={{ width: "100%", marginTop: 8 }}
+                onClick={() => void requestOtp()}
+                disabled={busy}
               >
-                Resend code
+                {busy ? "Sending new code…" : "Resend code"}
               </button>
             </>
           )}

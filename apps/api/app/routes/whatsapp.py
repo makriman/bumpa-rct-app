@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -12,20 +13,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.models import (
-    AgentMessage,
-    PhoneIdentity,
-    Tenant,
-    User,
-    WebhookEvent,
-    WhatsappDeliveryEvent,
-    WhatsappMessage,
-)
+from app.db.models import WebhookEvent
 from app.db.session import get_db, set_security_context
-from app.providers.local import LocalMessagingProvider
-from app.services.chat import handle_chat
+from app.jobs.runtime import enqueue_job
+from app.services.whatsapp import (
+    extract_delivery_status,
+    extract_message,
+    process_inbox_event,
+    split_inbox_events,
+)
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["whatsapp"])
+logger = logging.getLogger("bumpabestie.whatsapp")
 
 
 @router.get("")
@@ -37,7 +36,9 @@ def verify_webhook(
 ) -> PlainTextResponse:
     if settings.whatsapp_backend == "disabled":
         raise HTTPException(status_code=503, detail="WhatsApp webhook is disabled")
-    if mode == "subscribe" and hmac.compare_digest(token or "", settings.meta_webhook_verify_token):
+    if mode == "subscribe" and hmac.compare_digest(
+        token or "", settings.effective_meta_webhook_verify_token
+    ):
         return PlainTextResponse(challenge or "")
     raise HTTPException(status_code=403, detail="Invalid webhook verification")
 
@@ -47,213 +48,113 @@ async def receive_webhook(
     request: Request,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-) -> dict:
-    """Durably accept an event, then process inline only for the deterministic local adapter.
+) -> dict[str, Any]:
+    """Verify, persist, and atomically enqueue before acknowledging Meta."""
 
-    Failed events remain retriable. Production Meta mode acknowledges the durable inbox quickly and
-    requires a configured queue consumer rather than pretending inline work is production-ready.
-    """
     if settings.whatsapp_backend == "disabled":
         raise HTTPException(status_code=503, detail="WhatsApp webhook is disabled")
     raw = await request.body()
     signature = request.headers.get("x-hub-signature-256")
-    if not _valid_signature(raw, signature, settings.meta_app_secret):
+    if not _valid_signature(raw, signature, settings.effective_meta_app_secret):
         raise HTTPException(status_code=403, detail="Invalid signature")
     try:
-        payload = json.loads(raw)
+        decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise HTTPException(status_code=400, detail="Invalid webhook payload")
+    payload: dict[str, Any] = decoded
+
     set_security_context(db, privileged=True)
-    message = _extract_message(payload)
-    delivery = _extract_delivery_status(payload)
-    external_id = _event_id(raw, message, delivery)
-    event = db.scalar(
-        select(WebhookEvent).where(
-            WebhookEvent.provider == "whatsapp", WebhookEvent.external_event_id == external_id
+    claimed: list[tuple[WebhookEvent, bool, bool]] = []
+    for item_payload, fallback_key in split_inbox_events(payload):
+        message = extract_message(item_payload)
+        delivery = extract_delivery_status(item_payload)
+        external_id = _event_id(raw, message, delivery, fallback_key=fallback_key)
+        event = db.scalar(
+            select(WebhookEvent).where(
+                WebhookEvent.provider == "whatsapp",
+                WebhookEvent.external_event_id == external_id,
+            )
         )
-    )
-    if event and event.processing_status in {"processed", "ignored"}:
-        return {"status": "duplicate"}
-    if not event:
-        event = WebhookEvent(
-            provider="whatsapp",
-            external_event_id=external_id,
-            signature_valid=True,
-            payload=payload,
-        )
-        db.add(event)
-        try:
-            db.commit()  # Durable inbox boundary before any provider or agent work.
-        except IntegrityError:
-            db.rollback()
-            concurrent = db.scalar(
-                select(WebhookEvent).where(
-                    WebhookEvent.provider == "whatsapp",
-                    WebhookEvent.external_event_id == external_id,
+        if not event:
+            event = WebhookEvent(
+                provider="whatsapp",
+                external_event_id=external_id,
+                signature_valid=True,
+                payload=item_payload,
+            )
+            try:
+                with db.begin_nested():
+                    db.add(event)
+                    db.flush()
+            except IntegrityError:
+                event = db.scalar(
+                    select(WebhookEvent).where(
+                        WebhookEvent.provider == "whatsapp",
+                        WebhookEvent.external_event_id == external_id,
+                    )
                 )
+                if not event:
+                    raise HTTPException(
+                        status_code=409, detail="Webhook event could not be claimed"
+                    ) from None
+
+        terminal_duplicate = event.processing_status in {"processed", "ignored"}
+        created = False
+        if not terminal_duplicate:
+            _job, created = enqueue_job(
+                db,
+                kind="whatsapp.process_webhook",
+                payload={"event_id": event.id},
+                idempotency_key=f"meta:{external_id}",
+                max_attempts=5,
             )
-            if concurrent and concurrent.processing_status in {"received", "failed"}:
-                event = concurrent
-            else:
-                return {"status": "duplicate"}
-    if settings.whatsapp_backend == "meta" and not settings.is_local:
-        # The event is durable, but acknowledging it as queued without an actual queue consumer
-        # would silently lose work. Meta may retry safely until the production adapter is enabled.
-        raise HTTPException(
-            status_code=503,
-            detail="No production WhatsApp queue adapter is configured; retry is safe",
-        )
-    event.attempts += 1
-    try:
-        if delivery:
-            result = _process_delivery(db, event, delivery)
-        elif message:
-            result = _process_message(db, event, message)
-        else:
-            event.processing_status = "ignored"
-            db.commit()
-            result = {"status": "accepted"}
-        return result
-    except HTTPException:
-        _mark_failed(db, event.id)
-        raise
-    except Exception as exc:
-        _mark_failed(db, event.id)
-        raise HTTPException(
-            status_code=503, detail="Webhook processing failed; retry is safe"
-        ) from exc
-
-
-def _process_delivery(db: Session, event: WebhookEvent, delivery: dict[str, Any]) -> dict:
-    message_id = str(delivery.get("id", ""))
-    status = str(delivery.get("status", "unknown"))
-    timestamp = str(delivery.get("timestamp", "unknown"))
-    message = db.scalar(
-        select(WhatsappMessage).where(WhatsappMessage.meta_message_id == message_id)
-    )
-    db.add(
-        WhatsappDeliveryEvent(
-            whatsapp_message_id=message.id if message else None,
-            meta_message_id=message_id,
-            status=status,
-            event_timestamp=timestamp,
-            payload=delivery,
-        )
-    )
-    if message:
-        message.status = status
-    event.processing_status = "processed"
+        claimed.append((event, created, terminal_duplicate))
     db.commit()
-    return {"status": "accepted", "event_type": "delivery_status"}
 
+    if settings.is_local:
+        results: list[dict[str, Any]] = []
+        for event, _created, terminal_duplicate in claimed:
+            if terminal_duplicate:
+                results.append({"status": "duplicate"})
+                continue
+            inbox_event_id = event.id
+            try:
+                results.append(process_inbox_event(db, inbox_event_id, settings))
+            except Exception:
+                logger.exception(
+                    "webhook_inline_processing_failed", extra={"event_id": inbox_event_id}
+                )
+                db.rollback()
+                set_security_context(db, privileged=True)
+                failed_event = db.get(WebhookEvent, inbox_event_id)
+                if failed_event:
+                    failed_event.processing_status = "failed"
+                    db.commit()
+                raise HTTPException(
+                    status_code=503,
+                    detail="Webhook processing failed; retry is safe",
+                ) from None
+        if len(results) == 1:
+            return results[0]
+        return {
+            "status": "accepted",
+            "events": len(results),
+            "duplicates": sum(result["status"] == "duplicate" for result in results),
+        }
 
-def _process_message(db: Session, event: WebhookEvent, message: dict[str, Any]) -> dict:
-    external_id = str(message.get("id", ""))
-    phone = "+" + str(message.get("from", "")).lstrip("+")
-    text = str(message.get("text", {}).get("body", "")).strip()
-    identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
-    inbound = db.scalar(
-        select(WhatsappMessage).where(WhatsappMessage.meta_message_id == external_id)
-    )
-    if not inbound:
-        inbound = WhatsappMessage(
-            tenant_id=identity.tenant_id if identity else None,
-            user_id=identity.user_id if identity else None,
-            meta_message_id=external_id,
-            wa_id=str(message.get("from", "")),
-            phone_e164=phone,
-            direction="inbound",
-            message_type=str(message.get("type", "unknown")),
-            text_body=text,
-            payload=message,
-        )
-        db.add(inbound)
-    if not identity or identity.status != "approved":
-        LocalMessagingProvider().send_text(
-            phone, "This number is not approved for Bumpa Bestie. Ask your store owner to add it."
-        )
-        inbound.status = "rejected"
-        event.processing_status = "processed"
-        db.commit()
-        return {"status": "rejected_unknown_sender"}
-    if text.upper() == "STOP":
-        identity.opt_out = True
-        inbound.status = "processed"
-        event.processing_status = "processed"
-        db.commit()
-        return {"status": "opted_out"}
-    if text.upper() == "START":
-        identity.opt_out = False
-        LocalMessagingProvider().send_text(phone, "You are opted back in to Bumpa Bestie.")
-        inbound.status = "processed"
-        event.processing_status = "processed"
-        db.commit()
-        return {"status": "opted_in"}
-    if identity.opt_out:
-        inbound.status = "rejected"
-        event.processing_status = "processed"
-        db.commit()
-        return {"status": "opted_out"}
-    tenant = db.get(Tenant, identity.tenant_id)
-    user = db.get(User, identity.user_id)
-    if not tenant or not user or tenant.status != "active":
-        raise HTTPException(status_code=409, detail="Sender account is unavailable")
-    existing_agent_message = db.scalar(
-        select(AgentMessage).where(
-            AgentMessage.channel == "whatsapp",
-            AgentMessage.external_message_id == external_id,
-        )
-    )
-    if existing_agent_message:
-        outgoing = db.scalar(
-            select(AgentMessage)
-            .where(
-                AgentMessage.conversation_id == existing_agent_message.conversation_id,
-                AgentMessage.direction == "outbound",
-                AgentMessage.created_at >= existing_agent_message.created_at,
-            )
-            .order_by(AgentMessage.created_at)
-        )
-        if not outgoing:
-            raise RuntimeError("Inbound agent message exists without its response")
-    else:
-        _conversation, _incoming, outgoing, _freshness = handle_chat(
-            db,
-            tenant=tenant,
-            user=user,
-            message=text,
-            channel="whatsapp",
-            external_message_id=external_id,
-        )
-    outbound_id = LocalMessagingProvider().send_text(phone, outgoing.content)
-    if not db.scalar(select(WhatsappMessage).where(WhatsappMessage.meta_message_id == outbound_id)):
-        db.add(
-            WhatsappMessage(
-                tenant_id=tenant.id,
-                user_id=user.id,
-                meta_message_id=outbound_id,
-                phone_e164=phone,
-                direction="outbound",
-                message_type="text",
-                text_body=outgoing.content,
-                payload={"local": True},
-                status="sent",
-            )
-        )
-    inbound.status = "processed"
-    event.processing_status = "processed"
-    db.commit()
-    return {"status": "accepted"}
-
-
-def _mark_failed(db: Session, event_id: str) -> None:
-    db.rollback()
-    set_security_context(db, privileged=True)
-    event = db.get(WebhookEvent, event_id)
-    if event:
-        event.attempts += 1
-        event.processing_status = "failed"
-        db.commit()
+    if len(claimed) == 1:
+        _event, created, terminal_duplicate = claimed[0]
+        if terminal_duplicate:
+            return {"status": "duplicate"}
+        return {"status": "accepted", "queued": True, "duplicate": not created}
+    return {
+        "status": "accepted",
+        "queued": True,
+        "events": len(claimed),
+        "duplicates": sum(not created for _event, created, _terminal in claimed),
+    }
 
 
 def _valid_signature(raw: bytes, signature: str | None, secret: str) -> bool:
@@ -263,26 +164,12 @@ def _valid_signature(raw: bytes, signature: str | None, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def _extract_message(payload: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        messages = payload["entry"][0]["changes"][0]["value"].get("messages", [])
-        return messages[0] if messages else None
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
-def _extract_delivery_status(payload: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        statuses = payload["entry"][0]["changes"][0]["value"].get("statuses", [])
-        return statuses[0] if statuses else None
-    except (KeyError, IndexError, TypeError):
-        return None
-
-
 def _event_id(
     raw: bytes,
     message: dict[str, Any] | None,
     delivery: dict[str, Any] | None,
+    *,
+    fallback_key: str = "root",
 ) -> str:
     if message and message.get("id"):
         return str(message["id"])
@@ -294,4 +181,6 @@ def _event_id(
                 str(delivery.get("timestamp", "unknown")),
             ]
         )
-    return hashlib.sha256(raw).hexdigest()
+    if fallback_key == "root":
+        return hashlib.sha256(raw).hexdigest()
+    return hashlib.sha256(raw + b"\0" + fallback_key.encode()).hexdigest()

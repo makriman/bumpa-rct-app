@@ -1,7 +1,7 @@
 import React from "react";
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { Badge, Metric, StatePanel } from "@/components/ui";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { Badge, Metric, Modal, StatePanel } from "@/components/ui";
 
 describe("shared UI", () => {
   it("renders semantic metric content", () => {
@@ -32,5 +32,43 @@ describe("shared UI", () => {
     expect(
       screen.getByRole("button", { name: "Try again" }),
     ).toBeInTheDocument();
+  });
+
+  it("traps keyboard focus inside dialogs and restores the opener", async () => {
+    const onClose = vi.fn();
+    function Harness() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <>
+          <button onClick={() => setOpen(true)}>Open report</button>
+          {open && (
+            <Modal
+              title="Export report"
+              onClose={() => {
+                onClose();
+                setOpen(false);
+              }}
+              actions={<button>Confirm export</button>}
+            >
+              <input aria-label="Export name" />
+            </Modal>
+          )}
+        </>
+      );
+    }
+    render(<Harness />);
+    const opener = screen.getByRole("button", { name: "Open report" });
+    opener.focus();
+    fireEvent.click(opener);
+    // The close button is the first focusable element in the dialog.
+    const close = screen.getByRole("button", { name: "Close dialog" });
+    expect(close).toHaveFocus();
+    const confirm = screen.getByRole("button", { name: "Confirm export" });
+    confirm.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 });

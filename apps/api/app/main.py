@@ -5,15 +5,17 @@ from contextlib import asynccontextmanager
 from time import monotonic
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy import text
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, correlation_id_var
 from app.db.session import SessionLocal, create_schema, set_security_context
+from app.jobs.runtime import AsyncRuntimeConfig, RedisWakeQueue
 from app.routes import admin, auth, bumpa, chat, hermes, mcp, research, settings, tenants, whatsapp
 from app.services.seed import seed_demo
 
@@ -91,12 +93,30 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "api"}
 
     @application.get("/health/ready", tags=["health"])
-    def health_ready(settings_config: Settings = Depends(get_settings)) -> dict:
+    def health_ready(response: Response, settings_config: Settings = Depends(get_settings)) -> dict:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
+        async_config = AsyncRuntimeConfig.from_env()
+        async_health: dict[str, object] = {"enabled": async_config.enabled}
+        is_ready = True
+        if async_config.enabled:
+            try:
+                snapshot = RedisWakeQueue(async_config).health_snapshot()
+            except (RedisError, OSError):
+                snapshot = {
+                    "redis": "unavailable",
+                    "worker": "unknown",
+                    "scheduler": "unknown",
+                    "queued_wakeups": None,
+                }
+            async_health.update(snapshot)
+            if any(snapshot.get(service) != "ok" for service in ("redis", "worker", "scheduler")):
+                is_ready = False
+                response.status_code = 503
         return {
-            "status": "ready",
+            "status": "ready" if is_ready else "not_ready",
             "database": "ok",
+            "async_runtime": async_health,
             "providers": {
                 "whatsapp": settings_config.whatsapp_backend,
                 "bumpa": settings_config.bumpa_backend,

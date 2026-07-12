@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import Settings
 from app.jobs import scheduler, worker
+from app.jobs.runtime import AsyncRuntimeConfig
 from app.providers.local import (
     LocalAgentRuntime,
     LocalArtifactStore,
@@ -66,37 +66,17 @@ def test_all_local_provider_contracts_and_safety_branches(tmp_path: Path) -> Non
     assert csv_safe("ordinary") == "ordinary"
 
 
-def test_local_worker_scheduler_and_production_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(worker.signal, "signal", lambda *_args: None)
-    monkeypatch.setattr(scheduler.signal, "signal", lambda *_args: None)
-    worker.running = True
-    scheduler.running = True
-
-    def stop_both(_seconds: int) -> None:
-        worker.running = False
-        scheduler.running = False
-
-    monkeypatch.setattr(worker.time, "sleep", stop_both)
-    worker.main()
-    scheduler.main()
+def test_async_entrypoint_stop_and_disabled_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     worker._stop(15, object())
     scheduler._stop(15, object())
-    production = Settings(
-        app_env="production",
-        jwt_secret="j" * 40,
-        otp_secret="o" * 40,
-        field_encryption_key="f" * 40,
-        expose_local_otp=False,
-        seed_demo_data=False,
-        whatsapp_backend="disabled",
-        bumpa_backend="disabled",
-        agent_backend="disabled",
-    )
-    monkeypatch.setattr(worker, "get_settings", lambda: production)
-    monkeypatch.setattr(scheduler, "get_settings", lambda: production)
-    with pytest.raises(RuntimeError, match="production queue"):
+    assert worker.running is False
+    assert scheduler.running is False
+    disabled = AsyncRuntimeConfig.from_env()
+    monkeypatch.setattr(worker.AsyncRuntimeConfig, "from_env", lambda: disabled)
+    monkeypatch.setattr(scheduler.AsyncRuntimeConfig, "from_env", lambda: disabled)
+    with pytest.raises(RuntimeError, match="disabled"):
         worker.main()
-    with pytest.raises(RuntimeError, match="production scheduler"):
+    with pytest.raises(RuntimeError, match="disabled"):
         scheduler.main()
 
 

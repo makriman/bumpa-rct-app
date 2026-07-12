@@ -97,6 +97,29 @@ export type ResearchEvent = {
   created_at: string;
 };
 
+export type ResearchConversationSummary = {
+  id: string;
+  tenant_pseudonym: string | null;
+  participant_pseudonyms: string[];
+  channel: string;
+  event_count: number;
+  primary_intents: Record<string, number>;
+  latest_redacted_text: string | null;
+  started_at: string;
+  last_activity_at: string;
+};
+
+export type ResearchConversationEvent = Omit<
+  ResearchEvent,
+  "tenant_pseudonym"
+> & {
+  user_pseudonym: string | null;
+};
+
+export type ResearchConversationDetail = ResearchConversationSummary & {
+  events: ResearchConversationEvent[];
+};
+
 export type Taxonomy = {
   primary_intent: string[];
   business_function: string[];
@@ -133,6 +156,7 @@ export function titleCase(value: string | null | undefined): string {
   if (!value) return "Not available";
   return value
     .replaceAll("_", " ")
+    .replaceAll(".", " · ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 

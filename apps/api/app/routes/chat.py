@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_tenant
+from app.core.rate_limit import enforce_operation_rate_limit
 from app.db.models import AgentMessage, Conversation
 from app.db.session import get_db
 from app.schemas import ChatRequest, ChatResponse
@@ -19,10 +20,10 @@ def web_chat(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
-    if settings.agent_backend != "mock":
+    if settings.agent_backend == "disabled":
         raise HTTPException(
             status_code=503,
-            detail="Hermes agent integration is not configured yet",
+            detail="Hermes agent service is not configured",
         )
     assert principal.tenant is not None
     if payload.client_message_id:
@@ -50,6 +51,13 @@ def web_chat(
                     outbound_message_id=outbound.id,
                     answer=outbound.content,
                 )
+    enforce_operation_rate_limit(
+        settings,
+        operation="chat",
+        scopes={"tenant": principal.tenant.id, "user": principal.user.id},
+        limit=settings.chat_rate_limit,
+        window_seconds=settings.chat_rate_limit_window_seconds,
+    )
     conversation, inbound, outbound, freshness = handle_chat(
         db,
         tenant=principal.tenant,
@@ -58,6 +66,7 @@ def web_chat(
         channel="web",
         conversation_id=payload.conversation_id,
         external_message_id=payload.client_message_id,
+        settings=settings,
     )
     return ChatResponse(
         conversation_id=conversation.id,
