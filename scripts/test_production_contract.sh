@@ -164,6 +164,45 @@ docker run --rm --network none --user 0:0 --cap-drop ALL \
   python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
   sh -eu -c 'mkdir /backups/new-backup && test -d /backups/new-backup'
 
+# Exercise the same util-linux flock implementation installed by the Ubuntu
+# bootstrap. One process must exclude a zero-wait contender, release cleanly,
+# and allow the next workflow to acquire the same host-external lock.
+docker run --rm --network none \
+  --volume "$ROOT_DIR:/workspace:ro" \
+  ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 \
+  bash -ceu '
+    lock_dir="$(mktemp -d)"
+    ready="$lock_dir/ready"
+    release="$lock_dir/release"
+    mkfifo "$release"
+    export BUMPABESTIE_MAINTENANCE_LOCK="$lock_dir/maintenance.lock"
+    export BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS=5
+    (
+      source /workspace/scripts/maintenance_lock.sh
+      acquire_maintenance_lock
+      : > "$ready"
+      read -r _ < "$release" || true
+    ) &
+    holder_pid=$!
+    for _ in $(seq 1 100); do
+      [[ -e "$ready" ]] && break
+      sleep 0.05
+    done
+    [[ -e "$ready" ]]
+
+    export BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS=0
+    set +e
+    (source /workspace/scripts/maintenance_lock.sh; acquire_maintenance_lock) 2>/dev/null
+    contender_status=$?
+    set -e
+    [[ "$contender_status" -eq 75 ]]
+
+    printf "release\n" > "$release"
+    wait "$holder_pid"
+    export BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS=1
+    (source /workspace/scripts/maintenance_lock.sh; acquire_maintenance_lock)
+  '
+
 ./scripts/validate_env.sh "$contract_env" production
 compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile async --profile tools --profile restore)
 "${compose[@]}" config --quiet
@@ -190,6 +229,8 @@ if ! jq --exit-status '
   ([.services["backup-data-init"].volumes[] | select(.type == "bind" and .target == "/usr/local/bin/init-backup-volume" and .read_only == true)] | length == 1) and
   .services.backup.user == "0:0" and
   .services.restore.image == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
+  .services.restore.user == "0:0" and
+  .services.restore.entrypoint == ["/usr/local/bin/restore.sh"] and
   .services.caddy.build == null and .services.postgres.build == null and .services.backup.build == null and .services.restore.build == null and
   .services.backup.environment.BACKUP_IMAGE_REF == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
   .services.backup.entrypoint == ["/usr/local/bin/backup.sh"] and
@@ -217,7 +258,7 @@ if ! jq --exit-status '
     postgres: (.services.postgres | {image, build, stop_grace_period}),
     backup_data_init: (.services["backup-data-init"] | {image, build, user, entrypoint, network_mode, read_only, cap_drop, cap_add, volumes}),
     backup: (.services.backup | {image, build, user, networks, cap_add, environment}),
-    restore: (.services.restore | {image, build, networks, cap_add}),
+    restore: (.services.restore | {image, build, user, entrypoint, networks, cap_add}),
     api: (.services.api | {environment}),
     worker: (.services.worker | {environment, healthcheck, cap_drop}),
     scheduler: (.services.scheduler | {environment, healthcheck, cap_drop})
@@ -299,6 +340,16 @@ if [[ -z "$stop_line" || -z "$backup_init_line" || -z "$backup_line" || -z "$qui
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
   exit 1
 fi
+deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | head -1 | cut -d: -f1)"
+deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
+scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | head -1 | cut -d: -f1)"
+scheduled_env_line="$(grep -n -F "env_file=\"\${ENV_FILE:-.env.production}\"" scripts/scheduled_backup.sh | cut -d: -f1)"
+if [[ -z "$deploy_lock_line" || -z "$deploy_env_line" || "$deploy_lock_line" -ge "$deploy_env_line" \
+  || -z "$scheduled_lock_line" || -z "$scheduled_env_line" \
+  || "$scheduled_lock_line" -ge "$scheduled_env_line" ]]; then
+  echo "Maintenance workflows do not acquire their shared lock before reading mutable state" >&2
+  exit 1
+fi
 if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migrate_line" ]]; then
   echo "Deployment does not reconcile the application role before migrations" >&2
   exit 1
@@ -333,6 +384,8 @@ if grep -Fq 'EnvironmentFile=' infra/systemd/bumpabestie-backup.service; then
   exit 1
 fi
 for hardening_directive in \
+  'StateDirectory=bumpabestie' \
+  'StateDirectoryMode=0700' \
   'UMask=0077' \
   'NoNewPrivileges=yes' \
   'PrivateDevices=yes' \
@@ -347,6 +400,10 @@ for hardening_directive in \
   'CapabilityBoundingSet='; do
   grep -Fxq "$hardening_directive" infra/systemd/bumpabestie-backup.service
 done
+grep -Fq 'util-linux' scripts/bootstrap_server.sh
+grep -Fq 'install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie' scripts/bootstrap_server.sh
+grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock' scripts/maintenance_lock.sh
+grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS:-900' scripts/maintenance_lock.sh
 grep -Fq -- '--profile async up -d --wait' scripts/deploy.sh
 # Match literal deploy-script variables.
 # shellcheck disable=SC2016

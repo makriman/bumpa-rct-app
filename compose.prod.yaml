@@ -343,6 +343,8 @@ services:
   restore:
     image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     build: !reset null
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/restore.sh"]
     environment:
       APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
       BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:?Set immutable INFRA_IMAGE_TAG}

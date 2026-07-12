@@ -4,6 +4,9 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+source "$ROOT_DIR/scripts/maintenance_lock.sh"
+acquire_maintenance_lock
+
 env_file="${ENV_FILE:-.env.production}"
 compose=(
   docker compose --env-file "$env_file"

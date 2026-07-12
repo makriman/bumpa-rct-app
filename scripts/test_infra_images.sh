@@ -394,8 +394,11 @@ start_postgres "$restore" "$restore_data" "$postgres_image"
 docker exec "$restore" psql --username bumpabestie --dbname bumpabestie \
   --set ON_ERROR_STOP=1 \
   --command 'CREATE TABLE newer_only_table (id integer PRIMARY KEY);' >/dev/null
+# Mirror the production restore service exactly: bypass the legacy backup image
+# entrypoint, remain root for the destructive restore, and keep backups read-only.
 docker run --rm \
   --network "$network" \
+  --user 0:0 \
   --cap-drop ALL \
   --cap-add CHOWN \
   --cap-add DAC_OVERRIDE \
