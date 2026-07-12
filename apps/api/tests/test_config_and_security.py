@@ -44,7 +44,14 @@ def test_root_environment_aliases_and_production_guards() -> None:
     assert len(local.jwt_secret) >= 32
 
     with pytest.raises(ValidationError, match="Production secrets"):
-        Settings(app_env="production", expose_local_otp=False, seed_demo_data=False)
+        Settings(
+            app_env="production",
+            jwt_secret="local-only-test-jwt-secret",
+            otp_secret="local-only-test-otp-secret",
+            field_encryption_key="local-only-test-field-key",
+            expose_local_otp=False,
+            seed_demo_data=False,
+        )
 
     production = Settings(
         app_env="production",
