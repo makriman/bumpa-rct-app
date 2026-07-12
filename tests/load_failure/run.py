@@ -29,6 +29,7 @@ from typing import Any, TypeVar
 EVENT_COUNT = 50
 FIXTURE_SECRET = b"load-failure-fixture-app-secret"
 PROJECT_NAME = "bumpabestie-load-failure"
+OUTAGE_READINESS_HTTP_TIMEOUT_SECONDS = 7
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILES = (ROOT / "compose.yaml", Path(__file__).with_name("compose.yaml"))
 T = TypeVar("T")
@@ -363,7 +364,17 @@ def run_redis_phase(project: ComposeProject, base_url: str, run_id: str) -> dict
     project.run("stop", "worker", "scheduler", "redis")
     unavailable_readiness = wait_until(
         "API readiness to expose the Redis outage",
-        lambda: status if (status := get_status(f"{base_url}/health/ready")) == 503 else False,
+        lambda: (
+            status
+            if (
+                status := get_status(
+                    f"{base_url}/health/ready",
+                    timeout=OUTAGE_READINESS_HTTP_TIMEOUT_SECONDS,
+                )
+            )
+            == 503
+            else False
+        ),
         timeout=20,
     )
     accepted = post(base_url, body)
