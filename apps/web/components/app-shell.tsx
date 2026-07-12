@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { currentUser } from "@/lib/demo-data";
 import { apiRequest, demoFallbackEnabled } from "@/lib/api";
 import {
   adminNav,
@@ -14,6 +13,23 @@ import {
 import { Brand } from "./ui";
 
 type Surface = "user" | "admin" | "research";
+
+type SessionView = {
+  user: {
+    id: string;
+    name: string;
+    email: string | null;
+    phone_e164: string;
+  };
+  platform_roles: string[];
+  memberships: Array<{
+    id: string;
+    tenant_id: string;
+    role: string;
+    status: string;
+  }>;
+  current_tenant_id: string | null;
+};
 
 function navFor(surface: Surface): NavGroup[] {
   return surface === "admin"
@@ -41,9 +57,11 @@ export function AppShell({
   const [dataSource, setDataSource] = useState<"checking" | "live" | "demo">(
     "checking",
   );
+  const [session, setSession] = useState<SessionView | null>(null);
   useEffect(() => {
-    void apiRequest<unknown>("/auth/me")
-      .then(() => {
+    void apiRequest<SessionView>("/auth/me")
+      .then((result) => {
+        setSession(result);
         setDataSource("live");
         setReady(true);
       })
@@ -57,18 +75,29 @@ export function AppShell({
       });
   }, [pathname, router]);
   const nav = navFor(surface);
-  const displayName =
+  const demoName =
     surface === "admin"
-      ? "Nneka · Operations"
+      ? "Demo operator"
       : surface === "research"
-        ? "Dr. Halima Yusuf"
-        : currentUser.name;
-  const displayRole =
-    surface === "admin"
-      ? "Platform operator"
+        ? "Demo researcher"
+        : "Demo SME owner";
+  const displayName = session?.user.name ?? demoName;
+  const currentMembership = session?.memberships.find(
+    (membership) => membership.tenant_id === session.current_tenant_id,
+  );
+  const displayRole = session
+    ? surface === "admin"
+      ? session.platform_roles.includes("superadmin")
+        ? "Platform superadmin"
+        : "Platform operator"
       : surface === "research"
-        ? "Researcher · Redacted"
-        : `${currentUser.tenant} · Owner`;
+        ? "Researcher · redacted access"
+        : `${currentMembership?.role ?? "member"} · current workspace`
+    : surface === "admin"
+      ? "Demo preview · operator"
+      : surface === "research"
+        ? "Demo preview · researcher"
+        : "Demo preview · owner";
   if (!ready && process.env.NODE_ENV !== "development")
     return (
       <main className="page">

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,11 @@ def request_otp(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> OtpRequested:
+    if settings.whatsapp_backend != "mock":
+        raise HTTPException(
+            status_code=503,
+            detail="WhatsApp OTP delivery is not configured yet",
+        )
     _otp, code = issue_otp(db, payload.phone_e164, settings)
     LocalMessagingProvider().send_otp(payload.phone_e164, code)
     return OtpRequested(

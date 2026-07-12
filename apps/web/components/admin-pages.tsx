@@ -2,297 +2,458 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { apiRequest, demoFallbackEnabled } from "@/lib/api";
+import {
+  durationBetween,
+  formatDate,
+  maskPhone,
+  titleCase,
+  type AuditEvent,
+  type SyncRun,
+  type SystemError,
+  type Tenant,
+  type UsageEvent,
+} from "@/lib/platform-data";
+import {
+  previewAudits,
+  previewErrors,
+  previewSyncRuns,
+  previewTeam,
+  previewTenants,
+  previewUsage,
+} from "@/lib/preview-fixtures";
+import { useApiResource } from "@/lib/use-api-resource";
 import { AppShell } from "./app-shell";
 import { LiveDataBanner } from "./live-data-banner";
 import {
   Badge,
   Card,
   Chart,
-  DemoStateToggle,
   Filters,
   Metric,
   PageHeader,
   StatePanel,
   Toast,
 } from "./ui";
-import {
-  chartValues,
-  errors,
-  statusTone,
-  syncRuns,
-  tenants,
-  usageRows,
-} from "@/lib/demo-data";
 
-type DemoState = "ready" | "loading" | "empty" | "error";
-
-function States({
-  state,
-  emptyTitle,
+function ResourceState({
+  status,
+  error,
+  onRetry,
+  empty,
 }: {
-  state: DemoState;
-  emptyTitle: string;
+  status: "loading" | "ready" | "error";
+  error: string | null;
+  onRetry: () => Promise<void>;
+  empty?: string;
 }) {
-  if (state === "loading") return <StatePanel type="loading" />;
-  if (state === "empty") return <StatePanel type="empty" title={emptyTitle} />;
-  if (state === "error")
+  if (status === "loading") return <StatePanel type="loading" />;
+  if (status === "error")
     return (
       <StatePanel
         type="error"
-        action={<button className="button button-secondary">Try again</button>}
+        description={error ?? undefined}
+        action={
+          <button
+            className="button button-secondary"
+            onClick={() => void onRetry()}
+          >
+            Try again
+          </button>
+        }
+      />
+    );
+  if (empty)
+    return (
+      <StatePanel
+        type="empty"
+        title={empty}
+        description="The API returned no records for this view."
       />
     );
   return null;
 }
 
+function tenantLabel(tenant: Tenant): string {
+  return [titleCase(tenant.business_category), tenant.city]
+    .filter((value) => value && value !== "Not available")
+    .join(" · ");
+}
+
+function percent(numerator: number, denominator: number): string {
+  return denominator ? `${Math.round((numerator / denominator) * 100)}%` : "—";
+}
+
+function usageChart(events: UsageEvent[]): {
+  labels: string[];
+  values: number[];
+} {
+  const counts = new Map<string, number>();
+  for (const event of events) {
+    const day = event.created_at.slice(5, 10);
+    counts.set(day, (counts.get(day) ?? 0) + 1);
+  }
+  const rows = [...counts.entries()].sort().slice(-12);
+  const max = Math.max(1, ...rows.map(([, value]) => value));
+  return {
+    labels: rows.map(([label]) => label),
+    values: rows.map(([, value]) =>
+      Math.max(8, Math.round((value / max) * 100)),
+    ),
+  };
+}
+
 export function AdminOverview() {
+  const tenantResource = useApiResource<Tenant[]>(
+    "/admin/tenants",
+    previewTenants,
+  );
+  const syncResource = useApiResource<SyncRun[]>(
+    "/admin/system/sync-runs",
+    previewSyncRuns,
+  );
+  const errorResource = useApiResource<SystemError[]>(
+    "/admin/system/errors",
+    previewErrors,
+  );
+  const usageResource = useApiResource<UsageEvent[]>(
+    "/admin/usage",
+    previewUsage,
+  );
+  const tenants = tenantResource.data ?? [];
+  const runs = syncResource.data ?? [];
+  const errors = errorResource.data ?? [];
+  const usage = usageResource.data ?? [];
+  const overviewResources = [
+    tenantResource,
+    syncResource,
+    errorResource,
+    usageResource,
+  ];
+  const overviewStatus = overviewResources.some(
+    (resource) => resource.status === "error",
+  )
+    ? "error"
+    : overviewResources.some((resource) => resource.status === "loading")
+      ? "loading"
+      : "ready";
+  const overviewSource = overviewResources.some(
+    (resource) => resource.source === "demo",
+  )
+    ? "demo"
+    : overviewResources.every((resource) => resource.source === "live")
+      ? "live"
+      : null;
+  const overviewError = overviewResources
+    .map((resource) => resource.error)
+    .filter(Boolean)
+    .join("; ");
+  const chart = usageChart(usage);
+  const successful = runs.filter(
+    (run) => run.status.toLowerCase() === "success",
+  ).length;
+  const consented = tenants.filter(
+    (tenant) => tenant.research_consent_status === "granted",
+  ).length;
+  const latestRun = new Map<string, SyncRun>();
+  for (const run of runs) {
+    if (run.tenant_id && !latestRun.has(run.tenant_id))
+      latestRun.set(run.tenant_id, run);
+  }
+
   return (
     <AppShell surface="admin" title="Operations overview">
       <PageHeader
-        title="Good morning, Nneka."
-        description="Here is the health of Bumpa Bestie across every active SME."
+        title="Platform operations"
+        description="Current tenant, sync, usage, and error evidence from the platform APIs."
         actions={
           <Link className="button button-primary" href="/admin/onboarding">
             ＋ Onboard SME
           </Link>
         }
       />
-      <LiveDataBanner endpoint="/admin/tenants" label="admin tenants" />
-      <div className="grid grid-4">
-        <Metric
-          label="Active SMEs"
-          value="24"
-          trend="+3"
-          note="21 consented to research"
-          bars={[35, 44, 52, 55, 68, 72]}
+      <LiveDataBanner
+        label="operations datasets"
+        source={overviewSource}
+        status={overviewStatus}
+        error={overviewError || null}
+      />
+      {tenantResource.status !== "ready" ? (
+        <ResourceState
+          status={tenantResource.status}
+          error={tenantResource.error}
+          onRetry={tenantResource.reload}
         />
-        <Metric
-          label="Messages · 7 days"
-          value="3,842"
-          trend="+18%"
-          note="77% via WhatsApp"
-          bars={[42, 56, 48, 72, 65, 88]}
-        />
-        <Metric
-          label="Healthy syncs"
-          value="95.8%"
-          trend="+1.2%"
-          note="1 tenant needs attention"
-          bars={[92, 90, 94, 93, 97, 96]}
-        />
-        <Metric
-          label="Median response"
-          value="3.8s"
-          trend="-0.4s"
-          note="P95 is 9.7 seconds"
-          bars={[75, 68, 62, 58, 51, 46]}
-        />
-      </div>
-      <div className="grid grid-2" style={{ marginTop: 18 }}>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Message volume</h2>
-              <p>Across WhatsApp and web · last 12 weeks</p>
-            </div>
-            <select className="filter-select" aria-label="Chart period">
-              <option>12 weeks</option>
-              <option>30 days</option>
-            </select>
+      ) : (
+        <>
+          <div className="grid grid-4">
+            <Metric
+              label="Active SMEs"
+              value={String(
+                tenants.filter((tenant) => tenant.status === "active").length,
+              )}
+              note={`${consented} consented to research`}
+            />
+            <Metric
+              label="Recorded usage events"
+              value={
+                usageResource.status === "ready"
+                  ? usage.length.toLocaleString()
+                  : "—"
+              }
+              note="Latest 100 events returned by the API"
+            />
+            <Metric
+              label="Successful syncs"
+              value={
+                syncResource.status === "ready"
+                  ? percent(successful, runs.length)
+                  : "—"
+              }
+              note={`${runs.length} recent run${runs.length === 1 ? "" : "s"}`}
+            />
+            <Metric
+              label="Open system errors"
+              value={
+                errorResource.status === "ready" ? String(errors.length) : "—"
+              }
+              note="Latest redacted error records"
+            />
           </div>
-          <Chart
-            values={chartValues}
-            labels={[
-              "W17",
-              "18",
-              "19",
-              "20",
-              "21",
-              "22",
-              "23",
-              "24",
-              "25",
-              "26",
-              "27",
-              "28",
-            ]}
-          />
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>System attention</h2>
-              <p>Prioritised operational issues.</p>
-            </div>
-            <Link className="table-action" href="/admin/errors">
-              View all
-            </Link>
-          </div>
-          <div className="timeline">
-            <div className="timeline-item">
-              <strong>Naya Skin · Bumpa authentication</strong>
-              <p>Three sync failures. Last success was 3 days ago.</p>
-              <Badge tone="danger">High priority</Badge>
-            </div>
-            <div className="timeline-item">
-              <strong>Bean There Coffee · Partial sync</strong>
-              <p>Three profit datasets returned unavailable.</p>
-              <Badge tone="warning">Review</Badge>
-            </div>
-            <div className="timeline-item">
-              <strong>Backups completed</strong>
-              <p>Postgres and Hermes volumes verified at 02:10.</p>
-              <Badge tone="success">Healthy</Badge>
-            </div>
-          </div>
-        </Card>
-      </div>
-      <Card padded className="">
-        <div className="card-head">
-          <div>
-            <h2>Tenant health</h2>
-            <p>Most recently active workspaces.</p>
-          </div>
-          <Link className="table-action" href="/admin/tenants">
-            All tenants →
-          </Link>
-        </div>
-        <div className="table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Tenant</th>
-                <th>Status</th>
-                <th>Sync</th>
-                <th>Health</th>
-                <th>Consent</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tenants.slice(0, 4).map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    <Link
-                      className="table-primary"
-                      href={`/admin/tenants/${t.id}`}
-                    >
-                      {t.name}
-                    </Link>
-                    <div className="table-secondary">
-                      {t.owner} · {t.city}
+          <div className="grid grid-2" style={{ marginTop: 18 }}>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Usage activity</h2>
+                  <p>Relative event volume on dates returned by the API.</p>
+                </div>
+              </div>
+              {usageResource.status === "ready" && chart.values.length ? (
+                <Chart values={chart.values} labels={chart.labels} />
+              ) : usageResource.status === "error" ? (
+                <p className="table-secondary">
+                  Usage could not be loaded: {usageResource.error}
+                </p>
+              ) : (
+                <p className="table-secondary">
+                  No usage events have been recorded yet.
+                </p>
+              )}
+            </Card>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>System attention</h2>
+                  <p>Newest redacted errors returned by operations.</p>
+                </div>
+                <Link className="table-action" href="/admin/errors">
+                  View all
+                </Link>
+              </div>
+              {errors.length ? (
+                <div className="timeline">
+                  {errors.slice(0, 3).map((error) => (
+                    <div className="timeline-item" key={error.id}>
+                      <strong>{titleCase(error.service)}</strong>
+                      <p>{error.message}</p>
+                      <Badge>{titleCase(error.severity)}</Badge>
                     </div>
-                  </td>
-                  <td>
-                    <Badge>{t.status}</Badge>
-                  </td>
-                  <td>{t.sync}</td>
-                  <td>
-                    <Badge>{t.health}</Badge>
-                  </td>
-                  <td>
-                    <Badge>{t.consent}</Badge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+                  ))}
+                </div>
+              ) : (
+                <p className="table-secondary">
+                  No system errors were returned.
+                </p>
+              )}
+            </Card>
+          </div>
+          <Card padded>
+            <div className="card-head">
+              <div>
+                <h2>Tenant health</h2>
+                <p>Status and latest sync evidence for each workspace.</p>
+              </div>
+              <Link className="table-action" href="/admin/tenants">
+                All tenants →
+              </Link>
+            </div>
+            {tenants.length ? (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Tenant</th>
+                      <th>Status</th>
+                      <th>Latest sync</th>
+                      <th>Consent</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tenants.slice(0, 6).map((tenant) => {
+                      const run = latestRun.get(tenant.id);
+                      return (
+                        <tr key={tenant.id}>
+                          <td>
+                            <Link
+                              className="table-primary"
+                              href={`/admin/tenants/${tenant.id}`}
+                            >
+                              {tenant.name}
+                            </Link>
+                            <div className="table-secondary">
+                              {tenantLabel(tenant)}
+                            </div>
+                          </td>
+                          <td>
+                            <Badge>{titleCase(tenant.status)}</Badge>
+                          </td>
+                          <td>
+                            {run ? (
+                              <>
+                                <Badge>{titleCase(run.status)}</Badge> ·{" "}
+                                {formatDate(run.started_at)}
+                              </>
+                            ) : (
+                              "No run"
+                            )}
+                          </td>
+                          <td>
+                            <Badge>
+                              {titleCase(tenant.research_consent_status)}
+                            </Badge>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="table-secondary">No tenants have been onboarded.</p>
+            )}
+          </Card>
+        </>
+      )}
     </AppShell>
   );
 }
 
 export function TenantList() {
+  const resource = useApiResource<Tenant[]>("/admin/tenants", previewTenants);
   const [search, setSearch] = useState("");
-  const [state, setState] = useState<DemoState>("ready");
-  const filtered = useMemo(
+  const [status, setStatus] = useState("all");
+  const rows = useMemo(
     () =>
-      tenants.filter((t) =>
-        `${t.name} ${t.owner} ${t.city}`
+      (resource.data ?? []).filter((tenant) => {
+        const matchesText = `${tenant.name} ${tenant.slug} ${tenant.city ?? ""}`
           .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [search],
+          .includes(search.toLowerCase());
+        return matchesText && (status === "all" || tenant.status === status);
+      }),
+    [resource.data, search, status],
   );
   return (
     <AppShell surface="admin" title="Tenants">
       <PageHeader
         title="SME tenants"
-        description="Onboard, monitor, and safely manage every business workspace."
+        description="Onboard, monitor, and safely manage every isolated business workspace."
         actions={
-          <>
-            <DemoStateToggle state={state} setState={setState} />
-            <Link className="button button-primary" href="/admin/onboarding">
-              ＋ Onboard SME
-            </Link>
-          </>
+          <Link className="button button-primary" href="/admin/onboarding">
+            ＋ Onboard SME
+          </Link>
         }
       />
-      {state !== "ready" ? (
-        <States state={state} emptyTitle="No SMEs onboarded" />
+      <LiveDataBanner
+        label="tenants"
+        source={resource.source}
+        status={resource.status}
+        count={resource.data?.length}
+        error={resource.error}
+      />
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      ) : !resource.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          onRetry={resource.reload}
+          empty="No SMEs onboarded"
+        />
       ) : (
         <>
           <Filters search={search} setSearch={setSearch}>
-            <select className="filter-select">
-              <option>All statuses</option>
-              <option>Active</option>
-              <option>Onboarding</option>
-              <option>Suspended</option>
-            </select>
-            <select className="filter-select">
-              <option>All health</option>
-              <option>Healthy</option>
-              <option>Attention</option>
+            <select
+              className="filter-select"
+              aria-label="Filter by status"
+              value={status}
+              onChange={(event) => setStatus(event.target.value)}
+            >
+              <option value="all">All statuses</option>
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="archived">Archived</option>
             </select>
           </Filters>
-          <section className="card table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Business</th>
-                  <th>Category</th>
-                  <th>Status</th>
-                  <th>Users</th>
-                  <th>Last sync</th>
-                  <th>Health</th>
-                  <th>Consent</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((t) => (
-                  <tr key={t.id}>
-                    <td>
-                      <div className="table-primary">{t.name}</div>
-                      <div className="table-secondary">
-                        {t.owner} · {t.city}
-                      </div>
-                    </td>
-                    <td>{t.category}</td>
-                    <td>
-                      <Badge>{t.status}</Badge>
-                    </td>
-                    <td>{t.users}</td>
-                    <td>{t.sync}</td>
-                    <td>
-                      <Badge>{t.health}</Badge>
-                    </td>
-                    <td>
-                      <Badge>{t.consent}</Badge>
-                    </td>
-                    <td>
-                      <Link
-                        className="table-action"
-                        href={`/admin/tenants/${t.id}`}
-                      >
-                        Open →
-                      </Link>
-                    </td>
+          {rows.length ? (
+            <section className="card table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Business</th>
+                    <th>Category</th>
+                    <th>Status</th>
+                    <th>Location</th>
+                    <th>Consent</th>
+                    <th>Created</th>
+                    <th></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
+                </thead>
+                <tbody>
+                  {rows.map((tenant) => (
+                    <tr key={tenant.id}>
+                      <td>
+                        <div className="table-primary">{tenant.name}</div>
+                        <div className="table-secondary">{tenant.slug}</div>
+                      </td>
+                      <td>{titleCase(tenant.business_category)}</td>
+                      <td>
+                        <Badge>{titleCase(tenant.status)}</Badge>
+                      </td>
+                      <td>
+                        {[tenant.city, tenant.country]
+                          .filter(Boolean)
+                          .join(", ") || "Not set"}
+                      </td>
+                      <td>
+                        <Badge>
+                          {titleCase(tenant.research_consent_status)}
+                        </Badge>
+                      </td>
+                      <td>{formatDate(tenant.created_at)}</td>
+                      <td>
+                        <Link
+                          className="table-action"
+                          href={`/admin/tenants/${tenant.id}`}
+                        >
+                          Open →
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          ) : (
+            <StatePanel
+              type="empty"
+              title="No matching tenants"
+              description="Clear or adjust the filters to see other workspaces."
+            />
+          )}
         </>
       )}
     </AppShell>
@@ -300,204 +461,255 @@ export function TenantList() {
 }
 
 export function TenantDetail({ id }: { id: string }) {
-  const tenant = tenants.find((t) => t.id === id) ?? tenants[0];
+  const demoTenant = useMemo(
+    () =>
+      previewTenants.find((tenant) => tenant.id === id) ?? previewTenants[0],
+    [id],
+  );
+  const resource = useApiResource<Tenant>(`/admin/tenants/${id}`, demoTenant);
+  const auditResource = useApiResource<AuditEvent[]>(
+    "/admin/audit",
+    previewAudits,
+  );
   const [tab, setTab] = useState("Overview");
   const [toast, setToast] = useState("");
+  const [mutationError, setMutationError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const tenant = resource.data;
+  const suspend = async () => {
+    if (!tenant || resource.source !== "live") return;
+    if (
+      !window.confirm(
+        `Suspend ${tenant.name}? Its members will lose workspace access.`,
+      )
+    )
+      return;
+    setSaving(true);
+    setMutationError("");
+    try {
+      const updated = await apiRequest<Tenant>(`/admin/tenants/${tenant.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "suspended" }),
+      });
+      resource.replace(updated);
+      setToast(`${tenant.name} is suspended.`);
+    } catch (reason) {
+      setMutationError(
+        reason instanceof Error
+          ? reason.message
+          : "The tenant could not be suspended.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <AppShell surface="admin" title={tenant.name}>
+    <AppShell surface="admin" title={tenant?.name ?? "Tenant detail"}>
       <PageHeader
-        title={tenant.name}
-        description={`${tenant.category} · ${tenant.city} · Owner: ${tenant.owner}`}
+        title={tenant?.name ?? "Tenant detail"}
+        description={
+          tenant
+            ? tenantLabel(tenant) || "Business workspace"
+            : "Loading business workspace."
+        }
         actions={
           <>
             <button
               className="button button-secondary"
-              onClick={() => setToast("Manual sync queued.")}
+              disabled
+              title="No operator-scoped sync endpoint is available."
             >
               ↻ Trigger sync
             </button>
             <button
               className="button button-danger"
-              onClick={() =>
-                setToast(
-                  "Suspension requires typed confirmation in production.",
-                )
+              disabled={
+                !tenant ||
+                resource.source !== "live" ||
+                tenant.status === "suspended" ||
+                saving
+              }
+              onClick={() => void suspend()}
+              title={
+                resource.source !== "live"
+                  ? "Destructive actions require live API data."
+                  : undefined
               }
             >
-              Suspend tenant
+              {saving ? "Suspending…" : "Suspend tenant"}
             </button>
           </>
         }
       />
-      <div className="alert alert-success">
-        ✓ Core setup is complete. Latest data synced {tenant.sync}; Hermes
-        profile is responding.
-      </div>
-      <div className="tabs" role="tablist">
-        {["Overview", "People & phones", "Bumpa", "Hermes", "Audit log"].map(
-          (t) => (
-            <button
-              role="tab"
-              aria-selected={tab === t}
-              className={`tab ${tab === t ? "active" : ""}`}
-              key={t}
-              onClick={() => setTab(t)}
-            >
-              {t}
-            </button>
-          ),
-        )}
-      </div>
-      {tab === "Overview" && (
-        <div className="grid grid-2">
-          <Card padded>
-            <div className="card-head">
-              <div>
-                <h2>Tenant details</h2>
-                <p>Identity and research status.</p>
-              </div>
-              <Badge>{tenant.status}</Badge>
-            </div>
-            <div className="detail-list">
-              {[
-                ["Tenant ID", `ten_${tenant.id}_7f4a`],
-                ["Timezone", "Africa/Lagos"],
-                ["Currency", "NGN"],
-                ["Research consent", tenant.consent],
-                ["Created", "19 May 2026 by Nneka"],
-              ].map(([l, v]) => (
-                <div className="detail-row" key={l}>
-                  <span className="detail-label">{l}</span>
-                  <span className="detail-value">{v}</span>
-                </div>
-              ))}
-            </div>
-          </Card>
-          <Card padded>
-            <div className="card-head">
-              <div>
-                <h2>Readiness</h2>
-                <p>Requirements for an end-to-end conversation.</p>
-              </div>
-            </div>
-            {[
-              ["Tenant and owner", 100],
-              ["Approved phone", 100],
-              ["Bumpa connection", 100],
-              ["First successful sync", 100],
-              ["Hermes profile", 100],
-              ["Research consent", tenant.consent === "Granted" ? 100 : 30],
-            ].map(([name, val]) => (
-              <div key={String(name)} style={{ marginBottom: 17 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: 13,
-                    marginBottom: 7,
-                  }}
-                >
-                  <strong>{name}</strong>
-                  <span>{val === 100 ? "Complete" : "Pending"}</span>
-                </div>
-                <div className="progress">
-                  <span style={{ width: `${val}%` }} />
-                </div>
-              </div>
-            ))}
-          </Card>
+      <LiveDataBanner
+        label="tenant record"
+        source={resource.source}
+        status={resource.status}
+        error={resource.error}
+      />
+      {mutationError && (
+        <div className="alert alert-danger" role="alert">
+          {mutationError}
         </div>
       )}
-      {tab === "People & phones" && (
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Users and approved identities</h2>
-              <p>Phone values are masked by default.</p>
+      {resource.status !== "ready" || !tenant ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      ) : (
+        <>
+          <div
+            className="tabs"
+            role="tablist"
+            aria-label="Tenant detail sections"
+          >
+            {[
+              "Overview",
+              "People & phones",
+              "Bumpa",
+              "Hermes",
+              "Audit log",
+            ].map((name) => (
+              <button
+                role="tab"
+                aria-selected={tab === name}
+                className={`tab ${tab === name ? "active" : ""}`}
+                key={name}
+                onClick={() => setTab(name)}
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {tab === "Overview" && (
+            <div className="grid grid-2">
+              <Card padded>
+                <div className="card-head">
+                  <div>
+                    <h2>Tenant details</h2>
+                    <p>Identity and data-governance configuration.</p>
+                  </div>
+                  <Badge>{titleCase(tenant.status)}</Badge>
+                </div>
+                {[
+                  ["Tenant ID", tenant.id],
+                  ["Slug", tenant.slug],
+                  ["Timezone", tenant.timezone],
+                  ["Currency", tenant.currency_code],
+                  [
+                    "Research consent",
+                    titleCase(tenant.research_consent_status),
+                  ],
+                  ["Created", formatDate(tenant.created_at)],
+                ].map(([label, value]) => (
+                  <div className="detail-row" key={label}>
+                    <span className="detail-label">{label}</span>
+                    <span className="detail-value">{value}</span>
+                  </div>
+                ))}
+              </Card>
+              <Card padded>
+                <div className="card-head">
+                  <div>
+                    <h2>Readiness evidence</h2>
+                    <p>Only evidence exposed by the current API is shown.</p>
+                  </div>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Tenant record</span>
+                  <Badge>Complete</Badge>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Active access</span>
+                  <Badge>
+                    {tenant.status === "active" ? "Complete" : "Unavailable"}
+                  </Badge>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Research consent</span>
+                  <Badge>{titleCase(tenant.research_consent_status)}</Badge>
+                </div>
+                <div
+                  className="alert alert-info"
+                  style={{ marginTop: 16, marginBottom: 0 }}
+                >
+                  Membership, Bumpa, and Hermes readiness require dedicated
+                  operator read endpoints before they can be asserted here.
+                </div>
+              </Card>
             </div>
-            <button className="button button-primary button-small">
-              ＋ Add user
-            </button>
-          </div>
-          <div className="detail-row">
-            <span className="detail-value">Amara Okafor · Owner</span>
-            <span>
-              <Badge>Approved</Badge> &nbsp; +234 803 ••• 1442
-            </span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-value">Tobi Adeyemi · Admin</span>
-            <span>
-              <Badge>Approved</Badge> &nbsp; +234 706 ••• 0901
-            </span>
-          </div>
-        </Card>
-      )}
-      {tab === "Bumpa" && (
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Bumpa connection</h2>
-              <p>Credentials are write-only and encrypted.</p>
-            </div>
-            <Badge>Connected</Badge>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Scope</span>
-            <span className="detail-value">business_id · •••• 7K2A</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Latest run</span>
-            <span className="detail-value">Success · 11/11 datasets · 31s</span>
-          </div>
-          <button className="button button-secondary" style={{ marginTop: 16 }}>
-            Replace API key
-          </button>
-        </Card>
-      )}
-      {tab === "Hermes" && (
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Hermes profile</h2>
-              <p>Private on the internal Docker network.</p>
-            </div>
-            <Badge>Healthy</Badge>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Profile</span>
-            <span className="detail-value">tenant_{tenant.id}_7f4a</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Internal port</span>
-            <span className="detail-value">8724</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Last response</span>
-            <span className="detail-value">3 minutes ago · 2.7s</span>
-          </div>
-          <button className="button button-secondary" style={{ marginTop: 16 }}>
-            Restart profile
-          </button>
-        </Card>
-      )}
-      {tab === "Audit log" && (
-        <Card padded>
-          <div className="timeline">
-            <div className="timeline-item">
-              <strong>tenant.sync.triggered</strong>
-              <p>Nneka · 12 Jul, 10:30 · Manual action</p>
-            </div>
-            <div className="timeline-item">
-              <strong>tenant.phone.approved</strong>
-              <p>Nneka · 11 Jul, 14:12 · +234 706 ••• 0901</p>
-            </div>
-            <div className="timeline-item">
-              <strong>research.consent.granted</strong>
-              <p>Amara · 9 Jul, 09:18 · Self-service</p>
-            </div>
-          </div>
-        </Card>
+          )}
+          {tab === "People & phones" && (
+            <StatePanel
+              type="empty"
+              title="Cross-tenant identity detail is not exposed"
+              description="The operator API can create users and phones, but it does not yet provide a tenant-scoped identity list. No preview identities are shown as live."
+              action={
+                <button className="button button-secondary" disabled>
+                  ＋ Add user unavailable
+                </button>
+              }
+            />
+          )}
+          {tab === "Bumpa" && (
+            <StatePanel
+              type="empty"
+              title="Bumpa status is not exposed to operators"
+              description="Connection credentials can be written during onboarding, but the API has no operator-scoped status endpoint for this tenant."
+              action={
+                <button className="button button-secondary" disabled>
+                  Replace API key unavailable
+                </button>
+              }
+            />
+          )}
+          {tab === "Hermes" && (
+            <StatePanel
+              type="empty"
+              title="Hermes status is not exposed to operators"
+              description="A profile can be provisioned, but runtime health and restart endpoints are not available yet."
+              action={
+                <button className="button button-secondary" disabled>
+                  Restart unavailable
+                </button>
+              }
+            />
+          )}
+          {tab === "Audit log" &&
+            (auditResource.status !== "ready" ? (
+              <ResourceState
+                status={auditResource.status}
+                error={auditResource.error}
+                onRetry={auditResource.reload}
+              />
+            ) : (
+              <Card padded>
+                <div className="timeline">
+                  {(auditResource.data ?? [])
+                    .filter((event) => event.tenant_id === tenant.id)
+                    .map((event) => (
+                      <div className="timeline-item" key={event.id}>
+                        <strong>{event.action}</strong>
+                        <p>
+                          {titleCase(event.resource_type)} ·{" "}
+                          {formatDate(event.created_at)}
+                        </p>
+                      </div>
+                    ))}
+                  {!(auditResource.data ?? []).some(
+                    (event) => event.tenant_id === tenant.id,
+                  ) && (
+                    <p className="table-secondary">
+                      No audit events were returned for this tenant.
+                    </p>
+                  )}
+                </div>
+              </Card>
+            ))}
+        </>
       )}
       {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
@@ -506,125 +718,149 @@ export function TenantDetail({ id }: { id: string }) {
 
 export function UserList() {
   const [search, setSearch] = useState("");
-  const users = [
-    {
-      name: "Amara Okafor",
-      tenant: "Kaia Home",
-      role: "Owner",
-      phone: "+234 803 ••• 1442",
-      status: "Active",
-      seen: "Now",
-    },
-    {
-      name: "Dami Ajayi",
-      tenant: "Morenike Studio",
-      role: "Owner",
-      phone: "+234 802 ••• 1008",
-      status: "Active",
-      seen: "41 min ago",
-    },
-    {
-      name: "Feyi Cole",
-      tenant: "Bean There Coffee",
-      role: "Owner",
-      phone: "+234 709 ••• 4512",
-      status: "Active",
-      seen: "4 hours ago",
-    },
-    {
-      name: "Ife Nwosu",
-      tenant: "Naya Skin",
-      role: "Owner",
-      phone: "+234 813 ••• 0700",
-      status: "Revoked",
-      seen: "3 days ago",
-    },
-  ].filter((u) => u.name.toLowerCase().includes(search.toLowerCase()));
+  const rows = previewTeam.filter((member) =>
+    `${member.name} ${member.role}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
   return (
     <AppShell surface="admin" title="Users">
       <PageHeader
         title="Platform users"
-        description="Review membership, identity status, and recent activity across tenants."
-        actions={<button className="button button-primary">＋ Add user</button>}
+        description="Cross-tenant membership administration requires an explicit read API."
+        actions={
+          <button className="button button-primary" disabled>
+            ＋ Add user unavailable
+          </button>
+        }
       />
-      <Filters search={search} setSearch={setSearch} />
-      <section className="card table-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Tenant</th>
-              <th>Role</th>
-              <th>Phone</th>
-              <th>Status</th>
-              <th>Last active</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((u) => (
-              <tr key={u.name}>
-                <td className="table-primary">{u.name}</td>
-                <td>{u.tenant}</td>
-                <td>{u.role}</td>
-                <td>{u.phone}</td>
-                <td>
-                  <Badge>{u.status}</Badge>
-                </td>
-                <td>{u.seen}</td>
-                <td>
-                  <button className="button button-ghost button-small">
-                    Manage
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+      {demoFallbackEnabled ? (
+        <>
+          <LiveDataBanner
+            label="user preview"
+            source="demo"
+            status="ready"
+            count={rows.length}
+          />
+          <Filters search={search} setSearch={setSearch} />
+          <section className="card table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Role</th>
+                  <th>Phone</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((member) => (
+                  <tr key={member.membership_id}>
+                    <td className="table-primary">{member.name}</td>
+                    <td>{titleCase(member.role)}</td>
+                    <td>{maskPhone(member.phone_e164)}</td>
+                    <td>
+                      <Badge>{titleCase(member.status)}</Badge>
+                    </td>
+                    <td>
+                      <button
+                        className="button button-ghost button-small"
+                        disabled
+                      >
+                        Manage unavailable
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+        </>
+      ) : (
+        <StatePanel
+          type="empty"
+          title="Cross-tenant user index is not available"
+          description="The production API does not expose a global user list, so this screen intentionally shows no synthetic records."
+          action={
+            <Link className="button button-secondary" href="/admin/tenants">
+              View tenants
+            </Link>
+          }
+        />
+      )}
     </AppShell>
   );
 }
 
 export function SyncList() {
-  const [state, setState] = useState<DemoState>("ready");
+  const runs = useApiResource<SyncRun[]>(
+    "/admin/system/sync-runs",
+    previewSyncRuns,
+  );
+  const tenants = useApiResource<Tenant[]>("/admin/tenants", previewTenants);
+  const names = new Map(
+    (tenants.data ?? []).map((tenant) => [tenant.id, tenant.name]),
+  );
+  const successCount = (runs.data ?? []).filter(
+    (run) => run.status === "success",
+  ).length;
   return (
     <AppShell surface="admin" title="Sync runs">
       <PageHeader
         title="Bumpa sync runs"
-        description="Monitor freshness, availability, pagination, and upstream failures."
+        description="Monitor freshness and upstream failures from recorded sync runs."
         actions={
-          <>
-            <DemoStateToggle state={state} setState={setState} />
-            <button className="button button-primary">↻ Trigger sync</button>
-          </>
+          <button
+            className="button button-primary"
+            disabled
+            title="Choose a tenant after an operator-scoped trigger endpoint is added."
+          >
+            ↻ Trigger sync unavailable
+          </button>
         }
       />
-      {state !== "ready" ? (
-        <States state={state} emptyTitle="No sync runs yet" />
+      <LiveDataBanner
+        label="sync runs"
+        source={runs.source}
+        status={runs.status}
+        count={runs.data?.length}
+        error={runs.error}
+      />
+      {runs.status !== "ready" ? (
+        <ResourceState
+          status={runs.status}
+          error={runs.error}
+          onRetry={runs.reload}
+        />
+      ) : !runs.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          onRetry={runs.reload}
+          empty="No sync runs yet"
+        />
       ) : (
         <>
-          <div className="grid grid-4">
+          <div className="grid grid-3">
             <Metric
               label="Success rate"
-              value="95.8%"
-              trend="+1.2%"
-              note="Last 7 days"
+              value={percent(successCount, runs.data.length)}
+              note="Recent API window"
             />
             <Metric
               label="Running now"
-              value="2"
-              note="Both within threshold"
+              value={String(
+                runs.data.filter((run) => run.status === "running").length,
+              )}
             />
             <Metric
-              label="Partial runs"
-              value="4"
-              note="Mostly unavailable profit data"
-            />
-            <Metric
-              label="Failed runs"
-              value="1"
-              note="Authentication rejected"
+              label="Failed or partial"
+              value={String(
+                runs.data.filter((run) =>
+                  ["failed", "partial"].includes(run.status),
+                ).length,
+              )}
             />
           </div>
           <section className="card table-wrap" style={{ marginTop: 18 }}>
@@ -637,25 +873,34 @@ export function SyncList() {
                   <th>Duration</th>
                   <th>Datasets</th>
                   <th>Status</th>
-                  <th></th>
+                  <th>Error</th>
                 </tr>
               </thead>
               <tbody>
-                {syncRuns.map((r) => (
-                  <tr key={`${r.tenant}-${r.started}`}>
-                    <td className="table-primary">{r.tenant}</td>
-                    <td>{r.range}</td>
-                    <td>{r.started}</td>
-                    <td>{r.duration}</td>
-                    <td>{r.datasets}</td>
-                    <td>
-                      <Badge>{r.status}</Badge>
+                {runs.data.map((run) => (
+                  <tr key={run.id}>
+                    <td className="table-primary">
+                      {run.tenant_id
+                        ? (names.get(run.tenant_id) ??
+                          run.tenant_id.slice(0, 8))
+                        : "Unknown"}
                     </td>
                     <td>
-                      <button className="button button-ghost button-small">
-                        Inspect
-                      </button>
+                      {run.requested_from && run.requested_to
+                        ? `${run.requested_from} – ${run.requested_to}`
+                        : "Not recorded"}
                     </td>
+                    <td>{formatDate(run.started_at)}</td>
+                    <td>{durationBetween(run.started_at, run.finished_at)}</td>
+                    <td>
+                      {run.dataset_results
+                        ? Object.keys(run.dataset_results).length
+                        : "—"}
+                    </td>
+                    <td>
+                      <Badge>{titleCase(run.status)}</Badge>
+                    </td>
+                    <td>{run.error ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -668,157 +913,350 @@ export function SyncList() {
 }
 
 export function ErrorList() {
+  const resource = useApiResource<SystemError[]>(
+    "/admin/system/errors",
+    previewErrors,
+  );
   const [search, setSearch] = useState("");
+  const rows = (resource.data ?? []).filter((error) =>
+    `${error.service} ${error.message}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
   return (
     <AppShell surface="admin" title="System errors">
       <PageHeader
         title="System errors"
         description="Triage redacted operational errors without exposing secrets or customer PII."
       />
+      <LiveDataBanner
+        label="system errors"
+        source={resource.source}
+        status={resource.status}
+        count={resource.data?.length}
+        error={resource.error}
+      />
       <div className="alert alert-warning">
-        Error metadata is scrubbed before display. Use break-glass access only
-        when redacted context is insufficient.
+        Error metadata is scrubbed before display. Resolution controls remain
+        disabled until the API exposes an audited mutation.
       </div>
-      <Filters search={search} setSearch={setSearch}>
-        <select className="filter-select">
-          <option>Open & investigating</option>
-          <option>All statuses</option>
-          <option>Resolved</option>
-        </select>
-      </Filters>
-      <div className="grid">
-        {errors
-          .filter((e) =>
-            `${e.service} ${e.tenant} ${e.message}`
-              .toLowerCase()
-              .includes(search.toLowerCase()),
-          )
-          .map((e) => (
-            <Card padded key={e.message}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 16,
-                  alignItems: "flex-start",
-                }}
-              >
-                <div>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 8,
-                      alignItems: "center",
-                      marginBottom: 10,
-                    }}
-                  >
-                    <Badge tone={statusTone(e.severity)}>{e.severity}</Badge>
-                    <span className="tag">{e.service}</span>
-                    <span className="tag">{e.tenant}</span>
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          onRetry={resource.reload}
+        />
+      ) : !resource.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          onRetry={resource.reload}
+          empty="No system errors recorded"
+        />
+      ) : (
+        <>
+          <Filters search={search} setSearch={setSearch} />
+          <div className="grid">
+            {rows.map((error) => (
+              <Card padded key={error.id}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    alignItems: "flex-start",
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                        marginBottom: 10,
+                      }}
+                    >
+                      <Badge>{titleCase(error.severity)}</Badge>
+                      <span className="tag">{titleCase(error.service)}</span>
+                    </div>
+                    <strong>{error.message}</strong>
+                    <p className="table-secondary">
+                      Recorded {formatDate(error.created_at)} ·{" "}
+                      {error.id.slice(0, 12)}
+                    </p>
                   </div>
-                  <strong>{e.message}</strong>
-                  <p className="table-secondary">
-                    Last occurred {e.happened} · {e.count} occurrence
-                    {e.count > 1 ? "s" : ""} · correlation id req_•••7a9
-                  </p>
                 </div>
-                <div>
-                  <Badge>{e.status}</Badge>
+                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                  <button
+                    className="button button-secondary button-small"
+                    disabled
+                  >
+                    Inspect unavailable
+                  </button>
+                  <button className="button button-ghost button-small" disabled>
+                    Resolve unavailable
+                  </button>
                 </div>
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                <button className="button button-secondary button-small">
-                  Inspect
-                </button>
-                <button className="button button-ghost button-small">
-                  Mark resolved
-                </button>
-              </div>
-            </Card>
-          ))}
-      </div>
+              </Card>
+            ))}
+            {!rows.length && (
+              <StatePanel
+                type="empty"
+                title="No matching errors"
+                description="Try a different search term."
+              />
+            )}
+          </div>
+        </>
+      )}
     </AppShell>
   );
 }
 
+function downloadUsage(events: UsageEvent[]) {
+  const lines = [
+    "id,tenant_id,event_name,created_at",
+    ...events.map((event) =>
+      [event.id, event.tenant_id ?? "", event.event_name, event.created_at]
+        .map((value) => `"${String(value).replaceAll('"', '""')}"`)
+        .join(","),
+    ),
+  ];
+  const url = URL.createObjectURL(
+    new Blob([lines.join("\n")], { type: "text/csv" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = "bumpa-bestie-usage.csv";
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export function UsageList() {
+  const usage = useApiResource<UsageEvent[]>("/admin/usage", previewUsage);
+  const tenants = useApiResource<Tenant[]>("/admin/tenants", previewTenants);
+  const names = new Map(
+    (tenants.data ?? []).map((tenant) => [tenant.id, tenant.name]),
+  );
+  const grouped = useMemo(() => {
+    const map = new Map<
+      string,
+      { total: number; whatsapp: number; web: number }
+    >();
+    for (const event of usage.data ?? []) {
+      const key = event.tenant_id ?? "platform";
+      const row = map.get(key) ?? { total: 0, whatsapp: 0, web: 0 };
+      row.total += 1;
+      if (event.event_name.toLowerCase().includes("whatsapp"))
+        row.whatsapp += 1;
+      if (event.event_name.toLowerCase().includes("web")) row.web += 1;
+      map.set(key, row);
+    }
+    return [...map.entries()];
+  }, [usage.data]);
   return (
     <AppShell surface="admin" title="Usage">
       <PageHeader
         title="Usage and capacity"
-        description="Understand activity, channel mix, and indicative model cost by tenant."
+        description="Recorded usage events grouped without inventing cost or active-user metrics."
         actions={
-          <button className="button button-secondary">⇩ Export CSV</button>
+          <button
+            className="button button-secondary"
+            disabled={usage.status !== "ready" || !usage.data?.length}
+            onClick={() => usage.data && downloadUsage(usage.data)}
+          >
+            ⇩ Export loaded CSV
+          </button>
         }
       />
-      <div className="grid grid-4">
-        <Metric
-          label="Total messages"
-          value="3,842"
-          trend="+18%"
-          note="Last 7 days"
+      <LiveDataBanner
+        label="usage events"
+        source={usage.source}
+        status={usage.status}
+        count={usage.data?.length}
+        error={usage.error}
+      />
+      {usage.status !== "ready" ? (
+        <ResourceState
+          status={usage.status}
+          error={usage.error}
+          onRetry={usage.reload}
         />
-        <Metric
-          label="Active users"
-          value="61"
-          trend="+8"
-          note="Across 24 SMEs"
+      ) : !usage.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          onRetry={usage.reload}
+          empty="No usage events recorded"
         />
-        <Metric
-          label="WhatsApp share"
-          value="77%"
-          trend="+4%"
-          note="2,958 messages"
-        />
-        <Metric
-          label="Indicative LLM cost"
-          value="₦112k"
-          trend="-6%"
-          note="Within monthly budget"
-        />
-      </div>
-      <section className="card table-wrap" style={{ marginTop: 18 }}>
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Tenant</th>
-              <th>Messages</th>
-              <th>WhatsApp</th>
-              <th>Web</th>
-              <th>Indicative cost</th>
-              <th>Active users</th>
-            </tr>
-          </thead>
-          <tbody>
-            {usageRows.map((u) => (
-              <tr key={u.tenant}>
-                <td className="table-primary">{u.tenant}</td>
-                <td>{u.messages.toLocaleString()}</td>
-                <td>{u.whatsapp}</td>
-                <td>{u.web}</td>
-                <td>{u.llm}</td>
-                <td>{u.active}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+      ) : (
+        <>
+          <div className="grid grid-3">
+            <Metric
+              label="Recorded events"
+              value={usage.data.length.toLocaleString()}
+              note="Latest API window"
+            />
+            <Metric
+              label="WhatsApp events"
+              value={String(
+                usage.data.filter((event) =>
+                  event.event_name.toLowerCase().includes("whatsapp"),
+                ).length,
+              )}
+            />
+            <Metric
+              label="Web events"
+              value={String(
+                usage.data.filter((event) =>
+                  event.event_name.toLowerCase().includes("web"),
+                ).length,
+              )}
+            />
+          </div>
+          <section className="card table-wrap" style={{ marginTop: 18 }}>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Tenant</th>
+                  <th>Events</th>
+                  <th>WhatsApp-labelled</th>
+                  <th>Web-labelled</th>
+                </tr>
+              </thead>
+              <tbody>
+                {grouped.map(([tenantId, row]) => (
+                  <tr key={tenantId}>
+                    <td className="table-primary">
+                      {names.get(tenantId) ??
+                        (tenantId === "platform"
+                          ? "Platform"
+                          : tenantId.slice(0, 8))}
+                    </td>
+                    <td>{row.total}</td>
+                    <td>{row.whatsapp}</td>
+                    <td>{row.web}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
+          <div className="alert alert-info">
+            The current API records event names and timestamps. Token cost and
+            active-user metrics are intentionally omitted because the API does
+            not provide them.
+          </div>
+        </>
+      )}
     </AppShell>
   );
 }
 
+type OnboardingForm = {
+  name: string;
+  slug: string;
+  category: string;
+  city: string;
+  ownerName: string;
+  ownerPhone: string;
+  ownerEmail: string;
+  phoneLabel: string;
+};
+
 export function Onboarding() {
+  const steps = [
+    "Business",
+    "Owner",
+    "WhatsApp identity",
+    "Bumpa",
+    "Hermes",
+    "Review",
+  ];
   const [step, setStep] = useState(0);
-  const [toast, setToast] = useState("");
-  const steps = ["Business", "Owner", "WhatsApp", "Bumpa", "Hermes", "Review"];
+  const [form, setForm] = useState<OnboardingForm>({
+    name: "",
+    slug: "",
+    category: "",
+    city: "",
+    ownerName: "",
+    ownerPhone: "",
+    ownerEmail: "",
+    phoneLabel: "Owner",
+  });
+  const [tenant, setTenant] = useState<Tenant | null>(null);
+  const [owner, setOwner] = useState<{
+    user_id: string;
+    membership_id: string;
+  } | null>(null);
+  const [phoneCreated, setPhoneCreated] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const update = (key: keyof OnboardingForm, value: string) =>
+    setForm((current) => ({ ...current, [key]: value }));
+  const continueStep = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      if (step === 0 && !tenant) {
+        const created = await apiRequest<Tenant>("/admin/tenants", {
+          method: "POST",
+          body: JSON.stringify({
+            slug: form.slug,
+            name: form.name,
+            business_category: form.category || null,
+            country: "NG",
+            city: form.city || null,
+            timezone: "Africa/Lagos",
+            currency_code: "NGN",
+          }),
+        });
+        setTenant(created);
+      }
+      if (step === 1 && tenant && !owner) {
+        const created = await apiRequest<{
+          user_id: string;
+          membership_id: string;
+        }>(`/admin/tenants/${tenant.id}/users`, {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.ownerName,
+            phone_e164: form.ownerPhone,
+            email: form.ownerEmail || null,
+            role: "owner",
+          }),
+        });
+        setOwner(created);
+      }
+      if (step === 2 && tenant && owner && !phoneCreated) {
+        await apiRequest(`/admin/tenants/${tenant.id}/phones`, {
+          method: "POST",
+          body: JSON.stringify({
+            user_id: owner.user_id,
+            phone_e164: form.ownerPhone,
+            label: form.phoneLabel || "Owner",
+          }),
+        });
+        setPhoneCreated(true);
+      }
+      setStep((current) => Math.min(current + 1, steps.length - 1));
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "This onboarding step could not be saved.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <AppShell surface="admin" title="Onboard SME">
       <PageHeader
         title="Onboard a new SME"
-        description="Create one isolated tenant and verify every dependency before access begins."
+        description="Create the isolated tenant, owner membership, and approved identity through audited APIs."
         actions={
           <Link className="button button-secondary" href="/admin/tenants">
-            Save and exit
+            Exit onboarding
           </Link>
         }
       />
@@ -828,17 +1266,19 @@ export function Onboarding() {
       >
         <Card padded>
           <div className="timeline">
-            {steps.map((s, i) => (
-              <div className="timeline-item" key={s}>
+            {steps.map((name, index) => (
+              <div className="timeline-item" key={name}>
                 <strong
-                  style={{ color: i === step ? "var(--forest)" : undefined }}
+                  style={{
+                    color: index === step ? "var(--forest)" : undefined,
+                  }}
                 >
-                  {s}
+                  {name}
                 </strong>
                 <p>
-                  {i < step
+                  {index < step
                     ? "Complete"
-                    : i === step
+                    : index === step
                       ? "In progress"
                       : "Not started"}
                 </p>
@@ -854,144 +1294,160 @@ export function Onboarding() {
               </span>
               <h2 style={{ fontSize: 24, marginTop: 12 }}>{steps[step]}</h2>
             </div>
-            <Badge tone={step === steps.length - 1 ? "success" : "warning"}>
-              {step === steps.length - 1 ? "Ready" : "Draft"}
-            </Badge>
+            <Badge>{step === steps.length - 1 ? "Ready" : "Draft"}</Badge>
           </div>
-          {step === 0 && (
-            <>
-              <div className="grid grid-2">
-                <div className="field">
-                  <label>Business name</label>
-                  <input className="input" defaultValue="Ori Crafts" />
-                </div>
-                <div className="field">
-                  <label>Slug</label>
-                  <input className="input" defaultValue="ori-crafts" />
-                </div>
-                <div className="field">
-                  <label>Category</label>
-                  <select className="select">
-                    <option>Arts & crafts</option>
-                    <option>Fashion</option>
-                    <option>Food & drink</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>City</label>
-                  <input className="input" defaultValue="Ibadan" />
-                </div>
-                <div className="field">
-                  <label>Timezone</label>
-                  <select className="select">
-                    <option>Africa/Lagos</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Currency</label>
-                  <select className="select">
-                    <option>NGN — Nigerian naira</option>
-                  </select>
-                </div>
-              </div>
-            </>
+          {error && (
+            <div className="alert alert-danger" role="alert">
+              {error}
+            </div>
           )}
-          {step === 1 && (
-            <>
+          {step === 0 && (
+            <div className="grid grid-2">
               <div className="field">
-                <label>Owner full name</label>
-                <input className="input" defaultValue="Lola Akanbi" />
-              </div>
-              <div className="field">
-                <label>Owner WhatsApp number</label>
-                <input className="input" defaultValue="+234 805 000 2290" />
-              </div>
-              <div className="field">
-                <label>Email (optional)</label>
+                <label htmlFor="business-name">Business name</label>
                 <input
+                  id="business-name"
                   className="input"
-                  type="email"
-                  placeholder="lola@example.com"
+                  required
+                  value={form.name}
+                  onChange={(event) => update("name", event.target.value)}
                 />
               </div>
-            </>
+              <div className="field">
+                <label htmlFor="business-slug">Slug</label>
+                <input
+                  id="business-slug"
+                  className="input"
+                  required
+                  pattern="[a-z0-9-]+"
+                  value={form.slug}
+                  onChange={(event) =>
+                    update(
+                      "slug",
+                      event.target.value
+                        .toLowerCase()
+                        .replace(/[^a-z0-9-]/g, ""),
+                    )
+                  }
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="business-category">Category</label>
+                <input
+                  id="business-category"
+                  className="input"
+                  value={form.category}
+                  onChange={(event) => update("category", event.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="business-city">City</label>
+                <input
+                  id="business-city"
+                  className="input"
+                  value={form.city}
+                  onChange={(event) => update("city", event.target.value)}
+                />
+              </div>
+            </div>
+          )}
+          {step === 1 && (
+            <div className="grid grid-2">
+              <div className="field">
+                <label htmlFor="owner-name">Owner name</label>
+                <input
+                  id="owner-name"
+                  className="input"
+                  required
+                  value={form.ownerName}
+                  onChange={(event) => update("ownerName", event.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="owner-phone">Phone in E.164 format</label>
+                <input
+                  id="owner-phone"
+                  className="input"
+                  type="tel"
+                  required
+                  placeholder="+234…"
+                  value={form.ownerPhone}
+                  onChange={(event) => update("ownerPhone", event.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="owner-email">Email (optional)</label>
+                <input
+                  id="owner-email"
+                  className="input"
+                  type="email"
+                  value={form.ownerEmail}
+                  onChange={(event) => update("ownerEmail", event.target.value)}
+                />
+              </div>
+            </div>
           )}
           {step === 2 && (
             <>
+              <div className="field">
+                <label htmlFor="phone-label">Identity label</label>
+                <input
+                  id="phone-label"
+                  className="input"
+                  value={form.phoneLabel}
+                  onChange={(event) => update("phoneLabel", event.target.value)}
+                />
+              </div>
               <div className="alert alert-info">
-                The owner number will become the first approved identity after
-                verification.
+                This creates an approved identity record. WhatsApp delivery and
+                verification remain unavailable until the Meta integration is
+                activated.
               </div>
-              <div className="detail-row">
-                <span className="detail-label">Number</span>
-                <span className="detail-value">+234 805 ••• 2290</span>
-              </div>
-              <button className="button button-secondary">
-                Send verification
-              </button>
             </>
           )}
           {step === 3 && (
-            <>
-              <div className="alert alert-warning">
-                The API key is write-only. It will be encrypted and cannot be
-                viewed after saving.
-              </div>
-              <div className="field">
-                <label>Bumpa API key</label>
-                <input
-                  className="input"
-                  type="password"
-                  placeholder="Paste API key"
-                />
-              </div>
-              <div className="field">
-                <label>Scope type</label>
-                <select className="select">
-                  <option>business_id</option>
-                  <option>location_id</option>
-                </select>
-              </div>
-              <div className="field">
-                <label>Scope ID</label>
-                <input className="input" placeholder="Exact scope identifier" />
-              </div>
-              <button
-                className="button button-secondary"
-                style={{ marginTop: 16 }}
-              >
-                Test connection
-              </button>
-            </>
+            <StatePanel
+              type="empty"
+              title="Bumpa activation is the next integration"
+              description="The tenant is ready, but production credentials and the live adapter are intentionally not configured. No connection is claimed."
+              action={
+                <button className="button button-secondary" disabled>
+                  Connect Bumpa unavailable
+                </button>
+              }
+            />
           )}
           {step === 4 && (
-            <>
-              <div className="alert alert-success">
-                ✓ Profile name and private port can be generated safely.
-              </div>
-              <div className="detail-row">
-                <span className="detail-label">Profile name</span>
-                <span className="detail-value">tenant_ori_crafts_91ca</span>
-              </div>
-              <div className="detail-row">
-                <span className="detail-label">Proposed internal port</span>
-                <span className="detail-value">8729</span>
-              </div>
-              <button className="button button-secondary">
-                Create profile
-              </button>
-            </>
+            <StatePanel
+              type="empty"
+              title="Hermes activation is the next integration"
+              description="The tenant-specific Hermes profile will be provisioned after the shared deployment is verified. No local simulator is presented as a live agent."
+              action={
+                <button className="button button-secondary" disabled>
+                  Provision Hermes unavailable
+                </button>
+              }
+            />
           )}
           {step === 5 && (
             <div>
               <div className="alert alert-success">
-                All technical readiness checks pass. Research consent remains
-                pending and will be shown to the owner.
+                Tenant, owner membership, and approved identity are persisted.
+                Provider integrations remain explicitly pending.
               </div>
-              {steps.slice(0, -1).map((s) => (
-                <div className="detail-row" key={s}>
-                  <span className="detail-value">{s}</span>
-                  <Badge>Complete</Badge>
+              {[
+                ["Tenant", tenant?.name ?? "Not created"],
+                ["Owner", form.ownerName],
+                [
+                  "WhatsApp identity",
+                  phoneCreated ? "Recorded" : "Not recorded",
+                ],
+                ["Bumpa", "Pending integration"],
+                ["Hermes", "Pending integration"],
+              ].map(([label, value]) => (
+                <div className="detail-row" key={label}>
+                  <span className="detail-value">{label}</span>
+                  <Badge>{value}</Badge>
                 </div>
               ))}
             </div>
@@ -1006,34 +1462,43 @@ export function Onboarding() {
           >
             <button
               className="button button-secondary"
-              disabled={step === 0}
-              onClick={() => setStep((v) => v - 1)}
+              disabled={step === 0 || busy}
+              onClick={() => setStep((current) => current - 1)}
             >
               ← Back
             </button>
             {step < steps.length - 1 ? (
               <button
                 className="button button-primary"
-                onClick={() => setStep((v) => v + 1)}
-              >
-                Save and continue →
-              </button>
-            ) : (
-              <button
-                className="button button-primary"
-                onClick={() =>
-                  setToast(
-                    "Ori Crafts is ready. Invite delivery will activate with WhatsApp.",
-                  )
+                disabled={
+                  busy ||
+                  (step === 0 && (!form.name || !form.slug)) ||
+                  (step === 1 && (!form.ownerName || !form.ownerPhone)) ||
+                  (step === 2 && (!tenant || !owner))
                 }
+                onClick={() => void continueStep()}
               >
-                Finish onboarding
+                {busy
+                  ? "Saving…"
+                  : step >= 3
+                    ? "Continue with integration pending →"
+                    : "Save and continue →"}
+              </button>
+            ) : tenant ? (
+              <Link
+                className="button button-primary"
+                href={`/admin/tenants/${tenant.id}`}
+              >
+                Open tenant →
+              </Link>
+            ) : (
+              <button className="button button-primary" disabled>
+                Tenant not created
               </button>
             )}
           </div>
         </Card>
       </div>
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }

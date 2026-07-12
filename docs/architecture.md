@@ -9,8 +9,11 @@ Compose service shells. Explicit RLS was exercised through the non-owner
 `bumpabestie_app` role on local Postgres. It does **not** yet have a Redis job queue,
 transactional outbox, live Hermes process/profile topology, or fully API-backed
 settings/admin/research screens. Worker and scheduler
-containers are idle local shells. Those items remain acceptance requirements; see
-`docs/verification.md` for evidence status.
+containers are idle local shells and are excluded from the provider-disabled
+production baseline. Production rejects mock providers; deferred paths must return
+unavailable rather than silently invoking local adapters. Those items remain
+acceptance requirements; see `docs/build-plan-compliance.md` and
+`docs/verification.md` for requirement and evidence status.
 
 ## System boundary
 
@@ -81,9 +84,17 @@ hosts. FastAPI independently verifies roles for every privileged API.
 ## Runtime profiles
 
 Local and CI use mock provider adapters and synthetic seed data. Production rejects
-mock adapters. Live provider configuration and the Hermes process/profile topology
-must pass their contract and canary checks before production activation; a port range
-or mounted profile directory alone is not proof of profile isolation.
+mock adapters and may use an explicit `disabled` selector while only infrastructure
+is being verified. A disabled provider is not a healthy/live provider and makes the
+dependent product action unavailable. Live provider configuration and the Hermes
+process/profile topology must pass their contract and canary checks before
+activation; a port range, database row or mounted profile directory alone is not
+proof of profile isolation.
+
+The pre-integration production service set is Caddy, web, API, Postgres and Redis.
+The worker, scheduler and Hermes runtime join production only after their respective
+activation gates pass. This staged boundary preserves fail-closed behavior without
+pretending that the build plan's production definition of done has been reached.
 
 ## Portability
 

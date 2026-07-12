@@ -60,9 +60,26 @@ def test_root_environment_aliases_and_production_guards() -> None:
         field_encryption_key="f" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
+        whatsapp_backend="disabled",
+        bumpa_backend="disabled",
+        agent_backend="disabled",
         session_cookie_secure=False,
     )
     assert production.cookie_secure is True
+
+    with pytest.raises(ValidationError, match="Local OTP controls"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            dev_fixed_otp="246810",
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+        )
 
     with pytest.raises(ValidationError, match="Meta WhatsApp configuration is incomplete"):
         Settings(
@@ -73,6 +90,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="meta",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
         )
     configured_meta = Settings(
         app_env="production",
@@ -82,11 +101,26 @@ def test_root_environment_aliases_and_production_guards() -> None:
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="meta",
+        bumpa_backend="disabled",
+        agent_backend="disabled",
         meta_app_secret="realistic-app-secret",  # noqa: S106 - non-secret fixture
         meta_phone_number_id="phone-number-id",
         meta_system_user_access_token="system-user-access-token",  # noqa: S106 - fixture
     )
     assert configured_meta.whatsapp_backend == "meta"
+
+    with pytest.raises(ValidationError, match="Production cannot use mock providers"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="mock",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+        )
 
 
 def test_configurable_secure_cookie_is_emitted(client: TestClient) -> None:

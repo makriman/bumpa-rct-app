@@ -20,6 +20,7 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		Cross-Origin-Opener-Policy "same-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
 }
 
@@ -54,7 +55,7 @@
 		max_size 10MB
 	}
 	reverse_proxy api:8000 {
-		health_uri /health
+		health_uri /health/ready
 		health_interval 30s
 	}
 }

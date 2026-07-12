@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -17,12 +18,14 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.time import utcnow
 from app.db.base import Base, IdMixin, TimestampMixin
 
 JsonDict = dict[str, Any]
+IpAddressType = String(45).with_variant(postgresql.INET(), "postgresql")
 
 
 class Tenant(IdMixin, TimestampMixin, Base):
@@ -58,7 +61,13 @@ class PlatformRole(IdMixin, TimestampMixin, Base):
 
 class TenantMembership(IdMixin, TimestampMixin, Base):
     __tablename__ = "tenant_memberships"
-    __table_args__ = (UniqueConstraint("tenant_id", "user_id"),)
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'admin', 'member', 'researcher', 'operator', 'superadmin')",
+            name="ck_tenant_memberships_role",
+        ),
+        UniqueConstraint("tenant_id", "user_id"),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -80,6 +89,14 @@ class PhoneIdentity(IdMixin, TimestampMixin, Base):
 
 class OtpSession(IdMixin, Base):
     __tablename__ = "otp_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('login', 'invite', 'phone_verify')",
+            name="ck_otp_sessions_purpose",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_otp_sessions_attempts_nonnegative"),
+        Index("ix_otp_sessions_phone_expires", "phone_e164", "expires_at"),
+    )
 
     phone_e164: Mapped[str] = mapped_column(String(20), index=True)
     code_hash: Mapped[str] = mapped_column(String(64))
@@ -111,7 +128,13 @@ class ResearchConsent(IdMixin, Base):
 
 class BumpaConnection(IdMixin, TimestampMixin, Base):
     __tablename__ = "bumpa_connections"
-    __table_args__ = (UniqueConstraint("tenant_id"),)
+    __table_args__ = (
+        CheckConstraint(
+            "scope_type IN ('business_id', 'location_id')",
+            name="ck_bumpa_connections_scope_type",
+        ),
+        UniqueConstraint("tenant_id"),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     encrypted_api_key: Mapped[str] = mapped_column(Text)
@@ -126,6 +149,25 @@ class BumpaConnection(IdMixin, TimestampMixin, Base):
 
 class BumpaSyncRun(IdMixin, Base):
     __tablename__ = "bumpa_sync_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'success', 'partial', 'failed')",
+            name="ck_bumpa_sync_runs_status",
+        ),
+        CheckConstraint(
+            "rate_limit_limit IS NULL OR rate_limit_limit >= 0",
+            name="ck_bumpa_sync_runs_rate_limit_nonnegative",
+        ),
+        CheckConstraint(
+            "rate_limit_remaining IS NULL OR rate_limit_remaining >= 0",
+            name="ck_bumpa_sync_runs_rate_remaining_nonnegative",
+        ),
+        CheckConstraint(
+            "rate_limit_limit IS NULL OR rate_limit_remaining IS NULL "
+            "OR rate_limit_remaining <= rate_limit_limit",
+            name="ck_bumpa_sync_runs_rate_remaining_within_limit",
+        ),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     bumpa_connection_id: Mapped[str] = mapped_column(
@@ -137,11 +179,23 @@ class BumpaSyncRun(IdMixin, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
+    rate_limit_limit: Mapped[int | None] = mapped_column(Integer)
+    rate_limit_remaining: Mapped[int | None] = mapped_column(Integer)
     dataset_results: Mapped[JsonDict] = mapped_column(JSON, default=dict)
 
 
 class BumpaRawResponse(IdMixin, Base):
     __tablename__ = "bumpa_raw_responses"
+    __table_args__ = (
+        CheckConstraint(
+            "availability IN ('available', 'unavailable', 'error')",
+            name="ck_bumpa_raw_responses_availability",
+        ),
+        CheckConstraint(
+            "http_status BETWEEN 100 AND 599",
+            name="ck_bumpa_raw_responses_http_status",
+        ),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     sync_run_id: Mapped[str] = mapped_column(ForeignKey("bumpa_sync_runs.id", ondelete="CASCADE"))
@@ -170,33 +224,90 @@ class BumpaMetricSnapshot(IdMixin, Base):
     currency_code: Mapped[str | None] = mapped_column(String(3))
     requested_from: Mapped[date] = mapped_column(Date)
     requested_to: Mapped[date] = mapped_column(Date)
+    response_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    response_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     availability: Mapped[str] = mapped_column(String(24), default="available")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class BumpaOrder(IdMixin, TimestampMixin, Base):
     __tablename__ = "bumpa_orders"
-    __table_args__ = (UniqueConstraint("tenant_id", "bumpa_order_id"),)
+    __table_args__ = (
+        CheckConstraint(
+            "currency_code IS NULL OR length(currency_code) = 3",
+            name="ck_bumpa_orders_currency_code_length",
+        ),
+        UniqueConstraint("tenant_id", "bumpa_order_id"),
+        Index("ix_bumpa_orders_tenant_order_date", "tenant_id", "order_date"),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     bumpa_order_id: Mapped[str] = mapped_column(String(120))
     order_number: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str | None] = mapped_column(String(80))
     payment_status: Mapped[str | None] = mapped_column(String(80))
+    shipping_status: Mapped[str | None] = mapped_column(String(80))
+    channel: Mapped[str | None] = mapped_column(String(80))
+    origin: Mapped[str | None] = mapped_column(String(120))
     currency_code: Mapped[str | None] = mapped_column(String(3))
     total_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    subtotal_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    shipping_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    amount_paid: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    amount_due: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     order_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at_source: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at_source: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[JsonDict] = mapped_column(JSON)
+
+
+class BumpaOrderItem(IdMixin, TimestampMixin, Base):
+    __tablename__ = "bumpa_order_items"
+    __table_args__ = (
+        CheckConstraint(
+            "quantity IS NULL OR quantity >= 0",
+            name="ck_bumpa_order_items_quantity_nonnegative",
+        ),
+        Index("ix_bumpa_order_items_tenant_order", "tenant_id", "order_id"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    order_id: Mapped[str] = mapped_column(ForeignKey("bumpa_orders.id", ondelete="CASCADE"))
+    bumpa_item_id: Mapped[str | None] = mapped_column(String(120))
+    product_id: Mapped[str | None] = mapped_column(String(120))
+    name: Mapped[str | None] = mapped_column(String(300))
+    unit: Mapped[str | None] = mapped_column(String(80))
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    total_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    raw_payload: Mapped[JsonDict] = mapped_column(JSON)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    correlation_id: Mapped[str | None] = mapped_column(String(80))
 
 
 class HermesProfile(IdMixin, TimestampMixin, Base):
     __tablename__ = "hermes_profiles"
-    __table_args__ = (UniqueConstraint("tenant_id"), UniqueConstraint("profile_name"))
+    __table_args__ = (
+        CheckConstraint(
+            "api_port IS NULL OR api_port BETWEEN 1024 AND 65535",
+            name="ck_hermes_profiles_api_port_range",
+        ),
+        CheckConstraint(
+            "provider != 'hermes' OR (profile_path IS NOT NULL AND api_port IS NOT NULL)",
+            name="ck_hermes_profiles_live_coordinates",
+        ),
+        UniqueConstraint("tenant_id"),
+        UniqueConstraint("profile_name"),
+        UniqueConstraint("api_port", name="uq_hermes_profiles_api_port"),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     profile_name: Mapped[str] = mapped_column(String(160))
+    profile_path: Mapped[str | None] = mapped_column(String(500))
     provider: Mapped[str] = mapped_column(String(24), default="local")
     api_internal_url: Mapped[str] = mapped_column(String(300), default="local://agent")
+    api_port: Mapped[int | None] = mapped_column(Integer)
     encrypted_api_key: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(24), default="active")
 
@@ -215,6 +326,14 @@ class Conversation(IdMixin, TimestampMixin, Base):
 class AgentMessage(IdMixin, Base):
     __tablename__ = "agent_messages"
     __table_args__ = (
+        CheckConstraint(
+            "channel IN ('web', 'whatsapp', 'system', 'admin')",
+            name="ck_agent_messages_channel",
+        ),
+        CheckConstraint(
+            "direction IN ('inbound', 'outbound')",
+            name="ck_agent_messages_direction",
+        ),
         UniqueConstraint("channel", "external_message_id"),
         Index(
             "ix_message_tenant_conversation_created", "tenant_id", "conversation_id", "created_at"
@@ -236,8 +355,46 @@ class AgentMessage(IdMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class AgentToolCall(IdMixin, TimestampMixin, Base):
+    __tablename__ = "agent_tool_calls"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'success', 'failed', 'denied')",
+            name="ck_agent_tool_calls_status",
+        ),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0",
+            name="ck_agent_tool_calls_duration_nonnegative",
+        ),
+        Index(
+            "ix_agent_tool_calls_tenant_message_created",
+            "tenant_id",
+            "agent_message_id",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    agent_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL")
+    )
+    tool_name: Mapped[str] = mapped_column(String(160))
+    tool_input: Mapped[JsonDict | None] = mapped_column(JSON)
+    tool_output: Mapped[JsonDict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(24), default="queued")
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    correlation_id: Mapped[str | None] = mapped_column(String(80))
+
+
 class WhatsappMessage(IdMixin, Base):
     __tablename__ = "whatsapp_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('inbound', 'outbound')",
+            name="ck_whatsapp_messages_direction",
+        ),
+    )
 
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
@@ -309,9 +466,15 @@ class ResearchEvent(IdMixin, Base):
 
 class ResearchReport(IdMixin, Base):
     __tablename__ = "research_reports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'success', 'failed')",
+            name="ck_research_reports_status",
+        ),
+    )
 
     report_type: Mapped[str] = mapped_column(String(80))
-    generated_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    generated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     filters: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(24), default="queued")
     title: Mapped[str | None] = mapped_column(String(200))
@@ -336,6 +499,12 @@ class Artifact(IdMixin, Base):
 
 class McpConnection(IdMixin, TimestampMixin, Base):
     __tablename__ = "mcp_connections"
+    __table_args__ = (
+        CheckConstraint(
+            "provider IN ('google_drive', 'google_sheets', 'gmail', 'calendar', 'meta_ads')",
+            name="ck_mcp_connections_provider",
+        ),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
@@ -347,8 +516,38 @@ class McpConnection(IdMixin, TimestampMixin, Base):
     admin_approved: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class McpToolPermission(IdMixin, TimestampMixin, Base):
+    __tablename__ = "mcp_tool_permissions"
+    __table_args__ = (
+        CheckConstraint(
+            "permission IN ('deny', 'read', 'write_with_confirmation')",
+            name="ck_mcp_tool_permissions_permission",
+        ),
+        UniqueConstraint(
+            "mcp_connection_id",
+            "tool_name",
+            name="uq_mcp_tool_permissions_connection_tool",
+        ),
+        Index(
+            "ix_mcp_tool_permissions_tenant_connection",
+            "tenant_id",
+            "mcp_connection_id",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    mcp_connection_id: Mapped[str] = mapped_column(
+        ForeignKey("mcp_connections.id", ondelete="CASCADE")
+    )
+    tool_name: Mapped[str] = mapped_column(String(160))
+    permission: Mapped[str] = mapped_column(String(32), default="deny")
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    correlation_id: Mapped[str | None] = mapped_column(String(80))
+
+
 class AuditLog(IdMixin, Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_tenant_created", "tenant_id", "created_at"),)
 
     tenant_id: Mapped[str | None] = mapped_column(
         ForeignKey("tenants.id", ondelete="SET NULL"), index=True
@@ -357,6 +556,8 @@ class AuditLog(IdMixin, Base):
     action: Mapped[str] = mapped_column(String(160), index=True)
     resource_type: Mapped[str | None] = mapped_column(String(80))
     resource_id: Mapped[str | None] = mapped_column(String(80))
+    ip_address: Mapped[str | None] = mapped_column(IpAddressType)
+    user_agent: Mapped[str | None] = mapped_column(Text)
     before: Mapped[JsonDict | None] = mapped_column(JSON)
     after: Mapped[JsonDict | None] = mapped_column(JSON)
     correlation_id: Mapped[str | None] = mapped_column(String(80))
@@ -365,11 +566,15 @@ class AuditLog(IdMixin, Base):
 
 class SystemError(IdMixin, Base):
     __tablename__ = "system_errors"
+    __table_args__ = (
+        Index("ix_system_errors_service_severity_created", "service", "severity", "created_at"),
+    )
 
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
     service: Mapped[str] = mapped_column(String(80))
     severity: Mapped[str] = mapped_column(String(24))
     message: Mapped[str] = mapped_column(Text)
+    stack: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[JsonDict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

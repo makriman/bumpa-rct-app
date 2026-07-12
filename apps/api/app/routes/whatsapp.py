@@ -35,6 +35,8 @@ def verify_webhook(
     challenge: str | None = Query(default=None, alias="hub.challenge"),
     settings: Settings = Depends(get_settings),
 ) -> PlainTextResponse:
+    if settings.whatsapp_backend == "disabled":
+        raise HTTPException(status_code=503, detail="WhatsApp webhook is disabled")
     if mode == "subscribe" and hmac.compare_digest(token or "", settings.meta_webhook_verify_token):
         return PlainTextResponse(challenge or "")
     raise HTTPException(status_code=403, detail="Invalid webhook verification")
@@ -51,6 +53,8 @@ async def receive_webhook(
     Failed events remain retriable. Production Meta mode acknowledges the durable inbox quickly and
     requires a configured queue consumer rather than pretending inline work is production-ready.
     """
+    if settings.whatsapp_backend == "disabled":
+        raise HTTPException(status_code=503, detail="WhatsApp webhook is disabled")
     raw = await request.body()
     signature = request.headers.get("x-hub-signature-256")
     if not _valid_signature(raw, signature, settings.meta_app_secret):

@@ -1,5 +1,5 @@
 [Unit]
-Description=Bumpa Bestie encrypted off-host backup handoff
+Description=Bumpa Bestie local backup and optional off-host handoff
 Requires=docker.service
 After=docker.service
 

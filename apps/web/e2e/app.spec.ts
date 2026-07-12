@@ -20,7 +20,7 @@ test("local demo can enter the SME chat with an explicit fallback label", async 
   await page.goto("/login");
   await page.getByRole("button", { name: "SME owner" }).click();
   await expect(page).toHaveURL(/\/chat$/);
-  await expect(page.getByText("Demo fallback", { exact: true })).toBeVisible();
+  await expect(page.getByText("Demo preview", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "Message Bumpa Bestie" }),
   ).toBeVisible();
@@ -32,5 +32,22 @@ test("admin and research hosts keep login reachable", async ({ page }) => {
     await expect(
       page.getByRole("heading", { name: "Welcome back." }),
     ).toBeVisible();
+  }
+});
+
+test("demo admin, research, and settings rows are never labelled live", async ({
+  page,
+}) => {
+  for (const [path, fixture] of [
+    ["/admin/tenants", "Kaia Home"],
+    ["/research/questions", "Which products sold best this week?"],
+    ["/settings/team", "Amara Okafor"],
+  ]) {
+    await page.goto(path);
+    await expect(page.getByText(/Demo preview/).first()).toBeVisible();
+    await expect(
+      page.getByText(fixture, { exact: true }).first(),
+    ).toBeVisible();
+    await expect(page.getByText(/Live .*API connected/)).toHaveCount(0);
   }
 });

@@ -17,7 +17,7 @@ cleanup() {
     docker compose ps >&2 || true
     docker compose logs --no-color --tail=200 >&2 || true
   fi
-  docker compose down --remove-orphans
+  docker compose --profile async --profile tools down --remove-orphans
   if ((created_env)); then
     rm -f .env
   fi
@@ -32,3 +32,4 @@ docker compose --profile tools run --rm migrate
 docker compose up -d --build api worker scheduler web caddy
 docker compose ps
 ./scripts/smoke_test.sh
+./scripts/local_e2e.sh

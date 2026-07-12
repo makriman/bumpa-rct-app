@@ -179,6 +179,11 @@ def connect_bumpa(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     tenant = _tenant(db, tenant_id)
+    if not settings.is_local and payload.provider == "local":
+        raise HTTPException(
+            status_code=422,
+            detail="Local Bumpa provider is forbidden in production",
+        )
     connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
     encrypted = FieldCipher(settings.field_encryption_key).encrypt(payload.api_key)
     if connection:
@@ -221,6 +226,11 @@ def create_profile(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     tenant = _tenant(db, tenant_id)
+    if settings.agent_backend != "mock":
+        raise HTTPException(
+            status_code=503,
+            detail="Hermes profile provisioning is not configured yet",
+        )
     existing = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant.id))
     if existing:
         return {"id": existing.id, "profile_name": existing.profile_name, "status": existing.status}

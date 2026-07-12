@@ -9,6 +9,7 @@ from app.core.dependencies import Principal, require_researcher
 from app.db.models import Artifact, ResearchEvent, ResearchReport, Tenant
 from app.db.session import get_db
 from app.providers.local import LocalArtifactStore
+from app.providers.redaction import pseudonymize, redact_text
 from app.schemas import ReportCreate, ReportView
 from app.services.audit import audit
 from app.services.reports import generate_report
@@ -21,11 +22,21 @@ def overview(
     _principal: Principal = Depends(require_researcher), db: Session = Depends(get_db)
 ) -> dict:
     tenant_count = db.scalar(select(func.count()).select_from(Tenant)) or 0
-    event_count = db.scalar(select(func.count()).select_from(ResearchEvent)) or 0
-    events = db.scalars(select(ResearchEvent)).all()
+    consent_rows = db.execute(
+        select(Tenant.research_consent_status, func.count())
+        .group_by(Tenant.research_consent_status)
+        .order_by(Tenant.research_consent_status)
+    ).all()
+    consented_events = (
+        select(ResearchEvent)
+        .join(Tenant, ResearchEvent.tenant_id == Tenant.id)
+        .where(Tenant.research_consent_status == "granted")
+    )
+    events = db.scalars(consented_events).all()
     return {
         "smes_onboarded": tenant_count,
-        "research_events": event_count,
+        "research_consent_status": {status: count for status, count in consent_rows},
+        "research_events": len(events),
         "messages_by_channel": dict(Counter(item.channel for item in events)),
         "questions_by_intent": dict(
             Counter(item.primary_intent or "unclassified" for item in events)
@@ -38,12 +49,19 @@ def overview(
 def events(
     _principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     tenant_id: str | None = None,
     channel: str | None = None,
     primary_intent: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
-    statement = select(ResearchEvent).order_by(ResearchEvent.created_at.desc()).limit(limit)
+    statement = (
+        select(ResearchEvent)
+        .join(Tenant, ResearchEvent.tenant_id == Tenant.id)
+        .where(Tenant.research_consent_status == "granted")
+        .order_by(ResearchEvent.created_at.desc())
+        .limit(limit)
+    )
     if tenant_id:
         statement = statement.where(ResearchEvent.tenant_id == tenant_id)
     if channel:
@@ -53,11 +71,16 @@ def events(
     rows = db.scalars(statement).all()
     return [
         {
-            "id": row.id,
-            "tenant_pseudonym": (row.tenant_id or "unknown")[:8],
+            "id": pseudonymize(row.id, settings.field_encryption_key, namespace="event"),
+            "tenant_pseudonym": pseudonymize(
+                row.tenant_id, settings.field_encryption_key, namespace="tenant"
+            ),
+            "user_pseudonym": pseudonymize(
+                row.user_id, settings.field_encryption_key, namespace="user"
+            ),
             "channel": row.channel,
             "event_type": row.event_type,
-            "redacted_text": row.redacted_text,
+            "redacted_text": redact_text(row.redacted_text) if row.redacted_text else None,
             "primary_intent": row.primary_intent,
             "business_function": row.business_function,
             "ai_help_type": row.ai_help_type,
@@ -73,9 +96,10 @@ def events(
 def questions(
     principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
-    return events(principal, db, limit=limit)
+    return events(principal, db, settings, limit=limit)
 
 
 @router.get("/taxonomy")
@@ -154,7 +178,13 @@ def create_report(
         after={"formats": payload.formats, "filters": payload.filters},
     )
     db.commit()
-    return generate_report(db, LocalArtifactStore(settings.artifact_root), report, payload.formats)
+    return generate_report(
+        db,
+        LocalArtifactStore(settings.artifact_root),
+        report,
+        payload.formats,
+        pseudonym_secret=settings.field_encryption_key,
+    )
 
 
 @router.get("/reports", response_model=list[ReportView])

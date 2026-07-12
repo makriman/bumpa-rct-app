@@ -4,6 +4,7 @@ set -Eeuo pipefail
 scheme="${SMOKE_SCHEME:-http}"
 port="${SMOKE_PORT:-8080}"
 app_domain="${APP_DOMAIN:-bumpabestie.localhost}"
+www_domain="${WWW_DOMAIN:-www.bumpabestie.localhost}"
 admin_domain="${ADMIN_DOMAIN:-admin.bumpabestie.localhost}"
 research_domain="${RESEARCH_DOMAIN:-research.bumpabestie.localhost}"
 api_domain="${API_DOMAIN:-api.bumpabestie.localhost}"
@@ -31,6 +32,8 @@ request() {
 }
 
 request "API health" "$scheme://$api_domain$port_suffix/health" '^200$'
+request "API readiness" "$scheme://$api_domain$port_suffix/health/ready" '^200$'
 request "public surface" "$scheme://$app_domain$port_suffix/" '^(200|307|308)$'
-request "admin surface" "$scheme://$admin_domain$port_suffix/" '^(200|302|303|307|308|401|403)$'
-request "research surface" "$scheme://$research_domain$port_suffix/" '^(200|302|303|307|308|401|403)$'
+request "www surface" "$scheme://$www_domain$port_suffix/" '^(200|307|308)$'
+request "admin authentication boundary" "$scheme://$admin_domain$port_suffix/" '^(302|303|307|308)$'
+request "research authentication boundary" "$scheme://$research_domain$port_suffix/" '^(302|303|307|308)$'

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,9 +46,9 @@ class Settings(BaseSettings):
     meta_app_secret: str = "local-meta-app-secret"
     meta_phone_number_id: str | None = None
     meta_system_user_access_token: str | None = None
-    whatsapp_backend: str = "mock"
-    bumpa_backend: str = "mock"
-    agent_backend: str = "mock"
+    whatsapp_backend: Literal["mock", "disabled", "meta"] = "mock"
+    bumpa_backend: Literal["mock", "disabled", "bumpa"] = "mock"
+    agent_backend: Literal["mock", "disabled", "hermes"] = "mock"
     session_cookie_name: str = "bb_session"
     session_cookie_domain: str | None = None
     session_cookie_secure: bool = False
@@ -84,10 +85,21 @@ class Settings(BaseSettings):
             )
             if any(insecure):
                 raise ValueError("Production secrets must be explicitly configured")
-            if self.expose_local_otp or self.seed_demo_data:
+            if self.expose_local_otp or self.seed_demo_data or self.dev_fixed_otp is not None:
                 raise ValueError(
-                    "Local OTP exposure and demo seeding must be disabled in production"
+                    "Local OTP controls and demo seeding must be disabled in production"
                 )
+            mocked = [
+                name
+                for name, value in {
+                    "WHATSAPP_BACKEND": self.whatsapp_backend,
+                    "BUMPA_BACKEND": self.bumpa_backend,
+                    "AGENT_BACKEND": self.agent_backend,
+                }.items()
+                if value == "mock"
+            ]
+            if mocked:
+                raise ValueError("Production cannot use mock providers: " + ", ".join(mocked))
             if self.whatsapp_backend == "meta":
                 missing = [
                     name
