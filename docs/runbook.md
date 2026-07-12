@@ -3,16 +3,12 @@
 ## Safety boundary
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
-Hermes/Claude and the durable worker/scheduler runtime. The currently deployed
-revision may still be the earlier provider-disabled baseline; always determine the
-actual boundary from `.deployed-release.json`, Compose state and `/health/ready`
-before applying an incident procedure.
-
-Hardened release `54bb8e9b29295171d65972e094e508d25a7bc53d` is the live sslip.io
-baseline. Post-deployment safety follow-up PR 15 merged as
-`e128d02c1279c7e6c19b347eafdb3d9884ef0ed5` with green main CI 29195530375,
-but it is not the deployed image revision. Always read `.deployed-revision` and
-`.deployed-release.json` before applying a procedure.
+Hermes/Claude and the durable worker/scheduler runtime. Release
+`41935d67696fee45b184a65c0a9bf39e0708ae89` is deployed on the sslip.io hosts
+with all eight services and selectors `meta`, `bumpa` and `hermes`. Always confirm
+the actual boundary from `.deployed-release.json`, Compose state and
+`/health/ready` before applying an incident procedure; selector state is not a
+provider canary.
 
 Never:
 
@@ -30,8 +26,8 @@ Never:
 
 1. Establish impact: hostname, tenant pseudonym, channel, UTC start time, revision
    and correlation ID.
-2. Confirm whether this is the provider-disabled baseline or a later approved live
-   mode. Do not assume a provider is enabled.
+2. Confirm the selected provider modes and their most recent live canaries. Do not
+   infer provider reachability or template approval from readiness alone.
 3. Check container state, host disk/memory, listening ports and the last deployment.
 4. Inspect structured logs by correlation ID, using the smallest safe time window.
 5. Contain the failing boundary without bypassing tenancy, signatures, consent or
@@ -63,12 +59,13 @@ database query and, when enabled, Redis plus fresh worker/scheduler heartbeats. 
 reports configured provider modes but is not a Meta, Bumpa or Hermes canary.
 Preserve the response and image digests with any production incident evidence.
 
-The verified hardened production snapshot is exactly Caddy, web, API, PostgreSQL
-and Redis with zero restarts. Caddy is 2.11.4 built with Go 1.26.5 and runs as UID
-10001 with restricted capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The
-five `*.bumpabestie.165-227-228-20.sslip.io` host variants have valid TLS and route
-correctly. Readiness reports all providers disabled; API docs are unavailable and a
-synthetic OTP request fails closed with HTTP 503.
+The verified production snapshot is Caddy, web, API, worker, scheduler, Hermes,
+PostgreSQL and Redis with zero restarts and zero OOM kills. Caddy is 2.11.4 built
+with Go 1.26.5 and runs as UID 10001 with restricted capabilities; PostgreSQL is
+16.14 and Redis is 7.4.9. The five temporary host variants have valid TLS and route
+correctly. Readiness reports database/Redis/worker/scheduler `ok` and the intended
+provider selectors. Meta callback verification and signed ingress pass, while OTP
+remains unavailable until Meta approves the authentication template.
 
 ## Historical provider-disabled baseline verification
 
@@ -172,11 +169,11 @@ quiesces Caddy/API/worker/scheduler/Hermes, creates the backup, and resumes exac
 the recorded service set even when backup creation fails. Alert if no verified
 backup ID appears within the expected window or any service fails to resume.
 
-For the hardened deployment, backup `20260712T140353Z` passed format-2 manifest and
-SHA-256 verification with release
-`54bb8e9b29295171d65972e094e508d25a7bc53d`, the exact backup image reference and
-an unchanged running PostgreSQL container during `--no-deps` verification. The timer is enabled; its next recorded activation is
-`2026-07-13 02:32 UTC`. Off-host durability remains unconfigured.
+Backup `20260712T195838Z` passed its format-3 manifest, all five SHA-256 entries,
+three archive parses and the 252-entry PostgreSQL dump parse. Its release, schema,
+PostgreSQL version and exact backup image match the live deployment. The timer is
+enabled and its last service result succeeded. Off-host durability remains
+unconfigured.
 
 ## Restore drill
 
