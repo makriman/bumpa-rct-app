@@ -7,10 +7,11 @@ Bumpa and Hermes/Claude are disabled; worker and scheduler are not production
 services yet. An incident procedure below marked **future activation** is a required
 procedure for the eventual adapter, not proof that the adapter exists.
 
-Revision `1929771abe932dfd44aad6763e1f5caff19fa833` is the already-live sslip.io
-baseline. The hardened five-image candidate is not production evidence until its
-final SHA is published, deployed and reverified; always read `.deployed-revision`
-and `.deployed-release.json` before applying a procedure.
+Hardened release `54bb8e9b29295171d65972e094e508d25a7bc53d` is the live sslip.io
+baseline. Post-deployment safety follow-up PR 15 merged as
+`e128d02c1279c7e6c19b347eafdb3d9884ef0ed5` with green main CI 29195530375,
+but it is not the deployed image revision. Always read `.deployed-revision` and
+`.deployed-release.json` before applying a procedure.
 
 Never:
 
@@ -59,6 +60,13 @@ df -h
 proves a database query and reports configured provider modes. It is not a Meta,
 Bumpa, Redis or Hermes canary. Preserve the response and image digests with any
 production incident evidence.
+
+The verified hardened production snapshot is exactly Caddy, web, API, PostgreSQL
+and Redis with zero restarts. Caddy is 2.11.4 built with Go 1.26.5 and runs as UID
+10001 with restricted capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The
+five `*.bumpabestie.165-227-228-20.sslip.io` host variants have valid TLS and route
+correctly. Readiness reports all providers disabled; API docs are unavailable and a
+synthetic OTP request fails closed with HTTP 503.
 
 ## Provider-disabled baseline verification
 
@@ -157,6 +165,12 @@ journalctl -u bumpabestie-backup.service --since '2 days ago' --no-pager
 
 The timer runs at 02:30 UTC with up to 15 minutes randomized delay and is persistent
 across downtime. Alert if no verified backup ID appears within the expected window.
+
+For the hardened deployment, backup `20260712T140353Z` passed format-2 manifest and
+SHA-256 verification with release
+`54bb8e9b29295171d65972e094e508d25a7bc53d`, the exact backup image reference and
+an unchanged running PostgreSQL container during `--no-deps` verification. The timer is enabled; its next recorded activation is
+`2026-07-13 02:32 UTC`. Off-host durability remains unconfigured.
 
 ## Restore drill
 

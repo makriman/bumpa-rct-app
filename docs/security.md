@@ -10,9 +10,9 @@ non-mutating structured/text redaction, explicit Postgres RLS policy DDL, and
 non-root application images. A local non-owner/non-bypass Postgres probe,
 production-off demo build default and local image vulnerability scans have also been
 verified. Still pending are CSRF protection, IP/Redis rate limits, credential key
-rotation, raw-access reason gates, export expiry and final exact-registry scan
-evidence for the hardened release. Consult the verification ledger before relying
-on a control.
+rotation, raw-access reason gates and export expiry. Exact-registry scan evidence
+for all five deployed hardened images is complete. Consult the verification ledger
+before relying on a control.
 
 The pre-integration production baseline uses explicit `disabled` provider modes and
 does not start worker/scheduler. That is a containment state, not a security signoff
@@ -80,9 +80,9 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. The prior baseline API/web images
-were published, and all five candidate runtimes have local scan gates; final
-five-image publication and exact-registry scan evidence remain pending.
+and SBOM, then scans each exact registry digest. Publish run 29194814472 completed
+that gate for all five images deployed at release
+`54bb8e9b29295171d65972e094e508d25a7bc53d`.
 
 ## Research governance
 
