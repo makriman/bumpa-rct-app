@@ -383,7 +383,10 @@ grep -Fq 'Environment=BUMPABESTIE_DISK_THRESHOLD_PERCENT=85' infra/systemd/bumpa
 grep -Fq 'Environment=BUMPABESTIE_DISK_PATHS=/' infra/systemd/bumpabestie-disk-usage.service
 grep -Fq 'OnUnitActiveSec=5min' infra/systemd/bumpabestie-disk-usage.timer
 grep -Fq 'Unit=bumpabestie-disk-usage.service' infra/systemd/bumpabestie-disk-usage.timer
+# These assertions intentionally match literal shell source.
+# shellcheck disable=SC2016
 grep -Fq 'systemctl is-enabled --quiet "$timer_name"' scripts/deploy.sh
+# shellcheck disable=SC2016
 grep -Fq 'systemctl is-active --quiet "$timer_name"' scripts/deploy.sh
 if grep -Fq 'EnvironmentFile=' infra/systemd/bumpabestie-disk-usage.service; then
   echo "Disk usage unit must not import the application environment" >&2
