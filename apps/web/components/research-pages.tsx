@@ -1,13 +1,28 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { apiRequest, demoFallbackEnabled } from "@/lib/api";
+import {
+  countValues,
+  formatDate,
+  titleCase,
+  type Report,
+  type ResearchEvent,
+  type ResearchOverviewData,
+  type Taxonomy,
+} from "@/lib/platform-data";
+import {
+  previewReports,
+  previewResearchEvents,
+  previewResearchOverview,
+  previewTaxonomy,
+} from "@/lib/preview-fixtures";
+import { useApiResource } from "@/lib/use-api-resource";
 import { AppShell } from "./app-shell";
 import { LiveDataBanner } from "./live-data-banner";
 import {
   Badge,
   Card,
-  Chart,
-  DemoStateToggle,
   Filters,
   Metric,
   Modal,
@@ -15,287 +30,370 @@ import {
   StatePanel,
   Toast,
 } from "./ui";
-import { chartValues, reports, researchQuestions } from "@/lib/demo-data";
 
-type DemoState = "ready" | "loading" | "empty" | "error";
-function State({ state, label }: { state: DemoState; label: string }) {
-  return state === "loading" ? (
-    <StatePanel type="loading" />
-  ) : state === "empty" ? (
-    <StatePanel
-      type="empty"
-      title={`No ${label} in this range`}
-      description="Adjust your filters or choose a wider date range."
-    />
-  ) : state === "error" ? (
-    <StatePanel
-      type="error"
-      action={<button className="button button-secondary">Try again</button>}
-    />
-  ) : null;
+function ResourceState({
+  status,
+  error,
+  retry,
+  empty,
+}: {
+  status: "loading" | "ready" | "error";
+  error: string | null;
+  retry: () => Promise<void>;
+  empty?: string;
+}) {
+  if (status === "loading") return <StatePanel type="loading" />;
+  if (status === "error")
+    return (
+      <StatePanel
+        type="error"
+        description={error ?? undefined}
+        action={
+          <button
+            className="button button-secondary"
+            onClick={() => void retry()}
+          >
+            Try again
+          </button>
+        }
+      />
+    );
+  if (empty)
+    return (
+      <StatePanel
+        type="empty"
+        title={empty}
+        description="The API returned no consented research records for this view."
+      />
+    );
+  return null;
 }
-const FilterBar = () => (
-  <div className="card filters">
-    <select className="filter-select" aria-label="Date range">
-      <option>Last 30 days</option>
-      <option>Last 7 days</option>
-      <option>Quarter to date</option>
-    </select>
-    <select className="filter-select" aria-label="Tenant">
-      <option>All consented SMEs</option>
-      <option>SME–K4H2</option>
-      <option>SME–M8P1</option>
-    </select>
-    <select className="filter-select" aria-label="Channel">
-      <option>All channels</option>
-      <option>WhatsApp</option>
-      <option>Web</option>
-    </select>
-    <button className="button button-secondary button-small">Reset</button>
-  </div>
-);
+
+function Distribution({
+  title,
+  description,
+  values,
+}: {
+  title: string;
+  description: string;
+  values: Array<[string, number]>;
+}) {
+  const total = values.reduce((sum, [, count]) => sum + count, 0);
+  return (
+    <Card padded>
+      <div className="card-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      {values.length ? (
+        values.slice(0, 8).map(([label, count]) => {
+          const ratio = total ? Math.round((count / total) * 100) : 0;
+          return (
+            <div key={label} style={{ marginBottom: 15 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  fontSize: 13,
+                  marginBottom: 6,
+                }}
+              >
+                <span>{titleCase(label)}</span>
+                <strong>
+                  {count} · {ratio}%
+                </strong>
+              </div>
+              <div className="progress">
+                <span style={{ width: `${ratio}%` }} />
+              </div>
+            </div>
+          );
+        })
+      ) : (
+        <p className="table-secondary">No classified events were returned.</p>
+      )}
+    </Card>
+  );
+}
+
+function downloadJson(filename: string, value: unknown) {
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
 export function ResearchOverview() {
+  const overview = useApiResource<ResearchOverviewData>(
+    "/research/overview",
+    previewResearchOverview,
+  );
+  const events = useApiResource<ResearchEvent[]>(
+    "/research/events",
+    previewResearchEvents,
+  );
+  const data = overview.data;
   return (
     <AppShell surface="research" title="Research overview">
       <PageHeader
         title="Research overview"
-        description="Pseudonymised evidence on how SMEs use AI to make business decisions."
+        description="Pseudonymised evidence returned by the consent-filtered research APIs."
         actions={
-          <button className="button button-secondary">⇩ Export view</button>
+          <button
+            className="button button-secondary"
+            disabled={!data}
+            onClick={() => data && downloadJson("research-overview.json", data)}
+          >
+            ⇩ Export loaded view
+          </button>
         }
       />
-      <LiveDataBanner endpoint="/research/overview" label="research overview" />
+      <LiveDataBanner
+        label="research overview"
+        source={overview.source}
+        status={overview.status}
+        error={overview.error}
+      />
       <div className="alert alert-info">
-        You are viewing redacted research data. Raw text access is
-        permission-controlled and every reveal is audit logged.
+        This surface uses redacted research records. Raw identities and raw
+        message text are not requested by the frontend.
       </div>
-      <FilterBar />
-      <div className="grid grid-4">
-        <Metric
-          label="Consented SMEs"
-          value="21 / 24"
-          trend="+2"
-          note="87.5% participation"
-          bars={[55, 58, 62, 66, 75, 88]}
+      {overview.status !== "ready" || !data ? (
+        <ResourceState
+          status={overview.status}
+          error={overview.error}
+          retry={overview.reload}
         />
-        <Metric
-          label="Active SMEs · 30d"
-          value="19"
-          trend="+12%"
-          note="90% of consented cohort"
-          bars={[40, 44, 58, 55, 70, 83]}
-        />
-        <Metric
-          label="Questions asked"
-          value="12,486"
-          trend="+18%"
-          note="7,948 distinct conversations"
-          bars={[35, 51, 48, 63, 72, 91]}
-        />
-        <Metric
-          label="Repeat usage"
-          value="73%"
-          trend="+5%"
-          note="Returned within 4 weeks"
-          bars={[51, 55, 59, 62, 68, 73]}
-        />
-      </div>
-      <div className="grid grid-2" style={{ marginTop: 18 }}>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Questions over time</h2>
-              <p>Weekly volume by primary channel.</p>
-            </div>
-            <Badge tone="success">Complete</Badge>
-          </div>
-          <Chart
-            values={chartValues}
-            labels={[
-              "W17",
-              "18",
-              "19",
-              "20",
-              "21",
-              "22",
-              "23",
-              "24",
-              "25",
-              "26",
-              "27",
-              "28",
-            ]}
-            alt
-          />
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>AI help type</h2>
-              <p>How owners are using the assistant.</p>
-            </div>
-          </div>
-          <div className="donut-wrap">
-            <div
-              className="donut"
-              aria-label="Donut chart: data lookup 48%, recommendation 28%, diagnosis 14%, other 10%"
+      ) : (
+        <>
+          <div className="grid grid-3">
+            <Metric
+              label="SMEs onboarded"
+              value={data.smes_onboarded.toLocaleString()}
+              note="Current platform count"
             />
-            <div className="legend">
-              <span>Data lookup · 48%</span>
-              <span>Recommendation · 28%</span>
-              <span>Diagnosis · 14%</span>
-              <span>Other · 10%</span>
-            </div>
+            <Metric
+              label="Research events"
+              value={data.research_events.toLocaleString()}
+              note="Consent-filtered event count"
+            />
+            <Metric
+              label="Channels observed"
+              value={String(Object.keys(data.messages_by_channel).length)}
+              note="From classified events"
+            />
           </div>
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Business functions</h2>
-              <p>Share of classified questions.</p>
-            </div>
+          <div className="grid grid-3" style={{ marginTop: 18 }}>
+            <Distribution
+              title="Messages by channel"
+              description="Counts returned by the overview endpoint."
+              values={Object.entries(data.messages_by_channel).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
+              title="Questions by intent"
+              description="Primary-intent counts returned by the API."
+              values={Object.entries(data.questions_by_intent).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
+              title="Bumpa data usage"
+              description="Recorded data-context labels."
+              values={Object.entries(data.bumpa_data_usage).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
           </div>
-          {[
-            ["Sales", 72, "32%"],
-            ["Stock", 51, "23%"],
-            ["Customers", 34, "15%"],
-            ["Finance", 25, "11%"],
-            ["Strategy", 20, "9%"],
-          ].map(([n, w, p]) => (
-            <div
-              key={String(n)}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "90px 1fr 42px",
-                alignItems: "center",
-                gap: 10,
-                marginBottom: 15,
-                fontSize: 13,
-              }}
-            >
-              <strong>{n}</strong>
-              <div className="progress">
-                <span style={{ width: `${w}%` }} />
-              </div>
-              <span>{p}</span>
-            </div>
-          ))}
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Evidence quality</h2>
-              <p>Instrumentation completeness · last 30 days.</p>
-            </div>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Events classified</span>
-            <span className="detail-value">98.7%</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Bumpa context recorded</span>
-            <span className="detail-value">99.4%</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">PII redacted</span>
-            <span className="detail-value">100%</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Flagged for review</span>
-            <span className="detail-value">2.1%</span>
-          </div>
-        </Card>
-      </div>
+          {events.status === "ready" && (
+            <>
+              <LiveDataBanner
+                label="event completeness window"
+                source={events.source}
+                status={events.status}
+                count={events.data?.length}
+                error={events.error}
+              />
+              <Card padded>
+                <div className="card-head">
+                  <div>
+                    <h2>Evidence completeness</h2>
+                    <p>
+                      Computed only from the loaded event window of{" "}
+                      {events.data?.length ?? 0} records.
+                    </p>
+                  </div>
+                </div>
+                {[
+                  [
+                    "Primary intent present",
+                    (events.data ?? []).filter((event) => event.primary_intent)
+                      .length,
+                  ],
+                  [
+                    "Business function present",
+                    (events.data ?? []).filter(
+                      (event) => event.business_function,
+                    ).length,
+                  ],
+                  [
+                    "AI help type present",
+                    (events.data ?? []).filter((event) => event.ai_help_type)
+                      .length,
+                  ],
+                  [
+                    "Bumpa context present",
+                    (events.data ?? []).filter((event) => event.bumpa_data_used)
+                      .length,
+                  ],
+                ].map(([label, count]) => (
+                  <div className="detail-row" key={String(label)}>
+                    <span className="detail-label">{label}</span>
+                    <span className="detail-value">
+                      {events.data?.length
+                        ? `${Math.round((Number(count) / events.data.length) * 100)}%`
+                        : "—"}
+                    </span>
+                  </div>
+                ))}
+              </Card>
+            </>
+          )}
+        </>
+      )}
     </AppShell>
   );
 }
 
 export function Questions() {
+  const resource = useApiResource<ResearchEvent[]>(
+    "/research/questions",
+    previewResearchEvents,
+  );
   const [search, setSearch] = useState("");
-  const [state, setState] = useState<DemoState>("ready");
-  const [selected, setSelected] = useState<
-    (typeof researchQuestions)[number] | null
-  >(null);
+  const [intent, setIntent] = useState("all");
+  const [selected, setSelected] = useState<ResearchEvent | null>(null);
   const rows = useMemo(
     () =>
-      researchQuestions.filter((q) =>
-        `${q.question} ${q.intent} ${q.tenant}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [search],
+      (resource.data ?? []).filter((event) => {
+        const matchesText =
+          `${event.redacted_text ?? ""} ${event.primary_intent ?? ""} ${event.tenant_pseudonym}`
+            .toLowerCase()
+            .includes(search.toLowerCase());
+        return (
+          matchesText && (intent === "all" || event.primary_intent === intent)
+        );
+      }),
+    [intent, resource.data, search],
   );
+  const intents = [
+    ...new Set(
+      (resource.data ?? [])
+        .map((event) => event.primary_intent)
+        .filter(Boolean),
+    ),
+  ] as string[];
   return (
     <AppShell surface="research" title="Question log">
       <PageHeader
         title="Question log"
-        description="Explore redacted SME questions and their research classifications."
-        actions={<DemoStateToggle state={state} setState={setState} />}
+        description="Explore redacted question events and their persisted classifications."
       />
-      {state !== "ready" ? (
-        <State state={state} label="questions" />
+      <LiveDataBanner
+        label="question events"
+        source={resource.source}
+        status={resource.status}
+        count={resource.data?.length}
+        error={resource.error}
+      />
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          retry={resource.reload}
+        />
+      ) : !resource.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          retry={resource.reload}
+          empty="No questions in this window"
+        />
       ) : (
         <>
           <Filters search={search} setSearch={setSearch}>
-            <select className="filter-select">
-              <option>All intents</option>
-              <option>Sales analysis</option>
-              <option>Inventory</option>
-            </select>
-            <select className="filter-select">
-              <option>All help types</option>
-              <option>Data lookup</option>
-              <option>Recommendation</option>
+            <select
+              className="filter-select"
+              aria-label="Filter by intent"
+              value={intent}
+              onChange={(event) => setIntent(event.target.value)}
+            >
+              <option value="all">All intents</option>
+              {intents.map((value) => (
+                <option value={value} key={value}>
+                  {titleCase(value)}
+                </option>
+              ))}
             </select>
           </Filters>
-          <section className="card table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Pseudonym</th>
-                  <th>Channel</th>
-                  <th>Redacted question</th>
-                  <th>Intent</th>
-                  <th>Help type</th>
-                  <th>Data used</th>
-                  <th>Latency</th>
-                  <th>Quality</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((q) => (
-                  <tr
-                    key={`${q.time}-${q.user}`}
-                    onClick={() => setSelected(q)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <td>{q.time}</td>
-                    <td>
-                      <div className="table-primary">{q.tenant}</div>
-                      <div className="table-secondary">{q.user}</div>
-                    </td>
-                    <td>
-                      <Badge>{q.channel}</Badge>
-                    </td>
-                    <td className="table-primary" style={{ maxWidth: 300 }}>
-                      {q.question}
-                    </td>
-                    <td>{q.intent}</td>
-                    <td>{q.help}</td>
-                    <td>
-                      <span className="tag">{q.data}</span>
-                    </td>
-                    <td>{q.latency}</td>
-                    <td>
-                      <Badge>{q.flag}</Badge>
-                    </td>
+          {rows.length ? (
+            <section className="card table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Pseudonym</th>
+                    <th>Channel</th>
+                    <th>Redacted question</th>
+                    <th>Intent</th>
+                    <th>Help type</th>
+                    <th>Data used</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
+                </thead>
+                <tbody>
+                  {rows.map((event) => (
+                    <tr
+                      key={event.id}
+                      onClick={() => setSelected(event)}
+                      style={{ cursor: "pointer" }}
+                    >
+                      <td>{formatDate(event.created_at)}</td>
+                      <td className="table-primary">
+                        {event.tenant_pseudonym}
+                      </td>
+                      <td>
+                        <Badge>{titleCase(event.channel)}</Badge>
+                      </td>
+                      <td className="table-primary" style={{ maxWidth: 330 }}>
+                        {event.redacted_text ?? "Redacted text unavailable"}
+                      </td>
+                      <td>{titleCase(event.primary_intent)}</td>
+                      <td>{titleCase(event.ai_help_type)}</td>
+                      <td>
+                        <span className="tag">
+                          {titleCase(event.bumpa_data_used)}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          ) : (
+            <StatePanel
+              type="empty"
+              title="No matching questions"
+              description="Clear or adjust the filters to see other research events."
+            />
+          )}
         </>
       )}
       {selected && (
@@ -312,33 +410,31 @@ export function Questions() {
           }
         >
           <div className="alert alert-info">
-            Redacted view · raw text is not available to this role.
+            Redacted event view · participant identity and raw text are not
+            exposed.
           </div>
           <blockquote
             style={{ margin: "18px 0", font: "500 1.35rem/1.45 Georgia,serif" }}
           >
-            “{selected.question}”
+            “{selected.redacted_text ?? "Text unavailable"}”
           </blockquote>
-          <div className="detail-row">
-            <span className="detail-label">Tenant / user</span>
-            <span className="detail-value">
-              {selected.tenant} / {selected.user}
-            </span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Classification</span>
-            <span className="detail-value">
-              {selected.intent} · {selected.help}
-            </span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Bumpa context</span>
-            <span className="detail-value">{selected.data}</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Response latency</span>
-            <span className="detail-value">{selected.latency}</span>
-          </div>
+          {[
+            ["Tenant pseudonym", selected.tenant_pseudonym],
+            ["Event type", titleCase(selected.event_type)],
+            [
+              "Classification",
+              `${titleCase(selected.primary_intent)} · ${titleCase(selected.ai_help_type)}`,
+            ],
+            ["Business function", titleCase(selected.business_function)],
+            ["Reasoning complexity", titleCase(selected.complexity)],
+            ["Bumpa context", titleCase(selected.bumpa_data_used)],
+            ["Recorded", formatDate(selected.created_at)],
+          ].map(([label, value]) => (
+            <div className="detail-row" key={label}>
+              <span className="detail-label">{label}</span>
+              <span className="detail-value">{value}</span>
+            </div>
+          ))}
         </Modal>
       )}
     </AppShell>
@@ -346,601 +442,536 @@ export function Questions() {
 }
 
 export function Conversations() {
-  const [search, setSearch] = useState("");
-  const rows = [
-    {
-      id: "C–9184",
-      tenant: "SME–K4H2",
-      user: "U–104",
-      started: "12 Jul · 10:42",
-      channel: "WhatsApp",
-      messages: 6,
-      topic: "Sales performance",
-      followup: "Yes",
-    },
-    {
-      id: "C–9172",
-      tenant: "SME–M8P1",
-      user: "U–088",
-      started: "12 Jul · 09:18",
-      channel: "Web",
-      messages: 4,
-      topic: "Revenue diagnosis",
-      followup: "Yes",
-    },
-    {
-      id: "C–9104",
-      tenant: "SME–B2N7",
-      user: "U–121",
-      started: "11 Jul · 18:04",
-      channel: "WhatsApp",
-      messages: 2,
-      topic: "Customer marketing",
-      followup: "No",
-    },
-  ].filter((r) =>
-    `${r.id} ${r.tenant} ${r.topic}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  );
   return (
     <AppShell surface="research" title="Conversation log">
       <PageHeader
         title="Conversation log"
-        description="Study multi-turn behaviour without exposing participant identities."
+        description="Multi-turn research requires a dedicated pseudonymised conversation endpoint."
       />
-      <Filters search={search} setSearch={setSearch}>
-        <select className="filter-select">
-          <option>All channels</option>
-          <option>WhatsApp</option>
-          <option>Web</option>
-        </select>
-      </Filters>
-      <section className="card table-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Conversation</th>
-              <th>Tenant / user</th>
-              <th>Started</th>
-              <th>Channel</th>
-              <th>Messages</th>
-              <th>Primary topic</th>
-              <th>Follow-up</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id}>
-                <td className="table-primary">{r.id}</td>
-                <td>
-                  {r.tenant} / {r.user}
-                </td>
-                <td>{r.started}</td>
-                <td>
-                  <Badge>{r.channel}</Badge>
-                </td>
-                <td>{r.messages}</td>
-                <td>{r.topic}</td>
-                <td>{r.followup}</td>
-                <td>
-                  <button className="button button-ghost button-small">
-                    Open redacted →
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+      <StatePanel
+        type="empty"
+        title="Conversation summaries are not available"
+        description="The research API currently exposes event-level records without a conversation identifier. This page intentionally does not reconstruct or invent conversations from unrelated events."
+        action={
+          <button className="button button-secondary" disabled>
+            Open conversation unavailable
+          </button>
+        }
+      />
     </AppShell>
   );
 }
 
 export function Classifications() {
+  const taxonomy = useApiResource<Taxonomy>(
+    "/research/taxonomy",
+    previewTaxonomy,
+  );
+  const events = useApiResource<ResearchEvent[]>(
+    "/research/events",
+    previewResearchEvents,
+  );
+  const rows = events.data ?? [];
+  const combinedStatus =
+    taxonomy.status === "error" || events.status === "error"
+      ? "error"
+      : taxonomy.status === "loading" || events.status === "loading"
+        ? "loading"
+        : "ready";
+  const combinedSource =
+    taxonomy.source === "demo" || events.source === "demo"
+      ? "demo"
+      : taxonomy.source === "live" && events.source === "live"
+        ? "live"
+        : null;
   return (
     <AppShell surface="research" title="Classifications">
       <PageHeader
         title="Classification explorer"
-        description="Inspect taxonomy coverage, distributions, and review queues."
+        description="Inspect the live taxonomy and distributions computed from loaded research events."
       />
-      <FilterBar />
-      <div className="grid grid-3">
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Primary intent</h2>
-              <p>Top five of eleven values.</p>
-            </div>
-          </div>
-          {[
-            ["Sales analysis", "28%", 80],
-            ["Inventory management", "21%", 60],
-            ["Customer management", "16%", 46],
-            ["Finance", "12%", 34],
-            ["Marketing", "9%", 26],
-          ].map(([n, p, w]) => (
-            <div key={String(n)} style={{ marginBottom: 15 }}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 13,
-                  marginBottom: 6,
-                }}
-              >
-                <span>{n}</span>
-                <strong>{p}</strong>
-              </div>
-              <div className="progress">
-                <span style={{ width: `${w}%` }} />
-              </div>
-            </div>
-          ))}
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Reasoning complexity</h2>
-              <p>Classifier output distribution.</p>
-            </div>
-          </div>
-          <div className="donut-wrap" style={{ gap: 18 }}>
-            <div
-              className="donut"
-              style={{
-                width: 130,
-                height: 130,
-                background:
-                  "conic-gradient(var(--forest) 0 39%, var(--coral) 39% 70%, var(--amber) 70% 91%, #d8d5cb 91%)",
-              }}
+      <LiveDataBanner
+        label="taxonomy and classification events"
+        source={combinedSource}
+        status={combinedStatus}
+        error={taxonomy.error ?? events.error}
+      />
+      {taxonomy.status !== "ready" || !taxonomy.data ? (
+        <ResourceState
+          status={taxonomy.status}
+          error={taxonomy.error}
+          retry={taxonomy.reload}
+        />
+      ) : events.status !== "ready" ? (
+        <ResourceState
+          status={events.status}
+          error={events.error}
+          retry={events.reload}
+        />
+      ) : (
+        <>
+          <div className="grid grid-3">
+            <Distribution
+              title="Primary intent"
+              description={`${rows.length} loaded events.`}
+              values={countValues(rows, (event) => event.primary_intent)}
             />
-            <div className="legend">
-              <span>Simple lookup · 39%</span>
-              <span>Single-step · 31%</span>
-              <span>Multi-step · 21%</span>
-              <span>Strategic · 9%</span>
+            <Distribution
+              title="Reasoning complexity"
+              description="Classifier output in the loaded window."
+              values={countValues(rows, (event) => event.complexity)}
+            />
+            <Distribution
+              title="AI help type"
+              description="Persisted assistance categories."
+              values={countValues(rows, (event) => event.ai_help_type)}
+            />
+          </div>
+          <Card padded>
+            <div className="card-head">
+              <div>
+                <h2>Taxonomy definitions</h2>
+                <p>Values returned by the current taxonomy endpoint.</p>
+              </div>
+              <button className="button button-secondary button-small" disabled>
+                Change log unavailable
+              </button>
             </div>
-          </div>
-        </Card>
-        <Card padded>
-          <div className="card-head">
-            <div>
-              <h2>Review queue</h2>
-              <p>Items requiring human validation.</p>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Dimension</th>
+                    <th>Configured values</th>
+                    <th>Classified events</th>
+                    <th>Unclassified events</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    [
+                      "Primary intent",
+                      taxonomy.data.primary_intent.length,
+                      rows.filter((event) => event.primary_intent).length,
+                    ],
+                    [
+                      "Business function",
+                      taxonomy.data.business_function.length,
+                      rows.filter((event) => event.business_function).length,
+                    ],
+                    [
+                      "AI help type",
+                      taxonomy.data.ai_help_type.length,
+                      rows.filter((event) => event.ai_help_type).length,
+                    ],
+                    [
+                      "Complexity",
+                      taxonomy.data.complexity.length,
+                      rows.filter((event) => event.complexity).length,
+                    ],
+                  ].map(([dimension, values, classified]) => (
+                    <tr key={String(dimension)}>
+                      <td className="table-primary">{dimension}</td>
+                      <td>{values}</td>
+                      <td>{classified}</td>
+                      <td>{rows.length - Number(classified)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <Badge tone="warning">263 open</Badge>
+          </Card>
+          <div className="alert alert-info">
+            Human review queues and taxonomy mutations are not exposed by the
+            API, so no review count or editable state is shown.
           </div>
-          <div className="detail-row">
-            <span className="detail-label">Low confidence</span>
-            <span className="detail-value">141</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Conflicting labels</span>
-            <span className="detail-value">68</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Possible PII</span>
-            <span className="detail-value">31</span>
-          </div>
-          <div className="detail-row">
-            <span className="detail-label">Other</span>
-            <span className="detail-value">23</span>
-          </div>
-          <button className="button button-secondary" style={{ marginTop: 14 }}>
-            Open review queue
-          </button>
-        </Card>
-      </div>
-      <Card padded className="">
-        <div className="card-head">
-          <div>
-            <h2>Taxonomy definitions</h2>
-            <p>Version 1.3 · active since 1 July 2026.</p>
-          </div>
-          <button className="button button-secondary button-small">
-            View change log
-          </button>
-        </div>
-        <div className="table-wrap">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Dimension</th>
-                <th>Values</th>
-                <th>Coverage</th>
-                <th>Unclassified</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td className="table-primary">Primary intent</td>
-                <td>11</td>
-                <td>98.7%</td>
-                <td>162</td>
-              </tr>
-              <tr>
-                <td className="table-primary">Business function</td>
-                <td>9</td>
-                <td>99.1%</td>
-                <td>112</td>
-              </tr>
-              <tr>
-                <td className="table-primary">AI help type</td>
-                <td>8</td>
-                <td>98.9%</td>
-                <td>137</td>
-              </tr>
-              <tr>
-                <td className="table-primary">Complexity</td>
-                <td>4</td>
-                <td>99.4%</td>
-                <td>75</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </Card>
+        </>
+      )}
     </AppShell>
   );
 }
 
 export function Cohorts() {
-  const cohorts = [
-    {
-      name: "Fashion SMEs",
-      members: 8,
-      active: "88%",
-      retention: "76%",
-      messages: "4,212",
-      note: "Highest use of marketing drafts",
-    },
-    {
-      name: "Home & living",
-      members: 5,
-      active: "100%",
-      retention: "81%",
-      messages: "2,948",
-      note: "Strongest inventory usage",
-    },
-    {
-      name: "Food & drink",
-      members: 4,
-      active: "75%",
-      retention: "63%",
-      messages: "1,884",
-      note: "Frequent daily sales lookups",
-    },
-    {
-      name: "Newly onboarded · Jun",
-      members: 6,
-      active: "83%",
-      retention: "—",
-      messages: "1,106",
-      note: "Week-four retention pending",
-    },
-  ];
+  const resource = useApiResource<ResearchEvent[]>(
+    "/research/events?limit=500",
+    previewResearchEvents,
+  );
+  const groups = useMemo(() => {
+    const map = new Map<string, ResearchEvent[]>();
+    for (const event of resource.data ?? [])
+      map.set(event.tenant_pseudonym, [
+        ...(map.get(event.tenant_pseudonym) ?? []),
+        event,
+      ]);
+    return [...map.entries()].sort((a, b) => b[1].length - a[1].length);
+  }, [resource.data]);
   return (
     <AppShell surface="research" title="Cohorts">
       <PageHeader
-        title="Cohort analysis"
-        description="Compare adoption and repeat behaviour across transparent SME segments."
+        title="Observed tenant cohorts"
+        description="Compare pseudonymised event activity without claiming demographic or business-category data the API does not expose."
         actions={
-          <button className="button button-primary">＋ Define cohort</button>
+          <button className="button button-primary" disabled>
+            ＋ Define cohort unavailable
+          </button>
         }
       />
-      <FilterBar />
-      <div className="grid grid-2">
-        {cohorts.map((c) => (
-          <Card padded key={c.name}>
-            <div className="card-head">
-              <div>
-                <h2>{c.name}</h2>
-                <p>{c.members} consented SMEs</p>
-              </div>
-              <button className="button button-ghost button-small">
-                Explore →
+      <LiveDataBanner
+        label="cohort event window"
+        source={resource.source}
+        status={resource.status}
+        count={resource.data?.length}
+        error={resource.error}
+      />
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          retry={resource.reload}
+        />
+      ) : !groups.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          retry={resource.reload}
+          empty="No cohort evidence available"
+        />
+      ) : (
+        <div className="grid grid-2">
+          {groups.map(([pseudonym, events]) => {
+            const channels = countValues(events, (event) => event.channel);
+            const intents = countValues(
+              events,
+              (event) => event.primary_intent,
+            );
+            return (
+              <Card padded key={pseudonym}>
+                <div className="card-head">
+                  <div>
+                    <h2>{pseudonym}</h2>
+                    <p>
+                      Pseudonymised tenant · {events.length} event
+                      {events.length === 1 ? "" : "s"}
+                    </p>
+                  </div>
+                  <Badge>{formatDate(events[0]?.created_at)}</Badge>
+                </div>
+                <div className="grid grid-2">
+                  <div>
+                    <div className="metric-label">Top channel</div>
+                    <div className="metric-value" style={{ fontSize: 22 }}>
+                      {titleCase(channels[0]?.[0])}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="metric-label">Top intent</div>
+                    <div className="metric-value" style={{ fontSize: 22 }}>
+                      {titleCase(intents[0]?.[0])}
+                    </div>
+                  </div>
+                </div>
+                <div
+                  className="alert alert-info"
+                  style={{ marginTop: 18, marginBottom: 0 }}
+                >
+                  This grouping uses only the tenant pseudonym present on loaded
+                  research events.
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </AppShell>
+  );
+}
+
+type ReportDetail = {
+  id: string;
+  status: string;
+  title: string | null;
+  summary: string | null;
+  artifacts: Array<{
+    format: string;
+    byte_size: number;
+    checksum_sha256: string;
+  }>;
+};
+
+function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
+  const resource = useApiResource<Report[]>(
+    "/research/reports",
+    previewReports,
+  );
+  const [modal, setModal] = useState(false);
+  const [type, setType] = useState(
+    mode === "reports" ? "weekly_memo" : "sme_usage",
+  );
+  const [format, setFormat] = useState(mode === "reports" ? "pdf" : "csv");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [toast, setToast] = useState("");
+  const [detail, setDetail] = useState<ReportDetail | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+  const create = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const created = await apiRequest<Report>(
+        mode === "reports" ? "/research/reports" : "/research/exports",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            report_type: type,
+            filters: {},
+            formats: [format],
+          }),
+        },
+      );
+      resource.replace([created, ...(resource.data ?? [])]);
+      setModal(false);
+      setToast(
+        `${mode === "reports" ? "Report" : "Export"} generated by the local report adapter.`,
+      );
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "The artifact could not be generated.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const inspect = async (id: string) => {
+    setDetailBusy(true);
+    setError("");
+    try {
+      setDetail(await apiRequest<ReportDetail>(`/research/reports/${id}`));
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Report details could not be loaded.",
+      );
+    } finally {
+      setDetailBusy(false);
+    }
+  };
+  const noun = mode === "reports" ? "report" : "export";
+  return (
+    <AppShell
+      surface="research"
+      title={mode === "reports" ? "Reports" : "Exports"}
+    >
+      <PageHeader
+        title={mode === "reports" ? "Research reports" : "Export centre"}
+        description={
+          mode === "reports"
+            ? "Generate durable reports using the configured artifact adapter."
+            : "Create anonymised, audit-logged research artifacts."
+        }
+        actions={
+          <button
+            className="button button-primary"
+            disabled={!demoFallbackEnabled || resource.source !== "live"}
+            title={
+              !demoFallbackEnabled
+                ? "A production report queue adapter is not configured."
+                : resource.source !== "live"
+                  ? "Artifact creation requires a reachable local API."
+                  : undefined
+            }
+            onClick={() => setModal(true)}
+          >
+            ＋ Create {noun}
+          </button>
+        }
+      />
+      <LiveDataBanner
+        label="research artifacts"
+        source={resource.source}
+        status={resource.status}
+        count={resource.data?.length}
+        error={resource.error}
+      />
+      {!demoFallbackEnabled && (
+        <div className="alert alert-warning">
+          Artifact creation is disabled because the production report queue
+          adapter is not configured. Existing artifact metadata remains
+          readable.
+        </div>
+      )}
+      {error && (
+        <div className="alert alert-danger" role="alert">
+          {error}
+        </div>
+      )}
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          retry={resource.reload}
+        />
+      ) : !resource.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          retry={resource.reload}
+          empty={`No ${noun}s generated`}
+        />
+      ) : (
+        <section className="card table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Artifact</th>
+                <th>Type</th>
+                <th>Created</th>
+                <th>Finished</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {resource.data.map((report) => (
+                <tr key={report.id}>
+                  <td>
+                    <div className="table-primary">
+                      {report.title ?? titleCase(report.report_type)}
+                    </div>
+                    <div className="table-secondary">
+                      {report.id.slice(0, 12)}
+                    </div>
+                  </td>
+                  <td>{titleCase(report.report_type)}</td>
+                  <td>{formatDate(report.created_at)}</td>
+                  <td>{formatDate(report.finished_at)}</td>
+                  <td>
+                    <Badge>{titleCase(report.status)}</Badge>
+                  </td>
+                  <td>
+                    <button
+                      className="button button-ghost button-small"
+                      disabled={detailBusy || resource.source !== "live"}
+                      onClick={() => void inspect(report.id)}
+                    >
+                      {detailBusy ? "Loading…" : "Files →"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {modal && (
+        <Modal
+          title={`Create research ${noun}`}
+          onClose={() => !busy && setModal(false)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => setModal(false)}
+              >
+                Cancel
               </button>
-            </div>
-            <div className="grid grid-3">
-              <div>
-                <div className="metric-label">Active · 30d</div>
-                <div className="metric-value" style={{ fontSize: 22 }}>
-                  {c.active}
-                </div>
-              </div>
-              <div>
-                <div className="metric-label">W4 retention</div>
-                <div className="metric-value" style={{ fontSize: 22 }}>
-                  {c.retention}
-                </div>
-              </div>
-              <div>
-                <div className="metric-label">Questions</div>
-                <div className="metric-value" style={{ fontSize: 22 }}>
-                  {c.messages}
-                </div>
-              </div>
-            </div>
-            <div
-              className="alert alert-info"
-              style={{ marginTop: 18, marginBottom: 0 }}
+              <button
+                className="button button-primary"
+                disabled={busy}
+                onClick={() => void create()}
+              >
+                {busy ? "Generating…" : `Generate ${noun}`}
+              </button>
+            </>
+          }
+        >
+          <div className="field">
+            <label htmlFor="report-type">Artifact type</label>
+            <select
+              id="report-type"
+              className="select"
+              value={type}
+              onChange={(event) => setType(event.target.value)}
             >
-              {c.note}
-            </div>
-          </Card>
-        ))}
-      </div>
+              <option value="sme_usage">SME usage</option>
+              <option value="cohort_behavior">Cohort behaviour</option>
+              <option value="question_taxonomy">Question taxonomy</option>
+              <option value="weekly_memo">Weekly memo</option>
+              <option value="monthly_memo">Monthly memo</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="report-format">Format</label>
+            <select
+              id="report-format"
+              className="select"
+              value={format}
+              onChange={(event) => setFormat(event.target.value)}
+            >
+              <option value="csv">CSV</option>
+              <option value="jsonl">JSONL</option>
+              <option value="pdf">PDF</option>
+            </select>
+          </div>
+          <div className="alert alert-info">
+            Local generation is synchronous and consent-filtered. Production
+            generation remains disabled until a durable queue is configured.
+          </div>
+        </Modal>
+      )}
+      {detail && (
+        <Modal
+          title={detail.title ?? "Artifact files"}
+          onClose={() => setDetail(null)}
+          actions={
+            <button
+              className="button button-secondary"
+              onClick={() => setDetail(null)}
+            >
+              Close
+            </button>
+          }
+        >
+          <p>{detail.summary ?? "No summary was recorded."}</p>
+          {detail.artifacts.length ? (
+            detail.artifacts.map((artifact) => (
+              <div className="detail-row" key={artifact.format}>
+                <span>
+                  <strong>{artifact.format.toUpperCase()}</strong>
+                  <br />
+                  <span className="table-secondary">
+                    {artifact.byte_size.toLocaleString()} bytes · SHA-256{" "}
+                    {artifact.checksum_sha256.slice(0, 12)}…
+                  </span>
+                </span>
+                <a
+                  className="button button-primary button-small"
+                  href={`/api/backend/research/reports/${detail.id}/download/${artifact.format}`}
+                >
+                  Download
+                </a>
+              </div>
+            ))
+          ) : (
+            <StatePanel
+              type="empty"
+              title="No files are available"
+              description="The report metadata exists, but no generated artifact was returned."
+            />
+          )}
+        </Modal>
+      )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }
 
 export function Reports() {
-  const [modal, setModal] = useState(false);
-  const [toast, setToast] = useState("");
-  return (
-    <AppShell surface="research" title="Reports">
-      <PageHeader
-        title="Research reports"
-        description="Generate durable, filtered reports with redacted examples and methods metadata."
-        actions={
-          <button
-            className="button button-primary"
-            onClick={() => setModal(true)}
-          >
-            ＋ Generate report
-          </button>
-        }
-      />
-      <div className="alert alert-info">
-        Reports are generated asynchronously. You can leave this page and return
-        when the artifact is ready.
-      </div>
-      <section className="card table-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>Report</th>
-              <th>Type</th>
-              <th>Scope</th>
-              <th>Created</th>
-              <th>Status</th>
-              <th>Formats</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {reports.map((r) => (
-              <tr key={r.title}>
-                <td className="table-primary">{r.title}</td>
-                <td>{r.type}</td>
-                <td>{r.scope}</td>
-                <td>{r.created}</td>
-                <td>
-                  <Badge>{r.status}</Badge>
-                </td>
-                <td>{r.formats}</td>
-                <td>
-                  <button
-                    className="button button-ghost button-small"
-                    disabled={r.status !== "Ready"}
-                  >
-                    Download
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-      {modal && (
-        <Modal
-          title="Generate research report"
-          onClose={() => setModal(false)}
-          actions={
-            <>
-              <button
-                className="button button-secondary"
-                onClick={() => setModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="button button-primary"
-                onClick={() => {
-                  setModal(false);
-                  setToast("Report queued. We will update its status here.");
-                }}
-              >
-                Queue report
-              </button>
-            </>
-          }
-        >
-          <div className="field">
-            <label>Report type</label>
-            <select className="select">
-              <option>Weekly research memo</option>
-              <option>SME usage report</option>
-              <option>Cohort behaviour report</option>
-              <option>AI question taxonomy report</option>
-              <option>Academic-style memo</option>
-            </select>
-          </div>
-          <div className="grid grid-2">
-            <div className="field">
-              <label>Date from</label>
-              <input className="input" type="date" defaultValue="2026-06-12" />
-            </div>
-            <div className="field">
-              <label>Date to</label>
-              <input className="input" type="date" defaultValue="2026-07-12" />
-            </div>
-          </div>
-          <div className="field">
-            <label>Population</label>
-            <select className="select">
-              <option>All consented SMEs</option>
-              <option>Fashion cohort</option>
-              <option>Home & living cohort</option>
-            </select>
-          </div>
-          <div className="check-row">
-            <input id="examples" type="checkbox" defaultChecked />
-            <label htmlFor="examples">
-              Include redacted examples where permitted.
-            </label>
-          </div>
-        </Modal>
-      )}
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
-    </AppShell>
-  );
+  return <ReportInventory mode="reports" />;
 }
-
 export function Exports() {
-  const [modal, setModal] = useState(false);
-  const [toast, setToast] = useState("");
-  const exports = [
-    {
-      name: "anonymized_questions_2026-07-12.csv",
-      type: "Anonymized",
-      rows: "12,486",
-      size: "4.8 MB",
-      created: "12 Jul · 11:04",
-      expires: "19 Jul",
-    },
-    {
-      name: "taxonomy_q2_2026.jsonl",
-      type: "Anonymized",
-      rows: "28,941",
-      size: "18.2 MB",
-      created: "4 Jul · 15:18",
-      expires: "Expired",
-    },
-    {
-      name: "usage_cohort_fashion.csv",
-      type: "Aggregate",
-      rows: "1,408",
-      size: "892 KB",
-      created: "1 Jul · 09:42",
-      expires: "15 Jul",
-    },
-  ];
-  return (
-    <AppShell surface="research" title="Exports">
-      <PageHeader
-        title="Export centre"
-        description="Create time-limited, audit-logged research datasets."
-        actions={
-          <button
-            className="button button-primary"
-            onClick={() => setModal(true)}
-          >
-            ＋ Create export
-          </button>
-        }
-      />
-      <div className="alert alert-warning">
-        Exports exclude raw PII by default. Downloaded files remain sensitive
-        research material and must follow the approved storage policy.
-      </div>
-      <section className="card table-wrap">
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th>File</th>
-              <th>Privacy level</th>
-              <th>Rows</th>
-              <th>Size</th>
-              <th>Created</th>
-              <th>Expires</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {exports.map((e) => (
-              <tr key={e.name}>
-                <td className="table-primary">{e.name}</td>
-                <td>
-                  <Badge tone={e.type === "Aggregate" ? "info" : "success"}>
-                    {e.type}
-                  </Badge>
-                </td>
-                <td>{e.rows}</td>
-                <td>{e.size}</td>
-                <td>{e.created}</td>
-                <td>{e.expires}</td>
-                <td>
-                  <button
-                    className="button button-ghost button-small"
-                    disabled={e.expires === "Expired"}
-                  >
-                    Download
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-      {modal && (
-        <Modal
-          title="Create anonymized export"
-          onClose={() => setModal(false)}
-          actions={
-            <>
-              <button
-                className="button button-secondary"
-                onClick={() => setModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="button button-primary"
-                onClick={() => {
-                  setModal(false);
-                  setToast("Export queued with default redaction.");
-                }}
-              >
-                Create export
-              </button>
-            </>
-          }
-        >
-          <div className="field">
-            <label>Dataset</label>
-            <select className="select">
-              <option>Question events</option>
-              <option>Conversation summaries</option>
-              <option>Classification events</option>
-              <option>Aggregate usage</option>
-            </select>
-          </div>
-          <div className="field">
-            <label>Format</label>
-            <select className="select">
-              <option>CSV</option>
-              <option>JSONL</option>
-            </select>
-          </div>
-          <div className="field">
-            <label>Privacy level</label>
-            <select className="select">
-              <option>Anonymized · recommended</option>
-              <option>Aggregate only</option>
-            </select>
-          </div>
-          <div
-            className="alert alert-success"
-            style={{ marginTop: 18, marginBottom: 0 }}
-          >
-            ✓ PII redaction and consent filters are enabled.
-          </div>
-        </Modal>
-      )}
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
-    </AppShell>
-  );
+  return <ReportInventory mode="exports" />;
 }

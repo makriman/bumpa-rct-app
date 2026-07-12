@@ -1,40 +1,41 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { apiRequest } from "@/lib/api";
+import type { DataSource } from "@/lib/api";
+import type { ResourceStatus } from "@/lib/use-api-resource";
 
 export function LiveDataBanner({
-  endpoint,
   label,
+  source,
+  status,
+  count,
+  error,
 }: {
-  endpoint: string;
   label: string;
+  source: DataSource | null;
+  status: ResourceStatus;
+  count?: number;
+  error?: string | null;
 }) {
-  const [status, setStatus] = useState<"loading" | "live" | "demo">("loading");
-  const [count, setCount] = useState<number | null>(null);
-  useEffect(() => {
-    let active = true;
-    void apiRequest<unknown>(endpoint)
-      .then((data) => {
-        if (!active) return;
-        setCount(Array.isArray(data) ? data.length : null);
-        setStatus("live");
-      })
-      .catch(() => active && setStatus("demo"));
-    return () => {
-      active = false;
-    };
-  }, [endpoint]);
+  const tone =
+    status === "error"
+      ? "alert-danger"
+      : source === "live"
+        ? "alert-success"
+        : source === "demo"
+          ? "alert-warning"
+          : "alert-info";
   return (
     <div
-      className={`alert ${status === "live" ? "alert-success" : status === "demo" ? "alert-warning" : "alert-info"}`}
-      role="status"
+      className={`alert ${tone}`}
+      role={status === "error" ? "alert" : "status"}
     >
       {status === "loading"
-        ? `Checking the ${label} API…`
-        : status === "live"
-          ? `Live ${label} API connected${count === null ? "" : ` · ${count} records available`}. Backend RBAC is authoritative.`
-          : `Demo fallback: the ${label} API is unavailable or this session lacks permission. Values below are labelled preview fixtures, not live tenant data.`}
+        ? `Loading ${label} from the API…`
+        : status === "error"
+          ? `${label} could not be loaded${error ? `: ${error}` : "."}`
+          : source === "live"
+            ? `Live ${label}${count === undefined ? "" : ` · ${count} record${count === 1 ? "" : "s"}`}. The values below came from the API.`
+            : `Demo preview · the values below are deterministic fixtures, not tenant or research data.`}
     </div>
   );
 }

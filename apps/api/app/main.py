@@ -5,13 +5,13 @@ from contextlib import asynccontextmanager
 from time import monotonic
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, correlation_id_var
 from app.db.session import SessionLocal, create_schema, set_security_context
 from app.routes import admin, auth, bumpa, chat, hermes, mcp, research, settings, tenants, whatsapp
@@ -91,10 +91,18 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "api"}
 
     @application.get("/health/ready", tags=["health"])
-    def health_ready() -> dict:
+    def health_ready(settings_config: Settings = Depends(get_settings)) -> dict:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
-        return {"status": "ready", "database": "ok", "providers": "local"}
+        return {
+            "status": "ready",
+            "database": "ok",
+            "providers": {
+                "whatsapp": settings_config.whatsapp_backend,
+                "bumpa": settings_config.bumpa_backend,
+                "agent": settings_config.agent_backend,
+            },
+        }
 
     @application.get("/health", include_in_schema=False)
     def health_compatibility() -> dict:

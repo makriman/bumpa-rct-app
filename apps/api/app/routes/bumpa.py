@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_tenant, require_tenant_admin
 from app.db.models import BumpaConnection, BumpaSyncRun
 from app.db.session import get_db
@@ -18,7 +19,13 @@ def sync(
     payload: SyncRequest,
     principal: Principal = Depends(require_tenant_admin),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
+    if settings.bumpa_backend != "mock":
+        raise HTTPException(
+            status_code=503,
+            detail="Bumpa integration is not configured yet",
+        )
     assert principal.tenant is not None
     connection = db.scalar(
         select(BumpaConnection).where(BumpaConnection.tenant_id == principal.tenant.id)
@@ -37,10 +44,17 @@ def sync(
 
 @router.post("/sync/latest")
 def sync_latest(
-    principal: Principal = Depends(require_tenant_admin), db: Session = Depends(get_db)
+    principal: Principal = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> dict:
     today = date.today()
-    return sync(SyncRequest(date_from=today - timedelta(days=29), date_to=today), principal, db)
+    return sync(
+        SyncRequest(date_from=today - timedelta(days=29), date_to=today),
+        principal,
+        db,
+        settings,
+    )
 
 
 @router.get("/sync-runs")

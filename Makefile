@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap install lint format-check typecheck test test-api test-web e2e integration \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
-	compose-smoke smoke backup restore shellcheck clean
+	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck clean
 
 COMPOSE := docker compose
 PROD_COMPOSE := docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml
@@ -53,7 +53,11 @@ dev: ## Build and start the credential-free local stack
 	$(COMPOSE) up -d --build api worker scheduler web caddy
 
 down: ## Stop the local stack without deleting durable volumes
-	$(COMPOSE) down
+	$(COMPOSE) --profile async --profile tools down --remove-orphans
+
+compose-up: dev ## Build and start the credential-free local stack
+
+compose-down: down ## Stop the local stack without deleting durable volumes
 
 logs: ## Follow application logs
 	$(COMPOSE) logs -f --tail=200 caddy web api worker scheduler
@@ -89,6 +93,9 @@ restore: ## Restore BACKUP_PATH after explicit confirmation
 		-e RESTORE_CONFIRM=restore-bumpabestie \
 		-e BACKUP_PATH="$(BACKUP_PATH)" \
 		--entrypoint /usr/local/bin/restore.sh backup
+
+deploy: ## Deploy the immutable production release selected in .env.production
+	./scripts/deploy.sh
 
 shellcheck: ## Validate shell syntax and run shellcheck when installed
 	./scripts/validate_shell.sh

@@ -12,12 +12,18 @@ Settings/admin/research screens remain partly synthetic previews, and an explici
 demo-cookie path remains for credential-free local UI testing. Live providers are
 intentionally deferred.
 
+The pre-integration production baseline uses `disabled` selectors for WhatsApp,
+Bumpa and agent providers. Provider-dependent routes must fail closed, report an
+honest unavailable state and never fall back to these local adapters. Worker and
+scheduler remain local shells until a production queue exists.
+
 ## Local mode
 
 Local development is credential free. Copy `.env.example` to `.env`, then run
-`make bootstrap` and `make dev`. The application must refuse to initialize a live
-adapter when its required credentials are absent, and must refuse every mock adapter
-when `APP_ENV=production`.
+`make bootstrap` and `make dev`. Production configuration rejects every mock
+adapter. The current settings validator checks required Meta values when the Meta
+selector is used; equivalent credential/health validation must be added with the
+future Bumpa and Hermes adapters before either live selector is allowed.
 
 The development OTP `246810` and OTP log sink are synthetic conveniences. Config
 validation must prevent either value from being loaded outside `local` or `test`.
@@ -38,18 +44,22 @@ fixtures or expose the documented failure scenarios (`timeout`, `rate_limited`,
 ## Bumpa contract
 
 The defined read surface is ten analytics datasets plus paginated orders. Code and
-documentation must not ambiguously call all eleven items “datasets.” Fixtures cover
-`business_id` and `location_id`, Decimal money, unknown statuses, partial data,
-body-level errors, 401/403/429/5xx, pagination and sensitive nested fields. Live
-contract verification remains pending until a sandbox/test store is supplied.
+documentation must not ambiguously call all eleven items “datasets.” The local fake
+returns ten datasets and six synthetic orders, and unit tests cover basic Decimal
+money, availability and top-level redaction. The checked-in fixture set is not yet
+the required contract matrix. It must add both scope types, unknown statuses,
+partial/body errors, 401/403/429/5xx, multi-page boundaries and nested sensitive
+fields. Live contract verification remains pending until a sandbox/test store is
+supplied.
 
 ## WhatsApp contract
 
 Local webhook tests use canonical raw JSON bytes and compute real HMAC signatures.
 They cover verification challenge, wrong/missing signature, unknown number, known
-number, duplicates, delivery callbacks, STOP/START and out-of-order status events.
-Outbound sends are recorded by the fake adapter. Live verification requires a Meta
-app, verified callback, approved templates and a test recipient.
+number, duplicates, one delivery callback, STOP/START and retry after failed inline
+processing. Outbound sends are recorded by the fake adapter. Out-of-order delivery
+states and the full payload/type matrix remain open. Live verification requires a
+Meta app, verified callback, approved templates and a test recipient.
 
 ## Agent contract
 
@@ -58,6 +68,12 @@ redacted context envelope. Contract tests assert that provider credentials and r
 PII never appear in the request. Live Hermes verification must prove profile process
 topology, port allocation, authentication, restart behavior and cross-profile
 isolation before the adapter is enabled.
+
+Claude is the planned model provider through Hermes. The Anthropic key belongs only
+to the future Hermes runtime secret boundary; FastAPI passes tenant-scoped,
+redacted context to Hermes and does not call Claude directly for the SME chat path.
+No Hermes database row, profile directory, port allocation or credential alone is
+live-profile evidence.
 
 ## API contract
 

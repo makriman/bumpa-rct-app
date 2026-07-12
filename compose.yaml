@@ -23,14 +23,10 @@ x-app-environment: &app-environment
   SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
   SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
   DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bumpabestie_app:local-app-postgres-only@postgres:5432/bumpabestie}
-  MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-postgresql+psycopg://bumpabestie:local-postgres-only@postgres:5432/bumpabestie}
-  SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:-postgresql://bumpabestie:local-postgres-only@postgres:5432/bumpabestie}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:-mock}
   AGENT_BACKEND: ${AGENT_BACKEND:-mock}
   BUMPA_BACKEND: ${BUMPA_BACKEND:-mock}
-  DEV_OTP_SINK: ${DEV_OTP_SINK:-log}
-  DEV_FIXED_OTP: ${DEV_FIXED_OTP:-246810}
   EXPOSE_LOCAL_OTP: ${EXPOSE_LOCAL_OTP:-true}
   LOCAL_OTP_CODE: ${LOCAL_OTP_CODE:-246810}
   SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
@@ -44,8 +40,6 @@ x-app-environment: &app-environment
   META_PHONE_NUMBER: ${META_PHONE_NUMBER:-}
   META_SYSTEM_USER_ACCESS_TOKEN: ${META_SYSTEM_USER_ACCESS_TOKEN:-}
   META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-local-webhook-token}
-  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-  ANTHROPIC_MODEL_DEFAULT: ${ANTHROPIC_MODEL_DEFAULT:-}
   HERMES_BASE_INTERNAL_HOST: ${HERMES_BASE_INTERNAL_HOST:-http://hermes}
   HERMES_ADMIN_TOKEN: ${HERMES_ADMIN_TOKEN:-}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -136,7 +130,7 @@ services:
     <<: *api-service
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -145,14 +139,19 @@ services:
   worker:
     <<: *api-service
     command: ["python", "-m", "app.jobs.worker"]
+    profiles: ["async"]
 
   scheduler:
     <<: *api-service
     command: ["python", "-m", "app.jobs.scheduler"]
+    profiles: ["async"]
 
   migrate:
     <<: *api-service
     command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-environment
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-postgresql+psycopg://bumpabestie:local-postgres-only@postgres:5432/bumpabestie}
     restart: "no"
     profiles: ["tools"]
 

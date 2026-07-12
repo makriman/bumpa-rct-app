@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import json
 from collections.abc import Sequence
@@ -11,13 +10,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
-from app.db.models import Artifact, ResearchEvent, ResearchReport
+from app.db.models import Artifact, ResearchEvent, ResearchReport, Tenant
 from app.providers.local import LocalArtifactStore
-from app.providers.redaction import csv_safe
+from app.providers.redaction import csv_safe, pseudonymize, redact_text
 
 
-def _rows(db: Session, filters: dict[str, Any]) -> list[dict[str, Any]]:
-    statement = select(ResearchEvent).order_by(ResearchEvent.created_at.desc()).limit(10_000)
+def _rows(db: Session, filters: dict[str, Any], *, pseudonym_secret: str) -> list[dict[str, Any]]:
+    statement = (
+        select(ResearchEvent)
+        .join(Tenant, ResearchEvent.tenant_id == Tenant.id)
+        .where(Tenant.research_consent_status == "granted")
+        .order_by(ResearchEvent.created_at.desc())
+        .limit(10_000)
+    )
     if tenant_id := filters.get("tenant_id"):
         statement = statement.where(ResearchEvent.tenant_id == tenant_id)
     if channel := filters.get("channel"):
@@ -28,11 +33,11 @@ def _rows(db: Session, filters: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
             "timestamp": event.created_at.isoformat(),
-            "tenant_pseudonym": hashlib.sha256((event.tenant_id or "unknown").encode()).hexdigest()[
-                :12
-            ],
+            "event_pseudonym": pseudonymize(event.id, pseudonym_secret, namespace="event"),
+            "tenant_pseudonym": pseudonymize(event.tenant_id, pseudonym_secret, namespace="tenant"),
+            "user_pseudonym": pseudonymize(event.user_id, pseudonym_secret, namespace="user"),
             "channel": event.channel,
-            "question": event.redacted_text or "",
+            "question": redact_text(event.redacted_text) if event.redacted_text else "",
             "primary_intent": event.primary_intent or "unclassified",
             "business_function": event.business_function or "unclassified",
             "ai_help_type": event.ai_help_type or "unclassified",
@@ -91,10 +96,12 @@ def generate_report(
     store: LocalArtifactStore,
     report: ResearchReport,
     formats: Sequence[str],
+    *,
+    pseudonym_secret: str,
 ) -> ResearchReport:
     report.status = "running"
     db.commit()
-    rows = _rows(db, report.filters)
+    rows = _rows(db, report.filters, pseudonym_secret=pseudonym_secret)
     title = report.title or report.report_type.replace("_", " ").title()
     for fmt in sorted(set(formats)):
         if fmt == "csv":

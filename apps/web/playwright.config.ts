@@ -19,6 +19,7 @@ export default defineConfig({
   webServer: {
     command: "next dev -p 3010",
     url: "http://localhost:3010/api/health",
+    env: { NEXT_PUBLIC_DEMO_MODE: "true" },
     reuseExistingServer: false,
     timeout: 120_000,
   },

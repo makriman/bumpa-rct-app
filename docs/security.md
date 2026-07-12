@@ -13,6 +13,12 @@ limits, credential key rotation, raw-access reason gates, export expiry, nested 
 redaction coverage and image vulnerability scanning. Consult the verification
 ledger before relying on a control.
 
+The pre-integration production baseline uses explicit `disabled` provider modes and
+does not start worker/scheduler. That is a containment state, not a security signoff
+for provider integrations. A local mock response in production, an enabled provider
+without its contract/canary gate, or a running production idle-shell worker is a
+release-blocking configuration defect.
+
 ## Assets and threats
 
 High-value assets are provider credentials, customer/order PII, raw chat, tenant
@@ -59,6 +65,11 @@ key rotation can decrypt with the old key and re-encrypt with the new key. Logs 
 redact authorization headers, cookie values, phone numbers, addresses and raw
 provider payloads.
 
+The versioned rotation workflow in the previous paragraph is a required target; the
+current field cipher does not yet supply complete key-version migration evidence.
+The future Anthropic key is owned by the Hermes runtime boundary only. It must not
+be passed through the shared Compose application environment or stored per tenant.
+
 ### Containers and network
 
 The rendered Compose contract publishes only Caddy ports and keeps database/cache
@@ -69,12 +80,12 @@ image has yet been published or vulnerability-scanned as evidence.
 
 ## Research governance
 
-Research collection is gated by recorded consent status. Consent version, timestamp
-and policy version are retained. Withdrawal stops new research classification and
-initiates the documented retention/deletion workflow without silently corrupting
-operational records. Raw chat, raw commerce payloads and anonymized research data
-have separate retention schedules. Export files expire and require reauthorization
-on download.
+The target governance contract gates research collection by recorded consent,
+retains consent version/timestamp/policy version, stops new classification after
+withdrawal and initiates a documented retention/deletion workflow without silently
+corrupting operational records. The current local flow gates its research message
+event and stores consent history, but the deletion workflow, separate retention
+schedules, export expiry and download reauthorization are not implemented.
 
 ## Verification
 

@@ -1,0 +1,79 @@
+# External references
+
+These are the primary project references named by the build plan. A link is useful
+design input; it is not evidence that the corresponding integration works. Record
+the exact API/version used, a redacted contract fixture, and a live canary when an
+adapter is implemented.
+
+## Hermes Agent
+
+- [Profiles](https://hermes-agent.nousresearch.com/docs/user-guide/profiles/) —
+  intended source for per-tenant profile layout and lifecycle.
+- [Docker](https://hermes-agent.nousresearch.com/docs/user-guide/docker/) — intended
+  source for the pinned runtime image and private container topology.
+- [API server](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server/) —
+  intended source for API authentication, request shape and health behavior.
+
+Hermes has not yet been integrated. Revalidate these references against the pinned
+Hermes release before writing configuration or claiming profile isolation.
+
+## Bumpa
+
+- [Bumpa documentation](https://docs.bumpa.io/) — public documentation entry point.
+- [Bumpa product/API landing page](https://www.bumpa.io/) — product context and the
+  route to provider support/access.
+
+The repository must use a direct server-side Bumpa REST adapter; Bumpa MCP is out of
+scope. Public landing material does not prove the precise commerce analytics
+contract. Obtain provider-approved documentation or sandbox access and capture
+versioned redacted fixtures before enabling the adapter.
+
+## Meta WhatsApp Cloud API
+
+- [Message API](https://developers.facebook.com/documentation/business-messaging/whatsapp/reference/whatsapp-business-phone-number/message-api/) — outbound message contract.
+- [Incoming webhook payload](https://developers.facebook.com/documentation/business-messaging/whatsapp/reference/webhooks/whatsapp-incoming-webhook-payload/) — inbound and delivery event contract.
+- [Template API](https://developers.facebook.com/documentation/business-messaging/whatsapp/reference/whatsapp-business-account/template-api/) — template creation, approval and status.
+
+Pin and test the selected Graph API version. Do not infer current template, service
+window, token or permission rules from the build-plan date.
+
+## Anthropic Claude
+
+- [Messages API](https://platform.claude.com/docs/en/api/messages) — model request and response contract.
+- [API versioning](https://platform.claude.com/docs/en/api/versioning) — required
+  version behavior.
+
+Claude is reached through Hermes for the SME agent path. The Anthropic key belongs
+only in the Hermes secret boundary; it must not be injected into web, API, worker,
+scheduler, browser or research exports. Model names must be selected from the
+current Anthropic console immediately before integration.
+
+## DigitalOcean
+
+- [Recommended Droplet setup](https://docs.digitalocean.com/products/droplets/getting-started/recommended-droplet-setup/) — host account, SSH and baseline hardening.
+
+DigitalOcean console access and an authorized SSH public key are external
+prerequisites. Never put a Droplet password or SSH private key in this repository.
+
+## Docker and application deployment
+
+- [Docker Compose in production](https://docs.docker.com/compose/how-tos/production/) — production overrides and operations.
+- [Docker Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/) —
+  reference for a future secret-file/manager migration.
+- [FastAPI in containers](https://fastapi.tiangolo.com/deployment/docker/) — API image and process guidance.
+- [FastAPI behind a proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/) — forwarded-header and trusted-proxy guidance.
+- [Next.js deployment](https://nextjs.org/docs/pages/getting-started/deploying) — standalone server deployment guidance.
+
+## PostgreSQL
+
+- [Row security policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) —
+  authoritative RLS semantics, including owner and `BYPASSRLS` behavior.
+
+RLS evidence must run through the non-owner, non-`BYPASSRLS` application role;
+running the same query as a table owner is not a valid isolation test.
+
+## Local development boundary
+
+Codex usage is governed by `CODEX.md` and `bumpabestie-buildplan.md`. Codex is a
+local development aid only and is not installed, credentialed or run on the
+DigitalOcean host.

@@ -88,6 +88,9 @@ def test_local_worker_scheduler_and_production_refusal(monkeypatch: pytest.Monke
         field_encryption_key="f" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
+        whatsapp_backend="disabled",
+        bumpa_backend="disabled",
+        agent_backend="disabled",
     )
     monkeypatch.setattr(worker, "get_settings", lambda: production)
     monkeypatch.setattr(scheduler, "get_settings", lambda: production)

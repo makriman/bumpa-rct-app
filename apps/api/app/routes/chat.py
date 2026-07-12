@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_tenant
 from app.db.models import AgentMessage, Conversation
 from app.db.session import get_db
@@ -16,7 +17,13 @@ def web_chat(
     payload: ChatRequest,
     principal: Principal = Depends(require_tenant),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> ChatResponse:
+    if settings.agent_backend != "mock":
+        raise HTTPException(
+            status_code=503,
+            detail="Hermes agent integration is not configured yet",
+        )
     assert principal.tenant is not None
     if payload.client_message_id:
         existing = db.scalar(
