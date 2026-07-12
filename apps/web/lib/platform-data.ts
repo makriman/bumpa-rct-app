@@ -60,6 +60,35 @@ export type SystemError = {
   created_at: string;
 };
 
+export type AsyncJob = {
+  id: string;
+  tenant_id: string | null;
+  kind: string;
+  status:
+    | "pending"
+    | "queued"
+    | "running"
+    | "retry"
+    | "succeeded"
+    | "dead_letter"
+    | "cancelled";
+  attempts: number;
+  max_attempts: number;
+  failure_category: string | null;
+  replayable: boolean;
+  available_at: string;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AsyncJobReplayReason =
+  | "configuration_corrected"
+  | "dependency_recovered"
+  | "operator_verified_safe_retry"
+  | "transient_provider_recovered"
+  | "upstream_credentials_rotated";
+
 export type UsageEvent = {
   id: string;
   tenant_id: string | null;

@@ -253,11 +253,56 @@ def test_json_formatter_emits_allowlisted_job_context_only() -> None:
     assert "must-never-appear" not in json.dumps(payload)
 
 
-class FakeHealthQueue:
+def test_request_logging_uses_route_template_and_never_query_values(client: TestClient) -> None:
+    class ImmediateJsonCapture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(JsonFormatter().format(record))
+
+    query_secret = "query-secret-must-never-reach-logs"
+    capture = ImmediateJsonCapture()
+    request_logger = logging.getLogger("bumpabestie.http")
+    request_logger.addHandler(capture)
+    try:
+        response = client.get(
+            "/webhooks/whatsapp",
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": query_secret,
+                "hub.challenge": "safe-challenge",
+            },
+            headers={"X-Correlation-ID": "safe-request-log-canary"},
+        )
+    finally:
+        request_logger.removeHandler(capture)
+
+    assert response.status_code == 403
+    serialized = "\n".join(capture.lines)
+    assert query_secret not in serialized
+    completed = next(
+        json.loads(line) for line in capture.lines if '"message": "request_completed"' in line
+    )
+    assert completed == {
+        "level": "INFO",
+        "logger": "bumpabestie.http",
+        "message": "request_completed",
+        "correlation_id": "safe-request-log-canary",
+        "duration_ms": completed["duration_ms"],
+        "method": "GET",
+        "path": "/webhooks/whatsapp",
+        "status_code": 403,
+    }
+
+
+class FakeHealthProbe:
     snapshot: dict[str, object] = {}
+    instances = 0
 
     def __init__(self, _config: object) -> None:
-        pass
+        type(self).instances += 1
 
     def health_snapshot(self) -> dict[str, object]:
         return self.snapshot
@@ -267,25 +312,32 @@ def test_readiness_requires_redis_worker_and_scheduler_heartbeats(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "true")
-    monkeypatch.setattr("app.main.RedisWakeQueue", FakeHealthQueue)
+    monkeypatch.setattr("app.main.RedisHealthProbe", FakeHealthProbe)
+    from app.main import _redis_health_probe
 
-    FakeHealthQueue.snapshot = {
-        "redis": "ok",
-        "worker": "stale",
-        "scheduler": "ok",
-        "queued_wakeups": 0,
-    }
-    unavailable = client.get("/health/ready")
-    assert unavailable.status_code == 503
-    assert unavailable.json()["status"] == "not_ready"
-    assert unavailable.json()["async_runtime"]["worker"] == "stale"
+    _redis_health_probe.cache_clear()
+    FakeHealthProbe.instances = 0
+    try:
+        FakeHealthProbe.snapshot = {
+            "redis": "ok",
+            "worker": "stale",
+            "scheduler": "ok",
+            "queued_wakeups": 0,
+        }
+        unavailable = client.get("/health/ready")
+        assert unavailable.status_code == 503
+        assert unavailable.json()["status"] == "not_ready"
+        assert unavailable.json()["async_runtime"]["worker"] == "stale"
 
-    FakeHealthQueue.snapshot = {
-        "redis": "ok",
-        "worker": "ok",
-        "scheduler": "ok",
-        "queued_wakeups": 0,
-    }
-    ready = client.get("/health/ready")
-    assert ready.status_code == 200
-    assert ready.json()["status"] == "ready"
+        FakeHealthProbe.snapshot = {
+            "redis": "ok",
+            "worker": "ok",
+            "scheduler": "ok",
+            "queued_wakeups": 0,
+        }
+        ready = client.get("/health/ready")
+        assert ready.status_code == 200
+        assert ready.json()["status"] == "ready"
+        assert FakeHealthProbe.instances == 1
+    finally:
+        _redis_health_probe.cache_clear()

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import threading
 from datetime import date, timedelta
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -26,8 +29,11 @@ from app.jobs.handlers import bumpa_sync_handler, whatsapp_webhook_handler
 from app.jobs.runtime import AsyncRuntimeConfig, PermanentJobError, enqueue_job
 from app.jobs.worker import process_one
 from app.main import app
-from app.providers.bumpa import BumpaProviderError
+from app.providers.bumpa import BumpaClient, BumpaProviderError
+from app.routes import whatsapp as whatsapp_route
 from app.services import bumpa as bumpa_service
+from app.services import whatsapp_webhook_ingress
+from app.services.whatsapp_webhook_ingress import ClaimedWebhookEvent
 from tests.conftest import auth_headers
 
 
@@ -77,11 +83,21 @@ def _webhook_body(message_id: str) -> bytes:
 
 
 def test_nonlocal_whatsapp_ack_is_transactionally_queued_and_handler_processes(
-    client: TestClient,
+    client: TestClient, monkeypatch
 ) -> None:
     settings = _nonlocal_settings()
     body = _webhook_body("wamid.async-contract-1")
     signature = "sha256=" + hmac.new(b"s" * 32, body, hashlib.sha256).hexdigest()
+    security_contexts: list[tuple[str | None, bool]] = []
+    set_security_context = whatsapp_webhook_ingress.set_security_context
+
+    def record_security_context(
+        session, *, tenant_id: str | None = None, privileged: bool = False
+    ) -> None:
+        security_contexts.append((tenant_id, privileged))
+        set_security_context(session, tenant_id=tenant_id, privileged=privileged)
+
+    monkeypatch.setattr(whatsapp_webhook_ingress, "set_security_context", record_security_context)
     app.dependency_overrides[get_settings] = lambda: settings
     try:
         accepted = client.post(
@@ -100,6 +116,7 @@ def test_nonlocal_whatsapp_ack_is_transactionally_queued_and_handler_processes(
     assert accepted.status_code == 200
     assert accepted.json() == {"status": "accepted", "queued": True, "duplicate": False}
     assert duplicate.json() == {"status": "accepted", "queued": True, "duplicate": True}
+    assert security_contexts == [(None, True), (None, True)]
 
     with SessionLocal() as session:
         event = session.scalar(
@@ -119,6 +136,158 @@ def test_nonlocal_whatsapp_ack_is_transactionally_queued_and_handler_processes(
         assert whatsapp_webhook_handler(session, jobs[0]) == {"status": "rejected_unknown_sender"}
         session.refresh(event)
         assert event.processing_status == "processed"
+
+
+def test_nonlocal_whatsapp_batch_rolls_back_before_ack_when_enqueue_fails(
+    client: TestClient, monkeypatch
+) -> None:
+    settings = _nonlocal_settings()
+    message_ids = ["wamid.atomic-batch-1", "wamid.atomic-batch-2"]
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "id": message_id,
+                                    "from": "2348111111111",
+                                    "type": "text",
+                                    "text": {"body": "Hello"},
+                                }
+                                for message_id in message_ids
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    body = json.dumps(payload).encode()
+    signature = "sha256=" + hmac.new(b"s" * 32, body, hashlib.sha256).hexdigest()
+    enqueue = whatsapp_webhook_ingress.enqueue_job
+    enqueue_calls = 0
+
+    def fail_second_enqueue(*args, **kwargs):
+        nonlocal enqueue_calls
+        enqueue_calls += 1
+        if enqueue_calls == 2:
+            raise RuntimeError("synthetic enqueue failure")
+        return enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(whatsapp_webhook_ingress, "enqueue_job", fail_second_enqueue)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        with pytest.raises(RuntimeError, match="synthetic enqueue failure"):
+            client.post(
+                "/webhooks/whatsapp",
+                content=body,
+                headers={"x-hub-signature-256": signature},
+            )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    with SessionLocal() as session:
+        events = list(
+            session.scalars(
+                select(WebhookEvent).where(WebhookEvent.external_event_id.in_(message_ids))
+            ).all()
+        )
+        jobs = list(
+            session.scalars(
+                select(AsyncJob).where(
+                    AsyncJob.idempotency_key.in_(
+                        [f"meta:{message_id}" for message_id in message_ids]
+                    )
+                )
+            ).all()
+        )
+    assert events == []
+    assert jobs == []
+
+
+def test_slow_whatsapp_persistence_does_not_block_liveness(monkeypatch) -> None:
+    """A slow synchronous database claim must not stall the ASGI event loop."""
+
+    settings = _nonlocal_settings()
+    body = _webhook_body("wamid.slow-persistence-contract")
+    signature = "sha256=" + hmac.new(b"s" * 32, body, hashlib.sha256).hexdigest()
+    persistence_started = threading.Event()
+    release_persistence = threading.Event()
+
+    def slow_claim(_payload: dict[str, object], _raw: bytes) -> tuple[ClaimedWebhookEvent, ...]:
+        persistence_started.set()
+        if not release_persistence.wait(timeout=5):
+            raise TimeoutError("test did not release synthetic persistence")
+        return (
+            ClaimedWebhookEvent(
+                event_id="slow-persistence-contract",
+                job_created=True,
+                terminal_duplicate=False,
+            ),
+        )
+
+    monkeypatch.setattr(whatsapp_route, "claim_webhook_events", slow_claim)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
+            webhook_request = asyncio.create_task(
+                async_client.post(
+                    "/webhooks/whatsapp",
+                    content=body,
+                    headers={"x-hub-signature-256": signature},
+                )
+            )
+            try:
+                assert await asyncio.to_thread(persistence_started.wait, 1)
+                live = await asyncio.wait_for(async_client.get("/health/live"), timeout=1)
+                assert live.status_code == 200
+                assert live.json() == {"status": "ok", "service": "api"}
+            finally:
+                release_persistence.set()
+            accepted = await asyncio.wait_for(webhook_request, timeout=2)
+            assert accepted.status_code == 200
+            assert accepted.json() == {
+                "status": "accepted",
+                "queued": True,
+                "duplicate": False,
+            }
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_oversized_whatsapp_payload_is_rejected_before_persistence(
+    client: TestClient, monkeypatch
+) -> None:
+    settings = _nonlocal_settings()
+    persistence_called = False
+
+    def unexpected_persistence(
+        _payload: dict[str, object], _raw: bytes
+    ) -> tuple[ClaimedWebhookEvent, ...]:
+        nonlocal persistence_called
+        persistence_called = True
+        return ()
+
+    monkeypatch.setattr(whatsapp_route, "claim_webhook_events", unexpected_persistence)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        response = client.post(
+            "/webhooks/whatsapp",
+            content=b"x" * (whatsapp_route.MAX_WEBHOOK_BODY_BYTES + 1),
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Webhook payload too large"}
+    assert persistence_called is False
 
 
 def test_nonlocal_whatsapp_persists_every_batched_message_and_status_before_ack(
@@ -442,3 +611,117 @@ def test_bumpa_worker_retries_exhausted_transient_failures_and_dead_letters_auth
         assert run is not None
         assert run.status == "failed"
         assert private_detail not in (run.error or "")
+
+
+def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    field_key = "worker-bumpa-timeout-test-field-key"
+    private_detail = "private-timeout-detail-must-not-be-persisted"
+    calls = 0
+    sleeps: list[float] = []
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout(private_detail, request=request)
+
+    class TimeoutBumpaClient(BumpaClient):
+        def __init__(self, api_key: str, scope_type: str, scope_id: str) -> None:
+            super().__init__(
+                api_key,
+                scope_type,
+                scope_id,
+                client=httpx.Client(
+                    transport=httpx.MockTransport(timeout),
+                    base_url="https://api.getbumpa.com/api",
+                ),
+                sleep=sleeps.append,
+                max_attempts=3,
+            )
+
+    monkeypatch.setattr(bumpa_service, "BumpaClient", TimeoutBumpaClient)
+    monkeypatch.setattr(
+        handlers,
+        "get_settings",
+        lambda: SimpleNamespace(field_encryption_key=field_key, bumpa_backend="bumpa"),
+    )
+    runtime = AsyncRuntimeConfig(
+        enabled=True,
+        redis_url="redis://unused",
+        queue_name="bumpa-timeout-failure",
+        queue_key_prefix="test",
+        heartbeat_ttl_seconds=45,
+        pop_timeout_seconds=1,
+        scheduler_interval_seconds=0.01,
+        dispatch_batch_size=10,
+        redispatch_seconds=60,
+        retry_base_seconds=1,
+        retry_max_seconds=10,
+        stale_lock_seconds=60,
+    )
+
+    with SessionLocal() as session:
+        tenant = Tenant(slug="worker-bumpa-timeout", name="Worker Bumpa Timeout")
+        session.add(tenant)
+        session.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key=FieldCipher(field_key).encrypt("private-api-key"),
+            scope_type="business_id",
+            scope_id="business-test",
+            provider="bumpa",
+            status="active",
+        )
+        session.add(connection)
+        session.flush()
+        job, _created = enqueue_job(
+            session,
+            kind="bumpa.sync",
+            payload={
+                "tenant_id": tenant.id,
+                "connection_id": connection.id,
+                "date_from": "2026-01-01",
+                "date_to": "2026-01-02",
+            },
+            idempotency_key="bumpa-provider-timeout",
+            queue_name=runtime.queue_name,
+            max_attempts=3,
+            tenant_id=tenant.id,
+        )
+        session.commit()
+
+        statuses: list[str] = []
+        for attempt in range(3):
+            if attempt:
+                stored = session.get(AsyncJob, job.id)
+                assert stored is not None
+                stored.available_at -= timedelta(seconds=runtime.retry_max_seconds + 1)
+                session.commit()
+            statuses.append(
+                process_one(
+                    session,
+                    job_id=job.id,
+                    worker_id="provider-timeout-worker",
+                    config=runtime,
+                )
+            )
+
+        stored = session.get(AsyncJob, job.id)
+        assert stored is not None
+        assert statuses == ["retry", "retry", "dead_letter"]
+        assert stored.status == "dead_letter"
+        assert stored.attempts == stored.max_attempts == 3
+        assert calls == 9
+        assert sleeps == [1, 2] * 3
+        assert private_detail not in (stored.last_error or "")
+        assert "private-api-key" not in (stored.last_error or "")
+        runs = list(
+            session.scalars(
+                select(BumpaSyncRun).where(BumpaSyncRun.bumpa_connection_id == connection.id)
+            ).all()
+        )
+        assert len(runs) == 3
+        assert all(run.status == "failed" for run in runs)
+        assert all(run.error == "Bumpa is temporarily unreachable" for run in runs)
+        assert all(private_detail not in (run.error or "") for run in runs)

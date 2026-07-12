@@ -8,6 +8,8 @@ import {
   formatDate,
   maskPhone,
   titleCase,
+  type AsyncJob,
+  type AsyncJobReplayReason,
   type AuditEvent,
   type SyncRun,
   type SystemError,
@@ -16,6 +18,7 @@ import {
 } from "@/lib/platform-data";
 import {
   previewAudits,
+  previewDeadLetterJobs,
   previewErrors,
   previewSyncRuns,
   previewTeam,
@@ -31,6 +34,7 @@ import {
   Chart,
   Filters,
   Metric,
+  Modal,
   PageHeader,
   StatePanel,
   Toast,
@@ -913,58 +917,108 @@ export function SyncList() {
 }
 
 export function ErrorList() {
-  const resource = useApiResource<SystemError[]>(
+  const errorResource = useApiResource<SystemError[]>(
     "/admin/system/errors",
     previewErrors,
   );
+  const jobResource = useApiResource<AsyncJob[]>(
+    "/admin/system/jobs?status=dead_letter",
+    previewDeadLetterJobs,
+  );
   const [search, setSearch] = useState("");
-  const rows = (resource.data ?? []).filter((error) =>
+  const [selectedJob, setSelectedJob] = useState<AsyncJob | null>(null);
+  const [replayReason, setReplayReason] = useState<AsyncJobReplayReason>(
+    "operator_verified_safe_retry",
+  );
+  const [replayPending, setReplayPending] = useState(false);
+  const [replayError, setReplayError] = useState<string | null>(null);
+  const [toast, setToast] = useState("");
+  const rows = (errorResource.data ?? []).filter((error) =>
     `${error.service} ${error.message}`
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+
+  async function replayJob() {
+    if (!selectedJob || replayPending) return;
+    setReplayPending(true);
+    setReplayError(null);
+    try {
+      await apiRequest<AsyncJob>(
+        `/admin/system/jobs/${selectedJob.id}/replay`,
+        {
+          method: "POST",
+          body: JSON.stringify({ reason: replayReason }),
+        },
+      );
+      await Promise.all([jobResource.reload(), errorResource.reload()]);
+      setSelectedJob(null);
+      setToast("Job queued for a fresh, audited attempt.");
+    } catch (error) {
+      setReplayError(
+        error instanceof Error
+          ? error.message
+          : "The job could not be replayed. Try again.",
+      );
+    } finally {
+      setReplayPending(false);
+    }
+  }
+
   return (
-    <AppShell surface="admin" title="System errors">
+    <AppShell surface="admin" title="Failure recovery">
       <PageHeader
-        title="System errors"
-        description="Triage redacted operational errors without exposing secrets or customer PII."
+        title="Failure recovery"
+        description="Triage scrubbed operational signals and safely replay terminal asynchronous work."
       />
       <LiveDataBanner
-        label="system errors"
-        source={resource.source}
-        status={resource.status}
-        count={resource.data?.length}
-        error={resource.error}
+        label="dead-letter jobs"
+        source={jobResource.source}
+        status={jobResource.status}
+        count={jobResource.data?.length}
+        error={jobResource.error}
       />
-      <div className="alert alert-warning">
-        Error metadata is scrubbed before display. Resolution controls remain
-        disabled until the API exposes an audited mutation.
+      <div className="alert alert-info">
+        Job payloads, results, credentials, worker identifiers, and raw errors
+        are never returned to this screen. Every replay requires a controlled
+        reason and is recorded in the platform audit trail.
       </div>
-      {resource.status !== "ready" ? (
-        <ResourceState
-          status={resource.status}
-          error={resource.error}
-          onRetry={resource.reload}
-        />
-      ) : !resource.data?.length ? (
-        <ResourceState
-          status="ready"
-          error={null}
-          onRetry={resource.reload}
-          empty="No system errors recorded"
-        />
-      ) : (
-        <>
-          <Filters search={search} setSearch={setSearch} />
+      <section style={{ marginTop: 20 }} aria-labelledby="dead-letter-heading">
+        <div className="section-title">
+          <div>
+            <h2 id="dead-letter-heading">Needs operator action</h2>
+            <p>Terminal jobs stay here until the underlying cause is fixed.</p>
+          </div>
+          {jobResource.status === "ready" && (
+            <Badge tone={jobResource.data?.length ? "danger" : "success"}>
+              {jobResource.data?.length ?? 0} open
+            </Badge>
+          )}
+        </div>
+        {jobResource.status !== "ready" ? (
+          <ResourceState
+            status={jobResource.status}
+            error={jobResource.error}
+            onRetry={jobResource.reload}
+          />
+        ) : !jobResource.data?.length ? (
+          <ResourceState
+            status="ready"
+            error={null}
+            onRetry={jobResource.reload}
+            empty="No terminal jobs need recovery"
+          />
+        ) : (
           <div className="grid">
-            {rows.map((error) => (
-              <Card padded key={error.id}>
+            {jobResource.data.map((job) => (
+              <Card padded key={job.id}>
                 <div
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
                     gap: 16,
                     alignItems: "flex-start",
+                    flexWrap: "wrap",
                   }}
                 >
                   <div>
@@ -974,41 +1028,190 @@ export function ErrorList() {
                         gap: 8,
                         alignItems: "center",
                         marginBottom: 10,
+                        flexWrap: "wrap",
                       }}
                     >
-                      <Badge>{titleCase(error.severity)}</Badge>
-                      <span className="tag">{titleCase(error.service)}</span>
+                      <Badge tone="danger">Dead letter</Badge>
+                      <span className="tag">{titleCase(job.kind)}</span>
                     </div>
-                    <strong>{error.message}</strong>
+                    <strong>{titleCase(job.failure_category)}</strong>
                     <p className="table-secondary">
-                      Recorded {formatDate(error.created_at)} ·{" "}
-                      {error.id.slice(0, 12)}
+                      Attempted {job.attempts} of {job.max_attempts} times ·
+                      finished {formatDate(job.finished_at)}
+                    </p>
+                    <p className="table-secondary">
+                      Tenant {job.tenant_id?.slice(0, 8) ?? "platform"} · Job{" "}
+                      {job.id.slice(0, 12)}
                     </p>
                   </div>
-                </div>
-                <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
                   <button
-                    className="button button-secondary button-small"
-                    disabled
+                    className="button button-primary button-small"
+                    onClick={() => {
+                      setReplayError(null);
+                      setReplayReason("operator_verified_safe_retry");
+                      setSelectedJob(job);
+                    }}
+                    disabled={!job.replayable || jobResource.source !== "live"}
                   >
-                    Inspect unavailable
-                  </button>
-                  <button className="button button-ghost button-small" disabled>
-                    Resolve unavailable
+                    {jobResource.source === "demo"
+                      ? "Replay unavailable in preview"
+                      : "Review replay"}
                   </button>
                 </div>
               </Card>
             ))}
-            {!rows.length && (
-              <StatePanel
-                type="empty"
-                title="No matching errors"
-                description="Try a different search term."
-              />
-            )}
           </div>
-        </>
+        )}
+      </section>
+
+      <section
+        style={{ marginTop: 28 }}
+        aria-labelledby="system-errors-heading"
+      >
+        <div className="section-title">
+          <div>
+            <h2 id="system-errors-heading">Operational signals</h2>
+            <p>Scrubbed events for investigation and trend monitoring.</p>
+          </div>
+        </div>
+        {errorResource.status !== "ready" ? (
+          <ResourceState
+            status={errorResource.status}
+            error={errorResource.error}
+            onRetry={errorResource.reload}
+          />
+        ) : !errorResource.data?.length ? (
+          <ResourceState
+            status="ready"
+            error={null}
+            onRetry={errorResource.reload}
+            empty="No system errors recorded"
+          />
+        ) : (
+          <>
+            <Filters search={search} setSearch={setSearch} />
+            <div className="grid">
+              {rows.map((error) => (
+                <Card padded key={error.id}>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 16,
+                      alignItems: "flex-start",
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 8,
+                          alignItems: "center",
+                          marginBottom: 10,
+                        }}
+                      >
+                        <Badge>{titleCase(error.severity)}</Badge>
+                        <span className="tag">{titleCase(error.service)}</span>
+                      </div>
+                      <strong>{error.message}</strong>
+                      <p className="table-secondary">
+                        Recorded {formatDate(error.created_at)} ·{" "}
+                        {error.id.slice(0, 12)}
+                      </p>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                    <button
+                      className="button button-secondary button-small"
+                      disabled
+                    >
+                      Inspect unavailable
+                    </button>
+                    <button
+                      className="button button-ghost button-small"
+                      disabled
+                    >
+                      Resolve unavailable
+                    </button>
+                  </div>
+                </Card>
+              ))}
+              {!rows.length && (
+                <StatePanel
+                  type="empty"
+                  title="No matching errors"
+                  description="Try a different search term."
+                />
+              )}
+            </div>
+          </>
+        )}
+      </section>
+      {selectedJob && (
+        <Modal
+          title="Replay terminal job"
+          onClose={() => {
+            if (!replayPending) setSelectedJob(null);
+          }}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                onClick={() => setSelectedJob(null)}
+                disabled={replayPending}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                onClick={() => void replayJob()}
+                disabled={replayPending}
+                aria-busy={replayPending}
+              >
+                {replayPending ? "Queueing…" : "Confirm audited replay"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            Replay <strong>{titleCase(selectedJob.kind)}</strong> only after the
+            failure cause has been addressed. The original payload remains
+            sealed in the worker database and is not shown here.
+          </p>
+          <label className="field" htmlFor="replay-reason">
+            <span>Recovery reason</span>
+            <select
+              id="replay-reason"
+              className="select"
+              value={replayReason}
+              onChange={(event) =>
+                setReplayReason(event.target.value as AsyncJobReplayReason)
+              }
+              disabled={replayPending}
+            >
+              <option value="operator_verified_safe_retry">
+                Operator verified a safe retry
+              </option>
+              <option value="configuration_corrected">
+                Configuration corrected
+              </option>
+              <option value="dependency_recovered">Dependency recovered</option>
+              <option value="transient_provider_recovered">
+                Provider recovered
+              </option>
+              <option value="upstream_credentials_rotated">
+                Upstream credentials rotated
+              </option>
+            </select>
+          </label>
+          {replayError && (
+            <div className="alert alert-danger" role="alert">
+              {replayError}
+            </div>
+          )}
+        </Modal>
       )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }

@@ -33,7 +33,7 @@ export const adminNav: NavGroup[] = [
   {
     label: "System",
     items: [
-      { label: "Errors", href: "/admin/errors", icon: "△" },
+      { label: "Failures", href: "/admin/errors", icon: "△" },
       { label: "Usage", href: "/admin/usage", icon: "◫" },
     ],
   },

@@ -10,14 +10,18 @@ SAFE_EXTRA_FIELDS = frozenset(
         "attempt",
         "component",
         "dispatched",
+        "duration_ms",
         "job_id",
         "job_kind",
+        "method",
+        "path",
         "queue",
         "queued_wakeups",
         "recovered",
         "redispatched_wakeups",
         "scheduler_id",
         "status",
+        "status_code",
         "worker_id",
     }
 )

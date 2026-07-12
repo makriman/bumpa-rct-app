@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.time import utcnow
-from app.db.models import AsyncJob, JobOutbox
+from app.db.models import AsyncJob, JobOutbox, SystemError
 
 JobResult = dict[str, Any] | None
 JobHandler = Callable[[Session, AsyncJob], JobResult]
@@ -109,6 +109,26 @@ class RedisWakeQueue:
             self.config.heartbeat_key(service),
             payload,
             ex=self.config.heartbeat_ttl_seconds,
+        )
+
+
+class RedisHealthProbe:
+    """Probe Redis and async heartbeats within the readiness-check budget.
+
+    Queue consumers need a socket timeout longer than their blocking pop. Health
+    checks do not: they must fail fast enough for both HTTP callers and container
+    health checks to observe the dependency outage. Keeping a dedicated client
+    prevents the queue's blocking-pop timeout from leaking into readiness.
+    """
+
+    def __init__(self, config: AsyncRuntimeConfig, client: Redis | None = None) -> None:
+        self.config = config
+        self.client = client or Redis.from_url(
+            config.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            health_check_interval=0,
         )
 
     def is_healthy(self, service: str) -> bool:
@@ -336,6 +356,12 @@ def fail_job(
     if permanent or job.attempts >= job.max_attempts:
         job.status = "dead_letter"
         job.finished_at = utcnow()
+        _record_terminal_failure(
+            session,
+            job,
+            reason="permanent_failure" if permanent else "attempts_exhausted",
+            service="async_worker",
+        )
         session.commit()
         return job.status
 
@@ -375,6 +401,12 @@ def recover_stale_jobs(session: Session, config: AsyncRuntimeConfig) -> int:
             job.status = "dead_letter"
             job.finished_at = utcnow()
             job.last_error = "Stale worker lease exhausted retry budget"
+            _record_terminal_failure(
+                session,
+                job,
+                reason="stale_lease_exhausted",
+                service="async_scheduler",
+            )
         else:
             job.status = "retry"
             job.available_at = utcnow()
@@ -427,7 +459,11 @@ def recover_stale_wakeups(session: Session, config: AsyncRuntimeConfig) -> int:
 
 
 def replay_dead_letter(
-    session: Session, job_id: str, *, max_attempts: int | None = None
+    session: Session,
+    job_id: str,
+    *,
+    max_attempts: int | None = None,
+    commit: bool = True,
 ) -> AsyncJob:
     job = session.scalar(select(AsyncJob).where(AsyncJob.id == job_id).with_for_update())
     if not job or job.status != "dead_letter":
@@ -448,8 +484,43 @@ def replay_dead_letter(
     outbox.available_at = job.available_at
     outbox.dispatched_at = None
     outbox.last_error = None
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return job
+
+
+def _record_terminal_failure(
+    session: Session,
+    job: AsyncJob,
+    *,
+    reason: str,
+    service: str,
+) -> None:
+    """Persist an actionable terminal signal without copying job-controlled data.
+
+    Payloads, results, idempotency keys, worker identifiers, and exception text
+    are deliberately excluded. The remaining metadata is bounded runtime state
+    needed to locate and safely triage the durable job.
+    """
+
+    session.add(
+        SystemError(
+            tenant_id=job.tenant_id,
+            service=service,
+            severity="high",
+            message="Asynchronous job reached terminal failure",
+            stack=None,
+            error_metadata={
+                "job_id": job.id,
+                "job_kind": job.kind,
+                "terminal_reason": reason,
+                "attempts": job.attempts,
+                "max_attempts": job.max_attempts,
+            },
+        )
+    )
 
 
 def _safe_error(error: BaseException, fallback: str) -> str:

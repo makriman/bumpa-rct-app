@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap install lint format-check typecheck test test-api test-web e2e integration \
+.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e integration load-failure \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
 	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract clean
 
@@ -30,7 +30,7 @@ typecheck: ## Run strict backend and frontend type checking
 	cd apps/api && uv run mypy app
 	npm --prefix apps/web run typecheck
 
-test: test-api test-web ## Run unit and integration tests
+test: test-api test-web test-ops ## Run unit and integration tests
 
 test-api: ## Run backend tests with branch coverage
 	cd apps/api && uv run pytest --cov=app --cov-branch --cov-fail-under=85 --cov-report=term-missing --cov-report=xml
@@ -38,11 +38,17 @@ test-api: ## Run backend tests with branch coverage
 test-web: ## Run frontend unit tests with coverage
 	npm --prefix apps/web run test:coverage
 
+test-ops: ## Run host operational-control unit tests
+	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
 e2e: ## Run the current desktop/mobile Playwright browser checks
 	npm --prefix apps/web run test:e2e
 
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
 	./scripts/local_e2e.sh
+
+load-failure: ## Run isolated 50-webhook load and Redis/Postgres restart drills
+	python3 tests/load_failure/run.py
 
 quality: format-check lint typecheck test compose-config production-contract ## Run the local merge gate
 

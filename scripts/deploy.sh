@@ -78,13 +78,22 @@ if [[ "$IMAGE_TAG" != "sha-$deploy_commit" ]]; then
 fi
 git checkout --detach "$deploy_commit"
 
-for unit_name in bumpabestie-backup.service bumpabestie-backup.timer; do
+for unit_name in \
+  bumpabestie-backup.service bumpabestie-backup.timer \
+  bumpabestie-disk-usage.service bumpabestie-disk-usage.timer; do
   repository_unit="infra/systemd/$unit_name"
   installed_unit="/etc/systemd/system/$unit_name"
   if [[ ! -f "$installed_unit" || ! -r "$installed_unit" ]] || \
     ! cmp --silent "$repository_unit" "$installed_unit"; then
     echo "Installed systemd unit is missing or stale: $unit_name" >&2
     echo "Install the reviewed unit as root and run systemctl daemon-reload before retrying" >&2
+    exit 2
+  fi
+done
+for timer_name in bumpabestie-backup.timer bumpabestie-disk-usage.timer; do
+  if ! systemctl is-enabled --quiet "$timer_name" || \
+    ! systemctl is-active --quiet "$timer_name"; then
+    echo "Required host timer is not enabled and active: $timer_name" >&2
     exit 2
   fi
 done

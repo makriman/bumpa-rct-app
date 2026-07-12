@@ -1,0 +1,41 @@
+[Unit]
+Description=Check Bumpa Bestie host disk and inode usage
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=bumpabestie
+Group=bumpabestie
+WorkingDirectory=/opt/bumpabestie
+Environment=BUMPABESTIE_DISK_THRESHOLD_PERCENT=85
+Environment=BUMPABESTIE_DISK_PATHS=/
+ExecStart=/usr/bin/python3 /opt/bumpabestie/scripts/check_disk_usage.py
+TimeoutStartSec=45
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+# A drop-in may set BUMPABESTIE_ALERT_HOOK to an absolute executable path.
+# The hook receives only the structured alert on stdin and this unit never
+# imports the application's credential-bearing environment file.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RemoveIPC=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
