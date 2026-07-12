@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from time import monotonic
 from uuid import uuid4
 
@@ -21,6 +22,13 @@ from app.routes import admin, auth, bumpa, chat, hermes, mcp, research, settings
 from app.services.seed import seed_demo
 
 request_logger = logging.getLogger("bumpabestie.http")
+
+
+@lru_cache(maxsize=4)
+def _redis_health_probe(config: AsyncRuntimeConfig) -> RedisHealthProbe:
+    """Reuse the thread-safe probe so an outage cannot force repeated DNS lookups."""
+
+    return RedisHealthProbe(config)
 
 
 def _safe_route_template(request: Request) -> str:
@@ -133,7 +141,7 @@ def create_app() -> FastAPI:
         is_ready = True
         if async_config.enabled:
             try:
-                snapshot = RedisHealthProbe(async_config).health_snapshot()
+                snapshot = _redis_health_probe(async_config).health_snapshot()
             except (RedisError, OSError):
                 snapshot = {
                     "redis": "unavailable",

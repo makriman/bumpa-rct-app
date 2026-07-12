@@ -299,9 +299,10 @@ def test_request_logging_uses_route_template_and_never_query_values(client: Test
 
 class FakeHealthProbe:
     snapshot: dict[str, object] = {}
+    instances = 0
 
     def __init__(self, _config: object) -> None:
-        pass
+        type(self).instances += 1
 
     def health_snapshot(self) -> dict[str, object]:
         return self.snapshot
@@ -312,24 +313,31 @@ def test_readiness_requires_redis_worker_and_scheduler_heartbeats(
 ) -> None:
     monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "true")
     monkeypatch.setattr("app.main.RedisHealthProbe", FakeHealthProbe)
+    from app.main import _redis_health_probe
 
-    FakeHealthProbe.snapshot = {
-        "redis": "ok",
-        "worker": "stale",
-        "scheduler": "ok",
-        "queued_wakeups": 0,
-    }
-    unavailable = client.get("/health/ready")
-    assert unavailable.status_code == 503
-    assert unavailable.json()["status"] == "not_ready"
-    assert unavailable.json()["async_runtime"]["worker"] == "stale"
+    _redis_health_probe.cache_clear()
+    FakeHealthProbe.instances = 0
+    try:
+        FakeHealthProbe.snapshot = {
+            "redis": "ok",
+            "worker": "stale",
+            "scheduler": "ok",
+            "queued_wakeups": 0,
+        }
+        unavailable = client.get("/health/ready")
+        assert unavailable.status_code == 503
+        assert unavailable.json()["status"] == "not_ready"
+        assert unavailable.json()["async_runtime"]["worker"] == "stale"
 
-    FakeHealthProbe.snapshot = {
-        "redis": "ok",
-        "worker": "ok",
-        "scheduler": "ok",
-        "queued_wakeups": 0,
-    }
-    ready = client.get("/health/ready")
-    assert ready.status_code == 200
-    assert ready.json()["status"] == "ready"
+        FakeHealthProbe.snapshot = {
+            "redis": "ok",
+            "worker": "ok",
+            "scheduler": "ok",
+            "queued_wakeups": 0,
+        }
+        ready = client.get("/health/ready")
+        assert ready.status_code == 200
+        assert ready.json()["status"] == "ready"
+        assert FakeHealthProbe.instances == 1
+    finally:
+        _redis_health_probe.cache_clear()
