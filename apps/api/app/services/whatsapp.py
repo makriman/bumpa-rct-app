@@ -17,6 +17,7 @@ from app.db.models import (
     AgentMessage,
     PhoneIdentity,
     Tenant,
+    TenantMembership,
     User,
     WebhookEvent,
     WhatsappDeliveryEvent,
@@ -154,6 +155,19 @@ def _process_message(
     phone = "+" + str(message.get("from", "")).lstrip("+")
     text = str(message.get("text", {}).get("body", "")).strip()
     identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
+    tenant = db.get(Tenant, identity.tenant_id) if identity else None
+    user = db.get(User, identity.user_id) if identity else None
+    membership = (
+        db.scalar(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == identity.tenant_id,
+                TenantMembership.user_id == identity.user_id,
+                TenantMembership.status == "active",
+            )
+        )
+        if identity
+        else None
+    )
     inbound = db.scalar(
         select(WhatsappMessage).where(WhatsappMessage.meta_message_id == external_id)
     )
@@ -172,25 +186,46 @@ def _process_message(
         )
         db.add(inbound)
         db.commit()
-    if not identity or identity.status != "approved":
-        _deliver_once(
-            db,
-            event=event,
-            purpose="unknown-sender",
-            phone=phone,
-            body="This number is not approved for Bumpa Bestie. Ask your store owner to add it.",
-            settings=settings,
-        )
-        inbound.status = "rejected"
-        event.processing_status = "processed"
-        db.commit()
-        return {"status": "rejected_unknown_sender"}
-    if text.upper() == "STOP":
+
+    # Always honor an opt-out from a previously approved identity, even when
+    # its account or membership has since been disabled. It produces no reply
+    # and cannot access tenant data.
+    if identity and identity.status == "approved" and text.upper() == "STOP":
         identity.opt_out = True
         inbound.status = "processed"
         event.processing_status = "processed"
         db.commit()
         return {"status": "opted_out"}
+
+    authorized = bool(
+        identity
+        and identity.status == "approved"
+        and membership
+        and user
+        and user.status == "active"
+        and tenant
+        and tenant.status == "active"
+    )
+    if not authorized:
+        # Only a genuinely unknown phone receives onboarding guidance. Known
+        # disabled accounts are processed silently so suspended tenants cannot
+        # trigger outbound sends and account state is not disclosed.
+        if not identity:
+            _deliver_once(
+                db,
+                event=event,
+                purpose="unknown-sender",
+                phone=phone,
+                body="This number is not approved for Bumpa Bestie. Ask your store owner to add it.",
+                settings=settings,
+            )
+        inbound.status = "rejected"
+        event.processing_status = "processed"
+        db.commit()
+        return {"status": "rejected_unknown_sender"}
+    assert identity is not None
+    assert tenant is not None
+    assert user is not None
     if text.upper() == "START":
         identity.opt_out = False
         db.commit()
@@ -213,10 +248,6 @@ def _process_message(
         event.processing_status = "processed"
         db.commit()
         return {"status": "opted_out"}
-    tenant = db.get(Tenant, identity.tenant_id)
-    user = db.get(User, identity.user_id)
-    if not tenant or not user or tenant.status != "active":
-        raise PermanentJobError("Sender account is unavailable")
     try:
         consume_operation_rate_limit(
             settings,

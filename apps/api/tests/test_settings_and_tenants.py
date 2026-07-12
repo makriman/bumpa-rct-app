@@ -1,7 +1,17 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+import hashlib
+import hmac
+import json
 
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.db.models import PhoneIdentity, TenantMembership, User
+from app.db.session import SessionLocal, set_security_context
 from tests.conftest import auth_headers
 
 
@@ -118,3 +128,255 @@ def test_member_cannot_mutate_owner_settings(client: TestClient) -> None:
         ).status_code
         == 403
     )
+
+
+def test_concurrent_team_membership_creation_returns_stable_conflict(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = auth_headers(client, "+2348012345678")
+    original_flush = Session.flush
+    conflict_raised = False
+
+    def conflict_on_membership(self: Session, *args, **kwargs) -> None:
+        nonlocal conflict_raised
+        if not conflict_raised and any(isinstance(row, TenantMembership) for row in self.new):
+            conflict_raised = True
+            raise IntegrityError("INSERT tenant_memberships", {}, RuntimeError("unique race"))
+        original_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "flush", conflict_on_membership)
+    response = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={
+            "name": "Concurrent Member",
+            "phone_e164": "+2348666100005",
+            "role": "member",
+        },
+    )
+
+    assert conflict_raised
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Team member conflict"}
+
+
+def test_inactive_user_cannot_start_or_reach_whatsapp_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import whatsapp
+
+    owner = auth_headers(client, "+2348012345678")
+    phone = "+2348666100006"
+    created = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Disabled Member", "phone_e164": phone, "role": "member"},
+    )
+    assert created.status_code == 201
+    approved = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=owner,
+        json={"user_id": created.json()["user_id"], "phone_e164": phone},
+    )
+    assert approved.status_code == 201
+
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        user = db.get(User, created.json()["user_id"])
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
+        assert user is not None and identity is not None
+        user.status = "inactive"
+        identity.opt_out = True
+        db.commit()
+
+    monkeypatch.setattr(
+        whatsapp,
+        "handle_chat",
+        lambda *_args, **_kwargs: pytest.fail("inactive user reached WhatsApp chat"),
+    )
+    body = json.dumps(
+        {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "id": "wamid.inactive-user-start",
+                                        "from": phone.lstrip("+"),
+                                        "type": "text",
+                                        "text": {"body": "START"},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    ).encode()
+    signature = "sha256=" + hmac.new(b"local-meta-app-secret", body, hashlib.sha256).hexdigest()
+    response = client.post(
+        "/webhooks/whatsapp",
+        content=body,
+        headers={"x-hub-signature-256": signature},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "rejected_unknown_sender"}
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
+        assert identity is not None and identity.opt_out is True
+
+
+def test_team_reactivation_phone_approval_and_revocation_are_tenant_safe(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import whatsapp
+
+    owner = auth_headers(client, "+2348012345678")
+    tenant_id = client.get("/v1/tenants/current", headers=owner).json()["id"]
+
+    # A tenant administrator can never create another non-revocable owner.
+    crafted_owner = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Crafted Owner", "phone_e164": "+2348666100001", "role": "owner"},
+    )
+    assert crafted_owner.status_code == 422
+    owner_rewrite = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Ada Owner", "phone_e164": "+2348012345678", "role": "admin"},
+    )
+    assert owner_rewrite.status_code == 409
+
+    member_phone = "+2348666100002"
+    created = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Revocable Member", "phone_e164": member_phone, "role": "member"},
+    )
+    assert created.status_code == 201
+    membership_id = created.json()["membership_id"]
+    user_id = created.json()["user_id"]
+    approved = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=owner,
+        json={"user_id": user_id, "phone_e164": member_phone, "label": "Operations"},
+    )
+    assert approved.status_code == 201
+
+    member_headers = auth_headers(client, member_phone)
+    assert client.get("/v1/settings/profile", headers=member_headers).status_code == 200
+    assert client.delete(f"/v1/settings/team/{membership_id}", headers=owner).status_code == 204
+
+    # Membership is resolved on every authenticated request, so a token issued
+    # before revocation loses access immediately.
+    assert client.get("/v1/settings/profile", headers=member_headers).status_code == 403
+
+    # An approved phone is likewise insufficient after its tenant membership is
+    # revoked. The message takes the non-authorized path and never reaches chat.
+    monkeypatch.setattr(
+        whatsapp,
+        "handle_chat",
+        lambda *_args, **_kwargs: pytest.fail("revoked member reached WhatsApp chat"),
+    )
+    body = json.dumps(
+        {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "messages": [
+                                    {
+                                        "id": "wamid.revoked-membership-routing",
+                                        "from": member_phone.lstrip("+"),
+                                        "type": "text",
+                                        "text": {"body": "Show me sales"},
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    ).encode()
+    signature = "sha256=" + hmac.new(b"local-meta-app-secret", body, hashlib.sha256).hexdigest()
+    rejected = client.post(
+        "/webhooks/whatsapp",
+        content=body,
+        headers={"x-hub-signature-256": signature},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json() == {"status": "rejected_unknown_sender"}
+
+    inactive_phone = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=owner,
+        json={"user_id": user_id, "phone_e164": "+2348666100003"},
+    )
+    assert inactive_phone.status_code == 422
+
+    # Re-adding a revoked membership reuses the stable membership row and can
+    # intentionally change it to either tenant-managed role.
+    reactivated = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Revocable Member", "phone_e164": member_phone, "role": "admin"},
+    )
+    assert reactivated.status_code == 201
+    assert reactivated.json() == {
+        "membership_id": membership_id,
+        "user_id": user_id,
+        "role": "admin",
+    }
+    assert client.get("/v1/settings/team", headers=member_headers).status_code == 200
+
+    # An existing number can neither be duplicated in this tenant nor silently
+    # reassigned to a user in another tenant.
+    same_tenant_duplicate = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=owner,
+        json={"user_id": user_id, "phone_e164": member_phone},
+    )
+    assert same_tenant_duplicate.status_code == 409
+
+    other_owner = auth_headers(client, "+2348012345679")
+    other_member = client.post(
+        "/v1/settings/team",
+        headers=other_owner,
+        json={
+            "name": "Other Tenant Member",
+            "phone_e164": "+2348666100004",
+            "role": "member",
+        },
+    )
+    assert other_member.status_code == 201
+    cross_tenant_duplicate = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=other_owner,
+        json={"user_id": other_member.json()["user_id"], "phone_e164": member_phone},
+    )
+    assert cross_tenant_duplicate.status_code == 409
+
+    with SessionLocal() as db:
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == member_phone))
+        assert identity is not None
+        assert identity.tenant_id == tenant_id
+        assert identity.user_id == user_id
+
+    assert client.delete(f"/v1/settings/team/{membership_id}", headers=owner).status_code == 204
+    reactivated_member = client.post(
+        "/v1/settings/team",
+        headers=owner,
+        json={"name": "Revocable Member", "phone_e164": member_phone, "role": "member"},
+    )
+    assert reactivated_member.status_code == 201
+    assert reactivated_member.json()["membership_id"] == membership_id
+    assert reactivated_member.json()["role"] == "member"
+    assert client.get("/v1/settings/profile", headers=member_headers).status_code == 200

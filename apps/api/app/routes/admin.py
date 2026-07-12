@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.crypto import FieldCipher
-from app.core.dependencies import Principal, require_operator
+from app.core.dependencies import Principal, require_operator, require_superadmin
 from app.core.security import normalize_phone
 from app.db.models import (
     AsyncJob,
@@ -16,6 +16,7 @@ from app.db.models import (
     BumpaSyncRun,
     HermesProfile,
     PhoneIdentity,
+    PlatformRole,
     SystemError,
     Tenant,
     TenantMembership,
@@ -38,13 +39,141 @@ from app.schemas import (
     AsyncJobView,
     BumpaConnectionCreate,
     PhoneCreate,
+    PlatformAdminCreate,
+    PlatformAdminRole,
+    PlatformAdminView,
     TenantCreate,
     TenantUpdate,
-    UserCreate,
+    TenantUserCreate,
 )
 from app.services.audit import audit
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/platform-admins", response_model=list[PlatformAdminView])
+def list_platform_admins(
+    _principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> list[PlatformAdminView]:
+    """Return platform administrators without sessions or other credentials."""
+
+    users = db.scalars(
+        select(User)
+        .join(PlatformRole, PlatformRole.user_id == User.id)
+        .where(PlatformRole.role.in_(("operator", "superadmin")))
+        .distinct()
+        .order_by(User.created_at.asc(), User.id.asc())
+    ).all()
+    roles_by_user = _admin_roles(db, [user.id for user in users])
+    return [_platform_admin_view(user, roles_by_user.get(user.id, [])) for user in users]
+
+
+@router.post("/platform-admins", response_model=PlatformAdminView, status_code=201)
+def grant_platform_admin(
+    payload: PlatformAdminCreate,
+    principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> PlatformAdminView:
+    """Grant operator access; only a superadministrator may call this endpoint."""
+
+    phone = normalize_phone(payload.phone_e164)
+    try:
+        user = db.scalar(select(User).where(User.primary_phone_e164 == phone))
+        created_user = False
+        if user is None:
+            user = User(name=payload.name, primary_phone_e164=phone, status="active")
+            db.add(user)
+            # The unique phone constraint is the final authority when two
+            # superadmins grant the same new identity concurrently.
+            db.flush()
+            created_user = True
+        elif user.status != "active":
+            raise HTTPException(status_code=409, detail="User is not active")
+
+        existing = db.scalar(
+            select(PlatformRole).where(
+                PlatformRole.user_id == user.id,
+                PlatformRole.role == "operator",
+            )
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="User is already a platform administrator")
+
+        role = PlatformRole(user_id=user.id, role="operator")
+        db.add(role)
+        # Keep the role uniqueness race inside the same stable conflict
+        # boundary as user creation.
+        db.flush()
+        audit(
+            db,
+            actor_user_id=principal.user.id,
+            action="platform.operator.granted",
+            resource_type="platform_role",
+            resource_id=role.id,
+            after={"user_id": user.id, "role": "operator", "user_created": created_user},
+        )
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Platform administrator conflict") from exc
+    roles = _admin_roles(db, [user.id]).get(user.id, [])
+    return _platform_admin_view(user, roles)
+
+
+@router.delete("/platform-admins/{user_id}", status_code=204)
+def revoke_platform_admin(
+    user_id: str,
+    principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> None:
+    """Revoke only the operator grant while preserving any superadmin role."""
+
+    if user_id == principal.user.id:
+        raise HTTPException(status_code=409, detail="You cannot revoke your own operator access")
+    role = db.scalar(
+        select(PlatformRole)
+        .where(PlatformRole.user_id == user_id, PlatformRole.role == "operator")
+        .with_for_update()
+    )
+    if role is None:
+        raise HTTPException(status_code=404, detail="Platform administrator not found")
+
+    target_has_superadmin = (
+        db.scalar(
+            select(PlatformRole.id).where(
+                PlatformRole.user_id == user_id,
+                PlatformRole.role == "superadmin",
+            )
+        )
+        is not None
+    )
+    active_admin_ids = set(
+        db.scalars(
+            select(PlatformRole.user_id)
+            .join(User, User.id == PlatformRole.user_id)
+            .where(
+                PlatformRole.role.in_(("operator", "superadmin")),
+                User.status == "active",
+            )
+        ).all()
+    )
+    if not target_has_superadmin and active_admin_ids == {user_id}:
+        raise HTTPException(
+            status_code=409, detail="The last active platform administrator cannot be revoked"
+        )
+
+    role_id = role.id
+    db.delete(role)
+    audit(
+        db,
+        actor_user_id=principal.user.id,
+        action="platform.operator.revoked",
+        resource_type="platform_role",
+        resource_id=role_id,
+        before={"user_id": user_id, "role": "operator"},
+    )
+    db.commit()
 
 
 @router.get("/tenants")
@@ -119,7 +248,7 @@ def update_tenant(
 @router.post("/tenants/{tenant_id}/users", status_code=201)
 def create_user(
     tenant_id: str,
-    payload: UserCreate,
+    payload: TenantUserCreate,
     principal: Principal = Depends(require_operator),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -456,6 +585,34 @@ def _tenant(db: Session, tenant_id: str) -> Tenant:
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return tenant
+
+
+def _admin_roles(db: Session, user_ids: list[str]) -> dict[str, list[PlatformAdminRole]]:
+    if not user_ids:
+        return {}
+    rows = db.execute(
+        select(PlatformRole.user_id, PlatformRole.role).where(
+            PlatformRole.user_id.in_(user_ids),
+            PlatformRole.role.in_(("operator", "superadmin")),
+        )
+    ).all()
+    result: dict[str, list[PlatformAdminRole]] = {}
+    for user_id, role in rows:
+        result.setdefault(user_id, []).append(cast(PlatformAdminRole, role))
+    for roles in result.values():
+        roles.sort(key=lambda value: (value != "superadmin", value))
+    return result
+
+
+def _platform_admin_view(user: User, roles: list[PlatformAdminRole]) -> PlatformAdminView:
+    return PlatformAdminView(
+        user_id=user.id,
+        name=user.name,
+        phone_e164=user.primary_phone_e164,
+        status=user.status,
+        platform_roles=roles,
+        created_at=user.created_at,
+    )
 
 
 def _tenant_view(tenant: Tenant) -> dict:

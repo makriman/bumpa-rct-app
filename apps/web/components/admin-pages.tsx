@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { apiRequest, demoFallbackEnabled } from "@/lib/api";
+import { apiRequest } from "@/lib/api";
 import {
   durationBetween,
   formatDate,
@@ -11,6 +11,7 @@ import {
   type AsyncJob,
   type AsyncJobReplayReason,
   type AuditEvent,
+  type PlatformAdmin,
   type SyncRun,
   type SystemError,
   type Tenant,
@@ -21,7 +22,6 @@ import {
   previewDeadLetterJobs,
   previewErrors,
   previewSyncRuns,
-  previewTeam,
   previewTenants,
   previewUsage,
 } from "@/lib/preview-fixtures";
@@ -722,77 +722,438 @@ export function TenantDetail({ id }: { id: string }) {
 
 export function UserList() {
   const [search, setSearch] = useState("");
-  const rows = previewTeam.filter((member) =>
-    `${member.name} ${member.role}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
+  const admins = useApiResource<PlatformAdmin[]>("/admin/platform-admins");
+  const session = useApiResource<{
+    user: { id: string };
+    platform_roles: string[];
+    memberships: Array<{
+      id: string;
+      tenant_id: string;
+      role: string;
+      status: string;
+    }>;
+    current_tenant_id: string | null;
+  }>("/auth/me");
+  const [addOpen, setAddOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [phoneError, setPhoneError] = useState("");
+  const [mutationError, setMutationError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pendingRevoke, setPendingRevoke] = useState<PlatformAdmin | null>(
+    null,
   );
+  const [toast, setToast] = useState("");
+  const rows = useMemo(
+    () =>
+      (admins.data ?? []).filter((admin) =>
+        `${admin.name ?? ""} ${admin.phone_e164} ${admin.platform_roles.join(" ")}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()),
+      ),
+    [admins.data, search],
+  );
+
+  const closeAdd = () => {
+    if (busy) return;
+    setAddOpen(false);
+    setName("");
+    setPhone("");
+    setNameError("");
+    setPhoneError("");
+    setMutationError("");
+  };
+
+  const addAdmin = async () => {
+    const nextNameError = name.trim() ? "" : "Enter the administrator's name.";
+    const nextPhoneError = /^\+[1-9]\d{7,14}$/.test(phone.trim())
+      ? ""
+      : "Use E.164 format, for example +2348012345678.";
+    setNameError(nextNameError);
+    setPhoneError(nextPhoneError);
+    if (nextNameError || nextPhoneError) return;
+    setBusy(true);
+    setMutationError("");
+    try {
+      await apiRequest<PlatformAdmin>("/admin/platform-admins", {
+        method: "POST",
+        body: JSON.stringify({
+          name: name.trim(),
+          phone_e164: phone.trim(),
+          role: "operator",
+        }),
+      });
+      await admins.reload();
+      const addedName = name.trim();
+      setAddOpen(false);
+      setName("");
+      setPhone("");
+      setNameError("");
+      setPhoneError("");
+      setMutationError("");
+      setToast(`${addedName} can now administer tenant mappings.`);
+    } catch (reason) {
+      setMutationError(
+        reason instanceof Error
+          ? reason.message
+          : "The platform administrator could not be added.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revokeAdmin = async () => {
+    if (!pendingRevoke) return;
+    setBusy(true);
+    setMutationError("");
+    try {
+      await apiRequest<void>(
+        `/admin/platform-admins/${pendingRevoke.user_id}`,
+        { method: "DELETE" },
+      );
+      const revokedName = pendingRevoke.name?.trim() || "The administrator";
+      await admins.reload();
+      setPendingRevoke(null);
+      setToast(`${revokedName}'s platform access was revoked.`);
+    } catch (reason) {
+      setMutationError(
+        reason instanceof Error
+          ? reason.message
+          : "Platform access could not be revoked.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <AppShell surface="admin" title="Users">
+    <AppShell surface="admin" title="Administrators">
       <PageHeader
-        title="Platform users"
-        description="Cross-tenant membership administration requires an explicit read API."
+        title="Platform administrators"
+        description="Grant trusted operators access to onboard businesses and manage tenant mappings."
         actions={
-          <button className="button button-primary" disabled>
-            ＋ Add user unavailable
+          <button
+            className="button button-primary"
+            disabled={admins.source !== "live" || admins.status !== "ready"}
+            onClick={() => {
+              setMutationError("");
+              setAddOpen(true);
+            }}
+          >
+            ＋ Add administrator
           </button>
         }
       />
-      {demoFallbackEnabled ? (
-        <>
-          <LiveDataBanner
-            label="user preview"
-            source="demo"
-            status="ready"
-            count={rows.length}
-          />
-          <Filters search={search} setSearch={setSearch} />
-          <section className="card table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Role</th>
-                  <th>Phone</th>
-                  <th>Status</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((member) => (
-                  <tr key={member.membership_id}>
-                    <td className="table-primary">{member.name}</td>
-                    <td>{titleCase(member.role)}</td>
-                    <td>{maskPhone(member.phone_e164)}</td>
-                    <td>
-                      <Badge>{titleCase(member.status)}</Badge>
-                    </td>
-                    <td>
-                      <button
-                        className="button button-ghost button-small"
-                        disabled
-                      >
-                        Manage unavailable
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        </>
-      ) : (
+      <LiveDataBanner
+        label="platform administrators"
+        source={admins.source}
+        status={admins.status}
+        count={admins.data?.length}
+        error={admins.error}
+      />
+      <div className="alert alert-info">
+        <div>
+          <strong>Platform access is separate from store access.</strong>
+          <div>
+            Administrators can manage every tenant mapping. They may also hold a
+            normal owner or team membership in a specific workspace.
+          </div>
+        </div>
+      </div>
+      {admins.status === "loading" ? (
+        <StatePanel type="loading" />
+      ) : admins.status === "error" ? (
         <StatePanel
-          type="empty"
-          title="Cross-tenant user index is not available"
-          description="The production API does not expose a global user list, so this screen intentionally shows no synthetic records."
+          type="error"
+          title="Administrators could not be loaded"
+          description={admins.error ?? undefined}
           action={
-            <Link className="button button-secondary" href="/admin/tenants">
-              View tenants
-            </Link>
+            <button
+              className="button button-secondary"
+              onClick={() => void admins.reload()}
+            >
+              Try again
+            </button>
           }
         />
+      ) : !admins.data?.length ? (
+        <StatePanel
+          type="empty"
+          title="No platform administrators returned"
+          description="Add a trusted administrator to begin managing tenant mappings."
+          action={
+            <button
+              className="button button-primary"
+              onClick={() => setAddOpen(true)}
+            >
+              Add administrator
+            </button>
+          }
+        />
+      ) : (
+        <>
+          <Filters search={search} setSearch={setSearch} />
+          {rows.length ? (
+            <section className="card table-wrap">
+              <table className="data-table admin-directory-table">
+                <thead>
+                  <tr>
+                    <th>Administrator</th>
+                    <th>Phone</th>
+                    <th>Access</th>
+                    <th>Status</th>
+                    <th>
+                      <span className="sr-only">Actions</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((admin) => {
+                    const isCurrent = session.data?.user.id === admin.user_id;
+                    const isSuperadmin =
+                      admin.platform_roles.includes("superadmin");
+                    const displayName = admin.name?.trim() || "Unnamed admin";
+                    return (
+                      <tr key={admin.user_id}>
+                        <td>
+                          <div className="admin-identity">
+                            <span className="avatar" aria-hidden="true">
+                              {displayName
+                                .split(/\s+/)
+                                .map((part) => part[0])
+                                .slice(0, 2)
+                                .join("")
+                                .toUpperCase()}
+                            </span>
+                            <span>
+                              <span className="table-primary">
+                                {displayName}
+                              </span>
+                              <span className="table-secondary">
+                                {isCurrent
+                                  ? "Your account"
+                                  : "Platform account"}
+                              </span>
+                            </span>
+                          </div>
+                        </td>
+                        <td>
+                          <span
+                            aria-label={`Phone ending ${admin.phone_e164.slice(-4)}`}
+                          >
+                            {maskPhone(admin.phone_e164)}
+                          </span>
+                        </td>
+                        <td>
+                          <div className="admin-role-list">
+                            {admin.platform_roles.map((role) => (
+                              <Badge key={role}>{titleCase(role)}</Badge>
+                            ))}
+                          </div>
+                        </td>
+                        <td>
+                          <Badge>{titleCase(admin.status)}</Badge>
+                        </td>
+                        <td className="admin-directory-action">
+                          {session.status !== "ready" ? (
+                            <span className="admin-protected-label">
+                              Checking account…
+                            </span>
+                          ) : isCurrent ? (
+                            <span className="admin-protected-label">
+                              Current administrator
+                            </span>
+                          ) : isSuperadmin ? (
+                            <span className="admin-protected-label">
+                              Superadmin protected
+                            </span>
+                          ) : (
+                            <button
+                              className="button button-danger button-small"
+                              disabled={busy || admin.status !== "active"}
+                              onClick={() => {
+                                setMutationError("");
+                                setPendingRevoke(admin);
+                              }}
+                              aria-label={`Revoke ${displayName}'s platform access`}
+                            >
+                              Revoke access
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </section>
+          ) : (
+            <StatePanel
+              type="empty"
+              title="No matching administrators"
+              description="Clear or adjust your search to see other administrators."
+              action={
+                <button
+                  className="button button-secondary"
+                  onClick={() => setSearch("")}
+                >
+                  Clear search
+                </button>
+              }
+            />
+          )}
+        </>
       )}
+      {addOpen && (
+        <Modal
+          title="Add a platform administrator"
+          onClose={closeAdd}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={closeAdd}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={() => void addAdmin()}
+              >
+                {busy ? "Granting access…" : "Grant administrator access"}
+              </button>
+            </>
+          }
+        >
+          <p className="modal-intro">
+            This grants cross-tenant operator access. Store memberships remain
+            separate and can be assigned to the same person when needed.
+          </p>
+          {mutationError && (
+            <div className="alert alert-danger" role="alert">
+              {mutationError}
+            </div>
+          )}
+          <div className="field">
+            <label htmlFor="platform-admin-name">Full name</label>
+            <input
+              id="platform-admin-name"
+              className={`input ${nameError ? "input-error" : ""}`}
+              value={name}
+              autoComplete="name"
+              aria-invalid={Boolean(nameError)}
+              aria-describedby={
+                nameError ? "platform-admin-name-error" : undefined
+              }
+              onChange={(event) => {
+                setName(event.target.value);
+                if (nameError) setNameError("");
+              }}
+            />
+            {nameError && (
+              <span className="field-error" id="platform-admin-name-error">
+                {nameError}
+              </span>
+            )}
+          </div>
+          <div className="field">
+            <label htmlFor="platform-admin-phone">WhatsApp phone number</label>
+            <input
+              id="platform-admin-phone"
+              type="tel"
+              inputMode="tel"
+              className={`input ${phoneError ? "input-error" : ""}`}
+              placeholder="+2348012345678"
+              value={phone}
+              autoComplete="tel"
+              aria-invalid={Boolean(phoneError)}
+              aria-describedby={
+                phoneError
+                  ? "platform-admin-phone-help platform-admin-phone-error"
+                  : "platform-admin-phone-help"
+              }
+              onChange={(event) => {
+                setPhone(event.target.value);
+                if (phoneError) setPhoneError("");
+              }}
+            />
+            <span className="field-help" id="platform-admin-phone-help">
+              Use the person&apos;s verified number in international E.164
+              format.
+            </span>
+            {phoneError && (
+              <span className="field-error" id="platform-admin-phone-error">
+                {phoneError}
+              </span>
+            )}
+          </div>
+          <div className="admin-grant-summary" aria-label="Access to grant">
+            <span className="admin-grant-icon" aria-hidden="true">
+              ◎
+            </span>
+            <span>
+              <strong>Platform operator</strong>
+              <small>Tenant onboarding, mapping, and operations access</small>
+            </span>
+          </div>
+        </Modal>
+      )}
+      {pendingRevoke && (
+        <Modal
+          title="Revoke platform access?"
+          onClose={() => {
+            if (!busy) {
+              setPendingRevoke(null);
+              setMutationError("");
+            }
+          }}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => {
+                  setPendingRevoke(null);
+                  setMutationError("");
+                }}
+              >
+                Keep access
+              </button>
+              <button
+                className="button button-danger"
+                disabled={busy}
+                aria-busy={busy}
+                onClick={() => void revokeAdmin()}
+              >
+                {busy ? "Revoking…" : "Revoke platform access"}
+              </button>
+            </>
+          }
+        >
+          {mutationError && (
+            <div className="alert alert-danger" role="alert">
+              {mutationError}
+            </div>
+          )}
+          <p className="modal-intro">
+            <strong>
+              {pendingRevoke.name?.trim() || "This administrator"}
+            </strong>{" "}
+            will no longer be able to onboard businesses or change tenant
+            mappings. Any store membership they hold remains unchanged.
+          </p>
+          <div className="alert alert-warning" style={{ marginBottom: 0 }}>
+            This change takes effect immediately and is recorded in the audit
+            trail.
+          </div>
+        </Modal>
+      )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }

@@ -261,6 +261,44 @@ All five checksums and every archive/dump parser check passed. The timer is enab
 This proves only the local stage; off-host copy and remote restore evidence remain
 open.
 
+## Five-store production onboarding
+
+Use `scripts/production_onboard.py` from a trusted operator workstation. The
+credential file must be a regular `0600` file and credentials are streamed to the
+API container over SSH stdin; they are never placed in argv, environment variables,
+logs, or temporary files. The explicitly approved dual-role operator/owner mapping
+must be acknowledged on every command:
+
+```bash
+./scripts/production_onboard.py check --allow-operator-owner-overlap
+./scripts/production_onboard.py plan --allow-operator-owner-overlap
+```
+
+Take and checksum-verify a fresh production backup after the plan succeeds. Then
+apply all five tenants:
+
+```bash
+./scripts/production_onboard.py onboard --allow-operator-owner-overlap
+```
+
+`onboard` plans all stores, applies each store transactionally, and immediately
+runs a redacted invariant audit covering all five tenant/owner/phone/Bumpa mappings,
+the encrypted credentials, onboarding audit rows, and the single superadmin/owner
+overlap. Any mismatch is a hard stop before Hermes or Bumpa canaries. The audit can
+also be rerun independently:
+
+```bash
+./scripts/production_onboard.py audit --allow-operator-owner-overlap
+./scripts/production_onboard.py hermes --live-chat --allow-operator-owner-overlap
+./scripts/production_onboard.py sync --allow-operator-owner-overlap
+```
+
+Authenticated canary HTTP calls reject every redirect. Sync evidence is correlated
+through the exact durable job ID and sync-run ID returned by the API, rather than by
+time or date heuristics. Existing opt-outs, inactive users, suspended tenants,
+revoked memberships, unapproved phone identities, and inactive Bumpa connections
+fail closed; reactivation is a separate administrative decision.
+
 ## Rollback boundary
 
 `scripts/deploy.sh` records the verified revision and actual running repository

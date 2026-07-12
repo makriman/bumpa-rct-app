@@ -28,6 +28,25 @@ OWNER_PHONE = "+2348000000101"
 OPERATOR_PHONE = "+2348000000102"
 
 
+class VerifiedBumpaClient:
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    def __enter__(self) -> VerifiedBumpaClient:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        pass
+
+    def verify(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def verified_bumpa(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "BumpaClient", VerifiedBumpaClient)
+
+
 @pytest.fixture
 def session_factory() -> sessionmaker[Session]:
     engine = create_engine(
@@ -212,6 +231,111 @@ def test_apply_is_idempotent_and_requires_explicit_bootstrap_authority(
         assert db.scalar(select(func.count()).select_from(Tenant)) == 1
         assert db.scalar(select(func.count()).select_from(User)) == 2
         assert db.scalar(select(func.count()).select_from(BumpaConnection)) == 1
+
+
+@pytest.mark.parametrize(
+    ("record", "field", "value", "error_code"),
+    [
+        (Tenant, "status", "suspended", "tenant_inactive"),
+        (User, "status", "inactive", "owner_inactive"),
+        (
+            TenantMembership,
+            "status",
+            "revoked",
+            "owner_membership_inactive_or_conflicting",
+        ),
+        (PhoneIdentity, "opt_out", True, "phone_identity_opted_out"),
+        (PhoneIdentity, "status", "pending", "phone_identity_not_approved"),
+        (BumpaConnection, "status", "inactive", "bumpa_connection_inactive"),
+    ],
+)
+def test_rerun_fails_closed_without_reactivating_existing_state(
+    session_factory: sessionmaker[Session],
+    record: type[Tenant | User | TenantMembership | PhoneIdentity | BumpaConnection],
+    field: str,
+    value: object,
+    error_code: str,
+) -> None:
+    with session_factory() as db:
+        cli.onboard(db, _bundle(apply=True), field_encryption_key=FIELD_KEY)
+    with session_factory() as db:
+        if record is User:
+            row = db.scalar(select(User).where(User.primary_phone_e164 == OWNER_PHONE))
+        else:
+            row = db.scalar(select(record))
+        assert row is not None
+        setattr(row, field, value)
+        db.commit()
+
+    with session_factory() as db:
+        with pytest.raises(cli.OnboardingError) as rejected:
+            cli.onboard(db, _bundle(apply=True), field_encryption_key=FIELD_KEY)
+        assert rejected.value.code == error_code
+
+    with session_factory() as db:
+        if record is User:
+            preserved = db.scalar(select(User).where(User.primary_phone_e164 == OWNER_PHONE))
+        else:
+            preserved = db.scalar(select(record))
+        assert preserved is not None
+        assert getattr(preserved, field) == value
+
+
+def test_dual_role_superadmin_owner_preserves_shared_user_name(
+    session_factory: sessionmaker[Session],
+) -> None:
+    payload = _payload(apply=True)
+    payload["owner"] = {
+        "name": "Stable Shared Name",
+        "phone_e164": OPERATOR_PHONE,
+    }
+    payload["operator"] = {
+        "name": "Stable Shared Name",
+        "phone_e164": OPERATOR_PHONE,
+        "bootstrap_if_missing": True,
+        "platform_role": "superadmin",
+    }
+    bundle = cli.OnboardingBundle.model_validate(payload)
+
+    with session_factory() as db:
+        result = cli.onboard(db, bundle, field_encryption_key=FIELD_KEY)
+        assert result.counts["applied"] == 1
+        assert result.ids["operator_user_id"] == result.ids["owner_user_id"]
+
+    with session_factory() as db:
+        user = db.scalar(select(User).where(User.primary_phone_e164 == OPERATOR_PHONE))
+        assert user is not None and user.name == "Stable Shared Name"
+        assert (
+            db.scalar(
+                select(PlatformRole).where(
+                    PlatformRole.user_id == user.id,
+                    PlatformRole.role == "superadmin",
+                )
+            )
+            is not None
+        )
+        membership = db.scalar(select(TenantMembership).where(TenantMembership.user_id == user.id))
+        assert membership is not None and membership.role == "owner"
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_provider_verification_failure_rolls_back_without_exposing_credentials(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, apply: bool
+) -> None:
+    class RejectedBumpaClient(VerifiedBumpaClient):
+        def verify(self) -> None:
+            raise cli.BumpaProviderError("sanitized provider rejection", status_code=403)
+
+    monkeypatch.setattr(cli, "BumpaClient", RejectedBumpaClient)
+    with session_factory() as db:
+        with pytest.raises(cli.OnboardingError) as rejected:
+            cli.onboard(db, _bundle(apply=apply), field_encryption_key=FIELD_KEY)
+        assert rejected.value.code == "bumpa_connection_verification_failed"
+        assert API_KEY not in str(rejected.value)
+
+    with session_factory() as db:
+        for model in (Tenant, User, PlatformRole, BumpaConnection, AuditLog):
+            assert db.scalar(select(func.count()).select_from(model)) == 0
 
 
 def test_late_identity_conflict_rolls_back_the_entire_onboarding_transaction(

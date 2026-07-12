@@ -457,6 +457,16 @@ def test_nonlocal_bumpa_sync_is_idempotently_queued_and_handler_runs(
     assert duplicate.status_code == 202
     assert duplicate.json()["job_id"] == accepted.json()["job_id"]
     assert duplicate.json()["duplicate"] is True
+    queued_job = client.get(f"/v1/bumpa/sync-jobs/{accepted.json()['job_id']}", headers=owner)
+    assert queued_job.status_code == 200
+    assert queued_job.json() == {
+        "job_id": accepted.json()["job_id"],
+        "status": "pending",
+        "requested_from": payload["date_from"],
+        "requested_to": payload["date_to"],
+        "sync_run_id": None,
+        "finished_at": None,
+    }
 
     conflicting_payload = {**payload, "date_from": str(today - timedelta(days=7))}
     app.dependency_overrides[get_settings] = lambda: settings
@@ -478,6 +488,21 @@ def test_nonlocal_bumpa_sync_is_idempotently_queued_and_handler_runs(
         assert result["status"] == "success"
         assert result["requested_from"] == payload["date_from"]
         assert result["requested_to"] == payload["date_to"]
+        job.status = "succeeded"
+        job.result = result
+        session.commit()
+
+    completed_job = client.get(f"/v1/bumpa/sync-jobs/{accepted.json()['job_id']}", headers=owner)
+    assert completed_job.status_code == 200
+    assert completed_job.json()["status"] == "succeeded"
+    assert completed_job.json()["sync_run_id"] == result["sync_run_id"]
+    other_owner = auth_headers(client, "+2348012345679")
+    assert (
+        client.get(
+            f"/v1/bumpa/sync-jobs/{accepted.json()['job_id']}", headers=other_owner
+        ).status_code
+        == 404
+    )
 
 
 def test_provider_handlers_reject_malformed_or_cross_tenant_payloads() -> None:

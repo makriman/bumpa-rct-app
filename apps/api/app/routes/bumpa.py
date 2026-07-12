@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_tenant, require_tenant_admin
 from app.core.rate_limit import enforce_operation_rate_limit
-from app.db.models import BumpaConnection, BumpaSyncRun
+from app.db.models import AsyncJob, BumpaConnection, BumpaSyncRun
 from app.db.session import get_db
 from app.jobs.runtime import enqueue_job
 from app.schemas import SyncRequest
@@ -119,6 +119,36 @@ def sync_runs(
         .limit(50)
     ).all()
     return [_run_view(row) for row in rows]
+
+
+@router.get("/sync-jobs/{job_id}")
+def sync_job(
+    job_id: str,
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return a tenant-safe correlation from an accepted job to its exact sync run."""
+
+    assert principal.tenant is not None
+    job = db.scalar(
+        select(AsyncJob).where(
+            AsyncJob.id == job_id,
+            AsyncJob.tenant_id == principal.tenant.id,
+            AsyncJob.kind == "bumpa.sync",
+        )
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Bumpa sync job not found")
+    result = job.result if isinstance(job.result, dict) else {}
+    sync_run_id = result.get("sync_run_id")
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "requested_from": job.payload.get("date_from"),
+        "requested_to": job.payload.get("date_to"),
+        "sync_run_id": sync_run_id if isinstance(sync_run_id, str) else None,
+        "finished_at": job.finished_at,
+    }
 
 
 def _run_view(row: BumpaSyncRun) -> dict:
