@@ -111,6 +111,26 @@ class RedisWakeQueue:
             ex=self.config.heartbeat_ttl_seconds,
         )
 
+
+class RedisHealthProbe:
+    """Probe Redis and async heartbeats within the readiness-check budget.
+
+    Queue consumers need a socket timeout longer than their blocking pop. Health
+    checks do not: they must fail fast enough for both HTTP callers and container
+    health checks to observe the dependency outage. Keeping a dedicated client
+    prevents the queue's blocking-pop timeout from leaking into readiness.
+    """
+
+    def __init__(self, config: AsyncRuntimeConfig, client: Redis | None = None) -> None:
+        self.config = config
+        self.client = client or Redis.from_url(
+            config.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+            health_check_interval=0,
+        )
+
     def is_healthy(self, service: str) -> bool:
         return bool(self.client.exists(self.config.heartbeat_key(service)))
 

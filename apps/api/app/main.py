@@ -16,7 +16,7 @@ from sqlalchemy import text
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, correlation_id_var
 from app.db.session import SessionLocal, create_schema, set_security_context
-from app.jobs.runtime import AsyncRuntimeConfig, RedisWakeQueue
+from app.jobs.runtime import AsyncRuntimeConfig, RedisHealthProbe
 from app.routes import admin, auth, bumpa, chat, hermes, mcp, research, settings, tenants, whatsapp
 from app.services.seed import seed_demo
 
@@ -133,7 +133,7 @@ def create_app() -> FastAPI:
         is_ready = True
         if async_config.enabled:
             try:
-                snapshot = RedisWakeQueue(async_config).health_snapshot()
+                snapshot = RedisHealthProbe(async_config).health_snapshot()
             except (RedisError, OSError):
                 snapshot = {
                     "redis": "unavailable",

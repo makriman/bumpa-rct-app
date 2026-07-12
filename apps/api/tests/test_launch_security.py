@@ -297,7 +297,7 @@ def test_request_logging_uses_route_template_and_never_query_values(client: Test
     }
 
 
-class FakeHealthQueue:
+class FakeHealthProbe:
     snapshot: dict[str, object] = {}
 
     def __init__(self, _config: object) -> None:
@@ -311,9 +311,9 @@ def test_readiness_requires_redis_worker_and_scheduler_heartbeats(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "true")
-    monkeypatch.setattr("app.main.RedisWakeQueue", FakeHealthQueue)
+    monkeypatch.setattr("app.main.RedisHealthProbe", FakeHealthProbe)
 
-    FakeHealthQueue.snapshot = {
+    FakeHealthProbe.snapshot = {
         "redis": "ok",
         "worker": "stale",
         "scheduler": "ok",
@@ -324,7 +324,7 @@ def test_readiness_requires_redis_worker_and_scheduler_heartbeats(
     assert unavailable.json()["status"] == "not_ready"
     assert unavailable.json()["async_runtime"]["worker"] == "stale"
 
-    FakeHealthQueue.snapshot = {
+    FakeHealthProbe.snapshot = {
         "redis": "ok",
         "worker": "ok",
         "scheduler": "ok",

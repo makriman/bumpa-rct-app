@@ -16,6 +16,7 @@ from app.db.session import SessionLocal
 from app.jobs import health, scheduler, worker
 from app.jobs.runtime import (
     AsyncRuntimeConfig,
+    RedisHealthProbe,
     RedisWakeQueue,
     claim_job,
     complete_job,
@@ -150,12 +151,38 @@ def test_runtime_config_and_redis_health_signals(monkeypatch: pytest.MonkeyPatch
     assert queue.pop() == "job-1" and queue.pop() is None
     queue.heartbeat("worker", "worker-1")
     queue.heartbeat("scheduler", "scheduler-1")
-    assert queue.is_healthy("worker")
-    assert queue.health_snapshot() == {
+
+    health_probe = RedisHealthProbe(configured, cast(object, fake_redis))  # type: ignore[arg-type]
+    assert health_probe.is_healthy("worker")
+    assert health_probe.health_snapshot() == {
         "redis": "ok",
         "worker": "ok",
         "scheduler": "ok",
         "queued_wakeups": 0,
+    }
+
+
+def test_redis_health_probe_uses_a_bounded_non_blocking_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    fake_redis = FakeRedis()
+
+    def fake_from_url(url: str, **kwargs: object) -> object:
+        captured.update({"url": url, **kwargs})
+        return fake_redis
+
+    monkeypatch.setattr("app.jobs.runtime.Redis.from_url", fake_from_url)
+
+    probe = RedisHealthProbe(config())
+
+    assert probe.client is fake_redis
+    assert captured == {
+        "url": "redis://unused",
+        "decode_responses": True,
+        "socket_connect_timeout": 1,
+        "socket_timeout": 1,
+        "health_check_interval": 0,
     }
 
 
@@ -595,7 +622,7 @@ def test_health_command_and_enabled_entrypoint_cycles(
     monkeypatch.setattr(health.sys, "argv", ["health", "worker"])
     monkeypatch.setattr(
         health,
-        "RedisWakeQueue",
+        "RedisHealthProbe",
         lambda _config: SimpleNamespace(is_healthy=lambda _service: True),
     )
     health.main()
@@ -605,7 +632,7 @@ def test_health_command_and_enabled_entrypoint_cycles(
     monkeypatch.setattr(health.sys, "argv", ["health", "scheduler"])
     monkeypatch.setattr(
         health,
-        "RedisWakeQueue",
+        "RedisHealthProbe",
         lambda _config: SimpleNamespace(is_healthy=lambda _service: False),
     )
     with pytest.raises(SystemExit) as unavailable:
