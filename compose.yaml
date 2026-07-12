@@ -1,0 +1,237 @@
+name: bumpabestie
+
+x-app-environment: &app-environment
+  APP_ENV: ${APP_ENV:-local}
+  APP_NAME: ${APP_NAME:-BumpaBestie}
+  APP_DOMAIN: ${APP_DOMAIN:-bumpabestie.localhost}
+  ADMIN_DOMAIN: ${ADMIN_DOMAIN:-admin.bumpabestie.localhost}
+  RESEARCH_DOMAIN: ${RESEARCH_DOMAIN:-research.bumpabestie.localhost}
+  API_DOMAIN: ${API_DOMAIN:-api.bumpabestie.localhost}
+  PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://bumpabestie.localhost:8080}
+  ADMIN_ORIGIN: ${ADMIN_ORIGIN:-http://admin.bumpabestie.localhost:8080}
+  RESEARCH_ORIGIN: ${RESEARCH_ORIGIN:-http://research.bumpabestie.localhost:8080}
+  API_ORIGIN: ${API_ORIGIN:-http://api.bumpabestie.localhost:8080}
+  API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+  TRUSTED_HOSTS: ${TRUSTED_HOSTS:-bumpabestie.localhost,admin.bumpabestie.localhost,research.bumpabestie.localhost,api.bumpabestie.localhost,api,localhost}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://bumpabestie.localhost:8080,http://admin.bumpabestie.localhost:8080,http://research.bumpabestie.localhost:8080}
+  CORS_ORIGINS: ${CORS_ORIGINS:-["http://bumpabestie.localhost:8080","http://admin.bumpabestie.localhost:8080","http://research.bumpabestie.localhost:8080"]}
+  JWT_SECRET: ${JWT_SECRET:-local-only-change-me-at-least-32-characters}
+  OTP_SECRET: ${OTP_SECRET:-local-only-change-me-at-least-32-characters}
+  FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-local-only-change-me-at-least-32-characters}
+  INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-local-only-change-me-at-least-32-characters}
+  COOKIE_SECRET: ${COOKIE_SECRET:-local-only-change-me-at-least-32-characters}
+  SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+  SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bumpabestie_app:local-app-postgres-only@postgres:5432/bumpabestie}
+  MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-postgresql+psycopg://bumpabestie:local-postgres-only@postgres:5432/bumpabestie}
+  SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:-postgresql://bumpabestie:local-postgres-only@postgres:5432/bumpabestie}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:-mock}
+  AGENT_BACKEND: ${AGENT_BACKEND:-mock}
+  BUMPA_BACKEND: ${BUMPA_BACKEND:-mock}
+  DEV_OTP_SINK: ${DEV_OTP_SINK:-log}
+  DEV_FIXED_OTP: ${DEV_FIXED_OTP:-246810}
+  EXPOSE_LOCAL_OTP: ${EXPOSE_LOCAL_OTP:-true}
+  LOCAL_OTP_CODE: ${LOCAL_OTP_CODE:-246810}
+  SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+  MOCK_PROVIDER_LATENCY_MS: ${MOCK_PROVIDER_LATENCY_MS:-25}
+  META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v23.0}
+  META_APP_ID: ${META_APP_ID:-}
+  META_APP_SECRET: ${META_APP_SECRET:-local-meta-app-secret}
+  META_BUSINESS_ID: ${META_BUSINESS_ID:-}
+  META_WABA_ID: ${META_WABA_ID:-}
+  META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID:-}
+  META_PHONE_NUMBER: ${META_PHONE_NUMBER:-}
+  META_SYSTEM_USER_ACCESS_TOKEN: ${META_SYSTEM_USER_ACCESS_TOKEN:-}
+  META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-local-webhook-token}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_MODEL_DEFAULT: ${ANTHROPIC_MODEL_DEFAULT:-}
+  HERMES_BASE_INTERNAL_HOST: ${HERMES_BASE_INTERNAL_HOST:-http://hermes}
+  HERMES_ADMIN_TOKEN: ${HERMES_ADMIN_TOKEN:-}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  ARTIFACT_ROOT: /app/.data/exports
+
+x-api-service: &api-service
+  image: bumpabestie-api:${IMAGE_TAG:-local}
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+  init: true
+  environment: *app-environment
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  networks:
+    - app
+    - data
+    - egress
+  volumes:
+    - exports_data:/app/.data/exports
+  restart: unless-stopped
+
+services:
+  caddy:
+    image: caddy:2.10.0-alpine
+    init: true
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:-bumpabestie.localhost}
+      WWW_DOMAIN: ${WWW_DOMAIN:-www.bumpabestie.localhost}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN:-admin.bumpabestie.localhost}
+      RESEARCH_DOMAIN: ${RESEARCH_DOMAIN:-research.bumpabestie.localhost}
+      API_DOMAIN: ${API_DOMAIN:-api.bumpabestie.localhost}
+      CADDY_SITE_SCHEME: ${CADDY_SITE_SCHEME:-http}
+    ports:
+      - "${CADDY_BIND_ADDRESS:-127.0.0.1}:${CADDY_HTTP_PORT:-8080}:80"
+      - "${CADDY_BIND_ADDRESS:-127.0.0.1}:${CADDY_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks:
+      - edge
+      - app
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+
+  web:
+    image: bumpabestie-web:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-true}
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://bumpabestie.localhost:8080}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api.bumpabestie.localhost:8080}
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-true}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - app
+      - egress
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  api:
+    <<: *api-service
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  worker:
+    <<: *api-service
+    command: ["python", "-m", "app.jobs.worker"]
+
+  scheduler:
+    <<: *api-service
+    command: ["python", "-m", "app.jobs.scheduler"]
+
+  migrate:
+    <<: *api-service
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    profiles: ["tools"]
+
+  postgres:
+    image: postgres:16.9-alpine
+    init: true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bumpabestie}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-postgres-only}
+      POSTGRES_DB: ${POSTGRES_DB:-bumpabestie}
+      APP_POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD:-local-app-postgres-only}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.5-alpine
+    init: true
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1000"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backup:
+    image: bumpabestie-backup:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: infra/backup/Dockerfile
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER:-bumpabestie}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-local-postgres-only}
+      PGDATABASE: ${POSTGRES_DB:-bumpabestie}
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backups_data:/backups
+      - exports_data:/source/exports
+      # Reserved for the deferred Hermes runtime. Keeping it in the backup
+      # contract now prevents profile state from being omitted when enabled.
+      - hermes_data:/source/hermes
+    networks:
+      - data
+      - egress
+    restart: "no"
+    profiles: ["tools"]
+
+networks:
+  edge:
+  app:
+    internal: true
+  data:
+    internal: true
+  egress:
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  redis_data:
+  exports_data:
+  backups_data:
+  hermes_data:

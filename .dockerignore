@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+**/.next
+backups
+exports
+hermes_data
+.env
+.env.*
+!.env.example
+*.log
+.deployed-revision

@@ -1,0 +1,12 @@
+[Unit]
+Description=Bumpa Bestie encrypted off-host backup handoff
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=bumpabestie
+WorkingDirectory=/opt/bumpabestie
+ExecStart=/usr/bin/docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml --profile tools run --rm backup
+ExecStartPost=/opt/bumpabestie/scripts/offsite_backup.sh
+Nice=10

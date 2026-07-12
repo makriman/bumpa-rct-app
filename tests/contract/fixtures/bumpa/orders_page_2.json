@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "synthetic-order-1002",
+      "order_number": "DEMO-1002",
+      "status": "future_status_is_preserved",
+      "total_amount": "0.00",
+      "currency": "NGN",
+      "shipping_details": {
+        "address": "Synthetic Address"
+      }
+    }
+  ],
+  "pagination": {
+    "current_page": 2,
+    "last_page": 2,
+    "limit": 1
+  }
+}

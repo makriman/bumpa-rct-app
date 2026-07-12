@@ -1,0 +1,156 @@
+services:
+  caddy:
+    environment:
+      CADDY_SITE_SCHEME: https
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  web:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-web:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    build: !reset null
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_DEMO_MODE: "false"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  api:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      COOKIE_SECRET: ${COOKIE_SECRET:?Set COOKIE_SECRET}
+      SESSION_COOKIE_SECURE: "true"
+      EXPOSE_LOCAL_OTP: "false"
+      SEED_DEMO_DATA: "false"
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+      SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:?Set SYNC_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+  worker:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      COOKIE_SECRET: ${COOKIE_SECRET:?Set COOKIE_SECRET}
+      EXPOSE_LOCAL_OTP: "false"
+      SEED_DEMO_DATA: "false"
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+      SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:?Set SYNC_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  scheduler:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_ENV: production
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      COOKIE_SECRET: ${COOKIE_SECRET:?Set COOKIE_SECRET}
+      EXPOSE_LOCAL_OTP: "false"
+      SEED_DEMO_DATA: "false"
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+      SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:?Set SYNC_DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  migrate:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_ENV: production
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
+      SYNC_DATABASE_URL: ${SYNC_DATABASE_URL:?Set SYNC_DATABASE_URL}
+
+  postgres:
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      APP_POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD:?Set APP_POSTGRES_PASSWORD}
+    shm_size: 256mb
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  redis:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"

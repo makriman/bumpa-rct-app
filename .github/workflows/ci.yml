@@ -1,0 +1,211 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22.17.0"
+  UV_VERSION: "0.11.8"
+
+jobs:
+  backend:
+    name: Backend quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.9-alpine
+        env:
+          POSTGRES_USER: bumpabestie
+          POSTGRES_PASSWORD: ci-postgres-only
+          POSTGRES_DB: bumpabestie_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bumpabestie -d bumpabestie_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7.4.5-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://bumpabestie:ci-postgres-only@127.0.0.1:5432/bumpabestie_test
+      SYNC_DATABASE_URL: postgresql://bumpabestie:ci-postgres-only@127.0.0.1:5432/bumpabestie_test
+      REDIS_URL: redis://127.0.0.1:6379/15
+      JWT_SECRET: ci-only-jwt-secret-at-least-32-characters
+      OTP_SECRET: ci-only-otp-secret-at-least-32-characters
+      FIELD_ENCRYPTION_KEY: ci-only-field-encryption-key-at-least-32-chars
+      INTERNAL_SERVICE_TOKEN: ci-only-internal-token-at-least-32-chars
+      COOKIE_SECRET: ci-only-cookie-secret-at-least-32-characters
+      WHATSAPP_BACKEND: mock
+      AGENT_BACKEND: mock
+      BUMPA_BACKEND: mock
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==${UV_VERSION}
+      - name: Install locked dependencies
+        working-directory: apps/api
+        run: uv sync --all-extras --locked
+      - name: Lint and format
+        working-directory: apps/api
+        run: |
+          uv run ruff check app tests
+          uv run ruff format --check app tests
+      - name: Typecheck
+        working-directory: apps/api
+        run: uv run mypy app
+      - name: Migrate empty database
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+      - name: Test with branch coverage
+        working-directory: apps/api
+        run: uv run pytest --cov=app --cov-branch --cov-fail-under=85 --cov-report=term-missing --cov-report=xml --junitxml=junit.xml
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-evidence
+          path: |
+            apps/api/coverage.xml
+            apps/api/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install locked dependencies
+        run: npm --prefix apps/web ci
+      - name: Lint, format and typecheck
+        run: |
+          npm --prefix apps/web run lint
+          npm --prefix apps/web run format:check
+          npm --prefix apps/web run typecheck
+      - name: Unit and component tests
+        run: npm --prefix apps/web run test:coverage
+      - name: Install Playwright browser
+        run: npm --prefix apps/web exec -- playwright install --with-deps chromium
+      - name: Desktop and mobile Playwright checks
+        run: npm --prefix apps/web run test:e2e
+      - name: Upload frontend evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: frontend-evidence
+          path: |
+            apps/web/coverage
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: warn
+          retention-days: 14
+
+  repository:
+    name: Repository and Compose contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate shell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          ./scripts/validate_shell.sh
+      - name: Validate environment example
+        run: ./scripts/validate_env.sh .env.example local
+      - name: Validate Compose
+        run: docker compose --env-file .env.example config --quiet
+      - name: Assert published-port boundary
+        run: |
+          published="$(docker compose --env-file .env.example config --format json | jq -r '.services | to_entries[] | select(.value.ports != null) | .key')"
+          test "$published" = "caddy"
+
+  images:
+    name: Build linux/amd64 images
+    needs: [backend, frontend, repository]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - name: api
+            dockerfile: apps/api/Dockerfile
+          - name: web
+            dockerfile: apps/web/Dockerfile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          provenance: mode=max
+          sbom: true
+          tags: bumpabestie-${{ matrix.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security:
+    name: Secrets and dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Scan repository history for secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Audit Python lock
+        run: |
+          python -m pip install --disable-pip-version-check uv==${UV_VERSION} pip-audit==2.9.0
+          cd apps/api
+          uv export --locked --no-dev --no-emit-project --output-file /tmp/api-requirements.txt
+          pip-audit --requirement /tmp/api-requirements.txt
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Audit production web dependencies
+        run: npm --prefix apps/web audit --omit=dev --audit-level=high

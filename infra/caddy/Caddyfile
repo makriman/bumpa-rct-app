@@ -1,0 +1,60 @@
+{
+	admin off
+	log default {
+		output stdout
+		format json
+		level INFO
+	}
+	servers {
+		trusted_proxies static private_ranges
+		client_ip_headers X-Forwarded-For X-Real-IP
+	}
+}
+
+(security_headers) {
+	header {
+		-Server
+		-X-Powered-By
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+	}
+}
+
+(web_proxy) {
+	import security_headers
+	encode zstd gzip
+	reverse_proxy web:3000 {
+		health_uri /api/health
+		health_interval 30s
+	}
+}
+
+{$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost}, {$CADDY_SITE_SCHEME:http}://{$WWW_DOMAIN:www.bumpabestie.localhost} {
+	request_header X-Bumpa-Surface public
+	import web_proxy
+}
+
+{$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost} {
+	request_header X-Bumpa-Surface admin
+	import web_proxy
+}
+
+{$CADDY_SITE_SCHEME:http}://{$RESEARCH_DOMAIN:research.bumpabestie.localhost} {
+	request_header X-Bumpa-Surface research
+	import web_proxy
+}
+
+{$CADDY_SITE_SCHEME:http}://{$API_DOMAIN:api.bumpabestie.localhost} {
+	import security_headers
+	encode zstd gzip
+	request_body {
+		max_size 10MB
+	}
+	reverse_proxy api:8000 {
+		health_uri /health
+		health_interval 30s
+	}
+}
