@@ -4,6 +4,7 @@
 		output stdout
 		format json
 		level INFO
+		exclude http.log.access
 	}
 	servers {
 		trusted_proxies static private_ranges
@@ -55,7 +56,10 @@
 		max_size 10MB
 	}
 	reverse_proxy api:8000 {
-		health_uri /health/ready
+		# Keep durable PostgreSQL-backed webhook ingress routable while the
+		# asynchronous wake-up layer is degraded. Release gates still probe the
+		# stricter /health/ready endpoint directly.
+		health_uri /health/live
 		health_interval 30s
 	}
 }

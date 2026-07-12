@@ -6,6 +6,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 ReportFormat = Literal["csv", "jsonl", "pdf"]
+AsyncJobStatus = Literal[
+    "pending",
+    "queued",
+    "running",
+    "retry",
+    "succeeded",
+    "dead_letter",
+    "cancelled",
+]
+AsyncJobReplayReason = Literal[
+    "configuration_corrected",
+    "dependency_recovered",
+    "operator_verified_safe_retry",
+    "transient_provider_recovered",
+    "upstream_credentials_rotated",
+]
 
 
 def default_report_formats() -> list[ReportFormat]:
@@ -18,6 +34,28 @@ class ORMModel(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class AsyncJobView(BaseModel):
+    """Payload-free operational view of a durable asynchronous job."""
+
+    id: str
+    tenant_id: str | None
+    kind: str
+    status: AsyncJobStatus
+    attempts: int
+    max_attempts: int
+    failure_category: str | None
+    replayable: bool
+    available_at: datetime
+    finished_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AsyncJobReplayRequest(BaseModel):
+    reason: AsyncJobReplayReason
+    max_attempts: int | None = Field(default=None, ge=1, le=100)
 
 
 class OtpRequest(BaseModel):

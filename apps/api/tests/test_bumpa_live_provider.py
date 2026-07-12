@@ -81,6 +81,38 @@ def test_live_bumpa_retries_rate_limits_and_bounds_retry_after() -> None:
     assert calls == 2 and sleeps == [10.0]
 
 
+def test_live_bumpa_timeout_exhausts_bounded_retry_budget_with_sanitized_error() -> None:
+    secret = "never-include-this-key"
+    private_detail = "private-timeout-detail-must-not-escape"
+    calls = 0
+    sleeps: list[float] = []
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout(private_detail, request=request)
+
+    provider = BumpaClient(
+        secret,
+        "business_id",
+        "business-test",
+        client=_client(httpx.MockTransport(timeout)),
+        sleep=sleeps.append,
+        max_attempts=3,
+    )
+
+    with pytest.raises(BumpaProviderError, match="temporarily unreachable") as raised:
+        provider.get_analytics("sales", "overview", date(2026, 1, 1), date(2026, 1, 1))
+
+    assert calls == 3
+    assert sleeps == [1, 2]
+    assert raised.value.status_code is None
+    assert raised.value.retryable is True
+    assert secret not in str(raised.value)
+    assert private_detail not in str(raised.value)
+    assert isinstance(raised.value.__cause__, httpx.ReadTimeout)
+
+
 @pytest.mark.parametrize(
     ("status_code", "message"),
     [

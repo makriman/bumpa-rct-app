@@ -253,6 +253,50 @@ def test_json_formatter_emits_allowlisted_job_context_only() -> None:
     assert "must-never-appear" not in json.dumps(payload)
 
 
+def test_request_logging_uses_route_template_and_never_query_values(client: TestClient) -> None:
+    class ImmediateJsonCapture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(JsonFormatter().format(record))
+
+    query_secret = "query-secret-must-never-reach-logs"
+    capture = ImmediateJsonCapture()
+    request_logger = logging.getLogger("bumpabestie.http")
+    request_logger.addHandler(capture)
+    try:
+        response = client.get(
+            "/webhooks/whatsapp",
+            params={
+                "hub.mode": "subscribe",
+                "hub.verify_token": query_secret,
+                "hub.challenge": "safe-challenge",
+            },
+            headers={"X-Correlation-ID": "safe-request-log-canary"},
+        )
+    finally:
+        request_logger.removeHandler(capture)
+
+    assert response.status_code == 403
+    serialized = "\n".join(capture.lines)
+    assert query_secret not in serialized
+    completed = next(
+        json.loads(line) for line in capture.lines if '"message": "request_completed"' in line
+    )
+    assert completed == {
+        "level": "INFO",
+        "logger": "bumpabestie.http",
+        "message": "request_completed",
+        "correlation_id": "safe-request-log-canary",
+        "duration_ms": completed["duration_ms"],
+        "method": "GET",
+        "path": "/webhooks/whatsapp",
+        "status_code": 403,
+    }
+
+
 class FakeHealthQueue:
     snapshot: dict[str, object] = {}
 

@@ -1,3 +1,5 @@
+from typing import cast
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +10,7 @@ from app.core.crypto import FieldCipher
 from app.core.dependencies import Principal, require_operator
 from app.core.security import normalize_phone
 from app.db.models import (
+    AsyncJob,
     AuditLog,
     BumpaConnection,
     BumpaSyncRun,
@@ -20,6 +23,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
+from app.jobs.runtime import replay_dead_letter
 from app.providers.bumpa import BumpaClient, BumpaProviderError
 from app.providers.hermes import (
     HermesError,
@@ -28,7 +32,16 @@ from app.providers.hermes import (
     refresh_profile_status,
 )
 from app.providers.local import local_profile_key
-from app.schemas import BumpaConnectionCreate, PhoneCreate, TenantCreate, TenantUpdate, UserCreate
+from app.schemas import (
+    AsyncJobReplayRequest,
+    AsyncJobStatus,
+    AsyncJobView,
+    BumpaConnectionCreate,
+    PhoneCreate,
+    TenantCreate,
+    TenantUpdate,
+    UserCreate,
+)
 from app.services.audit import audit
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -319,6 +332,73 @@ def system_errors(
     ]
 
 
+@router.get("/system/jobs", response_model=list[AsyncJobView])
+def async_jobs(
+    _principal: Principal = Depends(require_operator),
+    db: Session = Depends(get_db),
+    status: AsyncJobStatus | None = Query(default=None),
+    tenant_id: str | None = Query(default=None, min_length=36, max_length=36),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> list[AsyncJobView]:
+    """List durable jobs through a deliberately payload-free operator projection."""
+
+    statement = select(AsyncJob)
+    if status is not None:
+        statement = statement.where(AsyncJob.status == status)
+    if tenant_id is not None:
+        statement = statement.where(AsyncJob.tenant_id == tenant_id)
+    rows = db.scalars(statement.order_by(AsyncJob.created_at.desc()).limit(limit)).all()
+    return [_async_job_view(row) for row in rows]
+
+
+@router.post("/system/jobs/{job_id}/replay", response_model=AsyncJobView)
+def replay_async_job(
+    job_id: str,
+    payload: AsyncJobReplayRequest,
+    principal: Principal = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> AsyncJobView:
+    """Replay one dead-letter job and write its audit record atomically."""
+
+    job = db.scalar(select(AsyncJob).where(AsyncJob.id == job_id).with_for_update())
+    if not job:
+        raise HTTPException(status_code=404, detail="Asynchronous job not found")
+    if job.status != "dead_letter":
+        raise HTTPException(status_code=409, detail="Only dead-letter jobs can be replayed")
+    before = {
+        "status": job.status,
+        "attempts": job.attempts,
+        "max_attempts": job.max_attempts,
+    }
+    try:
+        replayed = replay_dead_letter(
+            db,
+            job.id,
+            max_attempts=payload.max_attempts,
+            commit=False,
+        )
+        audit(
+            db,
+            actor_user_id=principal.user.id,
+            tenant_id=replayed.tenant_id,
+            action="async_job.replayed",
+            resource_type="async_job",
+            resource_id=replayed.id,
+            before=before,
+            after={
+                "status": replayed.status,
+                "attempts": replayed.attempts,
+                "max_attempts": replayed.max_attempts,
+                "reason": payload.reason,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return _async_job_view(replayed)
+
+
 @router.get("/system/sync-runs")
 def all_sync_runs(
     _principal: Principal = Depends(require_operator), db: Session = Depends(get_db)
@@ -392,3 +472,28 @@ def _tenant_view(tenant: Tenant) -> dict:
         "research_consent_status": tenant.research_consent_status,
         "created_at": tenant.created_at,
     }
+
+
+def _async_job_view(job: AsyncJob) -> AsyncJobView:
+    failure_category: str | None = None
+    if job.last_error:
+        if job.last_error.startswith("PermanentJobError:"):
+            failure_category = "permanent_failure"
+        elif job.last_error.startswith("Stale worker lease"):
+            failure_category = "stale_lease"
+        else:
+            failure_category = "execution_failure"
+    return AsyncJobView(
+        id=job.id,
+        tenant_id=job.tenant_id,
+        kind=job.kind,
+        status=cast(AsyncJobStatus, job.status),
+        attempts=job.attempts,
+        max_attempts=job.max_attempts,
+        failure_category=failure_category,
+        replayable=job.status == "dead_letter",
+        available_at=job.available_at,
+        finished_at=job.finished_at,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )

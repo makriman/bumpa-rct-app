@@ -1,0 +1,29 @@
+x-load-failure-environment: &load-failure-environment
+  APP_ENV: staging
+  SEED_DEMO_DATA: "false"
+  WHATSAPP_BACKEND: mock
+  BUMPA_BACKEND: mock
+  AGENT_BACKEND: mock
+  META_APP_SECRET: load-failure-fixture-app-secret
+  META_APP_SECRET_FILE:
+  MOCK_PROVIDER_LATENCY_MS: "0"
+  ASYNC_HEARTBEAT_TTL_SECONDS: "15"
+  ASYNC_POP_TIMEOUT_SECONDS: "1"
+  ASYNC_SCHEDULER_INTERVAL_SECONDS: "0.2"
+  ASYNC_DISPATCH_BATCH_SIZE: "100"
+  ASYNC_REDISPATCH_SECONDS: "15"
+  ASYNC_RETRY_BASE_SECONDS: "1"
+  ASYNC_RETRY_MAX_SECONDS: "2"
+  ASYNC_STALE_LOCK_SECONDS: "15"
+
+services:
+  api:
+    environment: *load-failure-environment
+    ports:
+      - "127.0.0.1:${LOAD_FAILURE_PORT:-18080}:8000"
+
+  worker:
+    environment: *load-failure-environment
+
+  scheduler:
+    environment: *load-failure-environment

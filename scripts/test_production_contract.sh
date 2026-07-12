@@ -249,6 +249,7 @@ if ! jq --exit-status '
   .services.api.environment.WHATSAPP_BACKEND == "disabled" and
   .services.api.environment.AGENT_BACKEND == "disabled" and
   .services.api.environment.BUMPA_BACKEND == "disabled" and
+  (.services.api.command | index("--no-access-log") != null) and
   .services.worker.environment.ASYNC_RUNTIME_ENABLED == "true" and
   .services.scheduler.environment.ASYNC_RUNTIME_ENABLED == "true" and
   .services.worker.healthcheck.test == ["CMD", "python", "-m", "app.jobs.health", "worker"] and
@@ -263,7 +264,7 @@ if ! jq --exit-status '
     backup_data_init: (.services["backup-data-init"] | {image, build, user, entrypoint, network_mode, read_only, cap_drop, cap_add, volumes}),
     backup: (.services.backup | {image, build, user, networks, read_only, tmpfs, cap_add, environment}),
     restore: (.services.restore | {image, build, user, entrypoint, networks, read_only, tmpfs, cap_add}),
-    api: (.services.api | {environment}),
+    api: (.services.api | {command, environment}),
     worker: (.services.worker | {environment, healthcheck, cap_drop}),
     scheduler: (.services.scheduler | {environment, healthcheck, cap_drop})
   }' <<<"$rendered" >&2
@@ -368,9 +369,26 @@ if grep -Fq "export CADDY_IMAGE=\"\$previous_caddy_image\"" scripts/deploy.sh; t
   exit 1
 fi
 grep -Fq -- '--exit-code-from caddy-init caddy-init' scripts/deploy.sh
+grep -Fq 'exclude http.log.access' infra/caddy/Caddyfile
+grep -Fq 'health_uri /health/live' infra/caddy/Caddyfile
+if grep -Fq 'health_uri /health/ready' infra/caddy/Caddyfile; then
+  echo "Caddy must not remove durable ingress solely because an async dependency is degraded" >&2
+  exit 1
+fi
 grep -Fq "docker image inspect --format '{{json .RepoDigests}}'" scripts/deploy.sh
 grep -Fq "\"\${compose[@]}\" --profile tools run --rm --no-deps" scripts/deploy.sh
 grep -Fq 'ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh' infra/systemd/bumpabestie-backup.service
+grep -Fq 'ExecStart=/usr/bin/python3 /opt/bumpabestie/scripts/check_disk_usage.py' infra/systemd/bumpabestie-disk-usage.service
+grep -Fq 'Environment=BUMPABESTIE_DISK_THRESHOLD_PERCENT=85' infra/systemd/bumpabestie-disk-usage.service
+grep -Fq 'Environment=BUMPABESTIE_DISK_PATHS=/' infra/systemd/bumpabestie-disk-usage.service
+grep -Fq 'OnUnitActiveSec=5min' infra/systemd/bumpabestie-disk-usage.timer
+grep -Fq 'Unit=bumpabestie-disk-usage.service' infra/systemd/bumpabestie-disk-usage.timer
+grep -Fq 'systemctl is-enabled --quiet "$timer_name"' scripts/deploy.sh
+grep -Fq 'systemctl is-active --quiet "$timer_name"' scripts/deploy.sh
+if grep -Fq 'EnvironmentFile=' infra/systemd/bumpabestie-disk-usage.service; then
+  echo "Disk usage unit must not import the application environment" >&2
+  exit 1
+fi
 # Match literal shell source rather than expanding this test process's array.
 # shellcheck disable=SC2016
 grep -Fq 'stop --timeout 60 "${running_services[@]}"' scripts/scheduled_backup.sh
@@ -409,7 +427,24 @@ for hardening_directive in \
   'CapabilityBoundingSet='; do
   grep -Fxq "$hardening_directive" infra/systemd/bumpabestie-backup.service
 done
+for hardening_directive in \
+  'UMask=0077' \
+  'NoNewPrivileges=yes' \
+  'PrivateDevices=yes' \
+  'PrivateTmp=yes' \
+  'RemoveIPC=yes' \
+  'ProtectHome=yes' \
+  'ProtectSystem=strict' \
+  'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+  'RestrictNamespaces=yes' \
+  'RestrictSUIDSGID=yes' \
+  'SystemCallArchitectures=native' \
+  'CapabilityBoundingSet='; do
+  grep -Fxq "$hardening_directive" infra/systemd/bumpabestie-disk-usage.service
+done
 grep -Fq 'util-linux' scripts/bootstrap_server.sh
+grep -Eq 'apt-get install -y .*python3' scripts/bootstrap_server.sh
+grep -Fq 'bumpabestie-disk-usage.timer' scripts/bootstrap_server.sh
 grep -Fq 'install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie' scripts/bootstrap_server.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock' scripts/maintenance_lock.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS:-900' scripts/maintenance_lock.sh

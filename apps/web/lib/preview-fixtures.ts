@@ -10,6 +10,7 @@ import type {
   ResearchOverviewData,
   SyncRun,
   SystemError,
+  AsyncJob,
   Taxonomy,
   TeamMember,
   Tenant,
@@ -147,6 +148,23 @@ export const previewErrors: SystemError[] = [
     severity: "medium",
     message: "Template delivery rejected: recipient unavailable",
     created_at: "2026-07-12T07:42:00Z",
+  },
+];
+
+export const previewDeadLetterJobs: AsyncJob[] = [
+  {
+    id: "demo-job-bumpa-sync",
+    tenant_id: "demo-kaia-home",
+    kind: "bumpa.sync",
+    status: "dead_letter",
+    attempts: 5,
+    max_attempts: 5,
+    failure_category: "execution_failure",
+    replayable: true,
+    available_at: "2026-07-12T07:40:00Z",
+    finished_at: "2026-07-12T07:42:00Z",
+    created_at: "2026-07-12T07:30:00Z",
+    updated_at: "2026-07-12T07:42:00Z",
   },
 ];
 

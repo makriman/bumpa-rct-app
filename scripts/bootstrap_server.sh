@@ -25,7 +25,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
-apt-get install -y ca-certificates curl fail2ban git gnupg jq unattended-upgrades ufw util-linux
+apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 unattended-upgrades ufw util-linux
 
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -82,11 +82,22 @@ ufw allow from "$ADMIN_SSH_CIDR" to any port 22 proto tcp
 ufw --force enable
 systemctl enable --now docker fail2ban unattended-upgrades
 
-if [[ -n "$ROOT_DIR" && -f "$ROOT_DIR/infra/systemd/bumpabestie-backup.service" ]]; then
-  install -m 0644 "$ROOT_DIR/infra/systemd/bumpabestie-backup.service" /etc/systemd/system/
-  install -m 0644 "$ROOT_DIR/infra/systemd/bumpabestie-backup.timer" /etc/systemd/system/
+host_units=(
+  bumpabestie-backup.service
+  bumpabestie-backup.timer
+  bumpabestie-disk-usage.service
+  bumpabestie-disk-usage.timer
+)
+if [[ -n "$ROOT_DIR" && -f "$ROOT_DIR/infra/systemd/${host_units[0]}" ]]; then
+  for unit_name in "${host_units[@]}"; do
+    if [[ ! -f "$ROOT_DIR/infra/systemd/$unit_name" ]]; then
+      echo "Required host unit is missing: $unit_name" >&2
+      exit 2
+    fi
+    install -m 0644 "$ROOT_DIR/infra/systemd/$unit_name" /etc/systemd/system/
+  done
   systemctl daemon-reload
-  systemctl enable --now bumpabestie-backup.timer
+  systemctl enable --now bumpabestie-backup.timer bumpabestie-disk-usage.timer
 fi
 
 echo "Host bootstrap complete. Add the deploy key and clone the repository as bumpabestie."

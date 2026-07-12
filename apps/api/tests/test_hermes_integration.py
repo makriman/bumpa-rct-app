@@ -127,6 +127,40 @@ def test_client_circuit_breaker_rejects_repeated_profile_failure(tmp_path: Path)
     assert calls == 3
 
 
+def test_client_timeout_maps_to_unavailable_and_opens_circuit_without_leaking(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+    private_detail = "private-timeout-detail-must-not-escape"
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ReadTimeout(private_detail, request=request)
+
+    client = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(timeout),
+        clock=lambda: 10.0,
+        breaker=HermesCircuitBreaker(threshold=2, recovery_seconds=30),
+    )
+    endpoint = HermesEndpoint("tenant_a", "http://hermes:8700/v1", "private-key")
+
+    for _ in range(2):
+        with pytest.raises(HermesUnavailable, match="unreachable") as raised:
+            client.respond(endpoint, message="question", business_context="safe summary")
+        assert raised.value.retryable is True
+        assert private_detail not in str(raised.value)
+        assert "private-key" not in str(raised.value)
+        assert isinstance(raised.value.__cause__, httpx.ReadTimeout)
+
+    with pytest.raises(HermesCircuitOpen, match="circuit is open") as opened:
+        client.respond(endpoint, message="question", business_context="safe summary")
+
+    assert opened.value.retryable is True
+    assert calls == 2
+
+
 @pytest.mark.parametrize(
     ("status_code", "expected_error"),
     (
