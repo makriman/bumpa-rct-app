@@ -4,6 +4,8 @@ import type {
   McpConnection,
   McpRegistryItem,
   Report,
+  ResearchConversationDetail,
+  ResearchConversationSummary,
   ResearchEvent,
   ResearchOverviewData,
   SyncRun,
@@ -220,6 +222,57 @@ export const previewResearchEvents: ResearchEvent[] = [
     created_at: "2026-07-11T13:51:00Z",
   },
 ];
+
+export const previewResearchConversations: ResearchConversationSummary[] = [
+  {
+    id: "CONV-DEMO-7A2F",
+    tenant_pseudonym: "SME-K4H2",
+    participant_pseudonyms: ["USR-DEMO-31C8"],
+    channel: "whatsapp",
+    event_count: 2,
+    primary_intents: { sales_analysis: 1, inventory_management: 1 },
+    latest_redacted_text: "What should I restock before the weekend?",
+    started_at: "2026-07-12T09:20:00Z",
+    last_activity_at: "2026-07-12T09:42:00Z",
+  },
+];
+
+export const previewResearchConversationDetails: Record<
+  string,
+  ResearchConversationDetail
+> = {
+  "CONV-DEMO-7A2F": {
+    ...previewResearchConversations[0],
+    events: [
+      {
+        id: "EVT-DEMO-1A2B",
+        user_pseudonym: "USR-DEMO-31C8",
+        channel: "whatsapp",
+        event_type: "question",
+        redacted_text: "Which products sold best this week?",
+        primary_intent: "sales_analysis",
+        business_function: "sales",
+        ai_help_type: "data_lookup",
+        complexity: "simple_lookup",
+        bumpa_data_used: "products",
+        created_at: "2026-07-12T09:20:00Z",
+      },
+      {
+        id: "EVT-DEMO-2C4D",
+        user_pseudonym: "USR-DEMO-31C8",
+        channel: "whatsapp",
+        event_type: "question",
+        redacted_text: "What should I restock before the weekend?",
+        primary_intent: "inventory_management",
+        business_function: "stock",
+        ai_help_type: "recommendation",
+        complexity: "single_step_reasoning",
+        bumpa_data_used: "products,orders",
+        created_at: "2026-07-12T09:42:00Z",
+      },
+    ],
+  },
+};
 
 export const previewResearchOverview: ResearchOverviewData = {
   smes_onboarded: 3,

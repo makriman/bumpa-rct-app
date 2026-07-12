@@ -103,9 +103,12 @@ def test_root_environment_aliases_and_production_guards() -> None:
         whatsapp_backend="meta",
         bumpa_backend="disabled",
         agent_backend="disabled",
-        meta_app_secret="realistic-app-secret",  # noqa: S106 - non-secret fixture
-        meta_phone_number_id="phone-number-id",
-        meta_system_user_access_token="system-user-access-token",  # noqa: S106 - fixture
+        meta_app_id="1234567890",
+        meta_waba_id="2234567890",
+        meta_webhook_verify_token="v" * 32,
+        meta_app_secret="s" * 32,
+        meta_phone_number_id="3234567890",
+        meta_system_user_access_token="t" * 40,
     )
     assert configured_meta.whatsapp_backend == "meta"
 
@@ -143,6 +146,19 @@ def test_configurable_secure_cookie_is_emitted(client: TestClient) -> None:
         assert "Domain=.example.test" in cookie
         assert "HttpOnly" in cookie
         assert "SameSite=lax" in cookie
+
+        logged_out = client.post(
+            "/v1/auth/logout",
+            headers={"Authorization": f"Bearer {verified.json()['access_token']}"},
+        )
+        deleted_cookie = logged_out.headers["set-cookie"]
+        assert logged_out.status_code == 200
+        assert "bb_session=" in deleted_cookie
+        assert "Max-Age=0" in deleted_cookie
+        assert "Secure" in deleted_cookie
+        assert "Domain=.example.test" in deleted_cookie
+        assert "HttpOnly" in deleted_cookie
+        assert "SameSite=lax" in deleted_cookie
     finally:
         app.dependency_overrides.pop(get_settings, None)
 

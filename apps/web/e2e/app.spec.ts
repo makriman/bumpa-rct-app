@@ -52,3 +52,26 @@ test("demo admin, research, and settings rows are never labelled live", async ({
     await expect(page.getByText(/Live .*API connected/)).toHaveCount(0);
   }
 });
+
+test("the authenticated shell stays navigable without horizontal overflow", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/login");
+  await page.getByRole("button", { name: "SME owner" }).click();
+  await expect(page).toHaveURL(/\/chat$/);
+  await expect(page.locator(".environment")).toHaveText("DEMO DATA");
+
+  if (testInfo.project.name === "mobile-chromium") {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  }
+  await page.getByRole("link", { name: "Bumpa connection" }).click();
+  await expect(page).toHaveURL(/\/settings\/bumpa$/);
+  await expect(
+    page.getByRole("heading", { name: "Bumpa data connection" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+});

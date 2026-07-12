@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request
 from sqlalchemy import select
@@ -10,6 +12,8 @@ from app.core.config import Settings, get_settings
 from app.core.security import decode_access_token
 from app.db.models import PlatformRole, Tenant, TenantMembership, User
 from app.db.session import get_db, set_security_context
+
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
 @dataclass(frozen=True)
@@ -27,14 +31,72 @@ def extract_token(
     request: Request,
     authorization: str | None = Header(default=None),
     session_cookie: str | None = Cookie(default=None, alias="bb_session"),
+    settings: Settings = Depends(get_settings),
 ) -> str:
     if authorization and authorization.startswith("Bearer "):
         return authorization.removeprefix("Bearer ").strip()
-    cookie_name = get_settings().session_cookie_name
+    cookie_name = settings.session_cookie_name
     token = request.cookies.get(cookie_name) or session_cookie
     if not token:
         raise HTTPException(status_code=401, detail="Authentication required")
+    enforce_cookie_origin(request, settings)
     return token
+
+
+def enforce_cookie_origin(request: Request, settings: Settings) -> None:
+    """Protect unsafe cookie-authenticated requests from cross-site submission.
+
+    Bearer-authenticated clients never enter this function. Local/test mode keeps
+    direct test and developer clients frictionless; production browser origins
+    must be same-origin or explicitly allowed by CORS configuration.
+    """
+
+    if request.method.upper() in SAFE_METHODS or settings.is_local:
+        return
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        if _private_peer(request):
+            return
+        raise HTTPException(status_code=403, detail="Request origin could not be verified")
+    source_origin = _normalized_origin(source)
+    allowed = {
+        origin
+        for configured in settings.effective_cors_origins
+        if (origin := _normalized_origin(configured)) is not None
+    }
+    request_origin = _normalized_origin(str(request.base_url))
+    if request_origin:
+        allowed.add(request_origin)
+    if source_origin is None or source_origin not in allowed:
+        raise HTTPException(status_code=403, detail="Request origin is not allowed")
+
+
+def _normalized_origin(value: str) -> str | None:
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+    default_port = 443 if parsed.scheme == "https" else 80
+    suffix = f":{port}" if port is not None and port != default_port else ""
+    return f"{parsed.scheme}://{parsed.hostname.lower()}{suffix}"
+
+
+def _private_peer(request: Request) -> bool:
+    if not request.client:
+        return False
+    try:
+        address = ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback
 
 
 def get_principal(

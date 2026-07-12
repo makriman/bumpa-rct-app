@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiRequest, demoFallbackEnabled } from "@/lib/api";
 import {
   adminNav,
@@ -53,11 +53,16 @@ export function AppShell({
   const pathname = usePathname();
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const appMainRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
   const [dataSource, setDataSource] = useState<"checking" | "live" | "demo">(
     "checking",
   );
   const [session, setSession] = useState<SessionView | null>(null);
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
   useEffect(() => {
     void apiRequest<SessionView>("/auth/me")
       .then((result) => {
@@ -74,6 +79,46 @@ export function AppShell({
         }
       });
   }, [pathname, router]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const sidebar = sidebarRef.current;
+    const appMain = appMainRef.current;
+    const menuButton = menuButtonRef.current;
+    const previousOverflow = document.body.style.overflow;
+    appMain?.setAttribute("inert", "");
+    document.body.style.overflow = "hidden";
+    const focusable = Array.from(
+      sidebar?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    focusable[0]?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMenuOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      appMain?.removeAttribute("inert");
+      document.body.style.overflow = previousOverflow;
+      menuButton?.focus();
+    };
+  }, [menuOpen]);
   const nav = navFor(surface);
   const demoName =
     surface === "admin"
@@ -98,6 +143,24 @@ export function AppShell({
       : surface === "research"
         ? "Demo preview · researcher"
         : "Demo preview · owner";
+  async function handleLogout() {
+    if (logoutPending) return;
+    setLogoutPending(true);
+    setLogoutError(null);
+    try {
+      await apiRequest<{ message: string }>("/auth/logout", {
+        method: "POST",
+      });
+      router.replace("/login");
+    } catch (error) {
+      setLogoutError(
+        error instanceof Error
+          ? error.message
+          : "We could not log you out. Please try again.",
+      );
+      setLogoutPending(false);
+    }
+  }
   if (!ready && process.env.NODE_ENV !== "development")
     return (
       <main className="page">
@@ -110,11 +173,26 @@ export function AppShell({
         <button
           className="sidebar-scrim"
           aria-label="Close navigation"
+          tabIndex={-1}
           onClick={() => setMenuOpen(false)}
         />
       )}
-      <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
-        <Brand />
+      <aside
+        ref={sidebarRef}
+        id="workspace-navigation"
+        className={`sidebar ${menuOpen ? "open" : ""}`}
+        aria-label="Primary navigation"
+      >
+        <div className="sidebar-head">
+          <Brand />
+          <button
+            className="icon-button sidebar-close"
+            aria-label="Close navigation panel"
+            onClick={() => setMenuOpen(false)}
+          >
+            ×
+          </button>
+        </div>
         {nav.map((group) => (
           <div key={group.label}>
             <div className="nav-label">{group.label}</div>
@@ -156,17 +234,34 @@ export function AppShell({
               <span>{displayRole}</span>
             </div>
           </div>
-          <Link className="side-link" href="/login">
-            <span className="nav-icon">↪</span>Switch workspace
-          </Link>
+          {logoutError && (
+            <p className="sidebar-error" role="alert">
+              {logoutError}
+            </p>
+          )}
+          <button
+            className="side-link side-action"
+            type="button"
+            disabled={logoutPending}
+            aria-busy={logoutPending}
+            onClick={() => void handleLogout()}
+          >
+            <span className="nav-icon" aria-hidden="true">
+              ↪
+            </span>
+            {logoutPending ? "Logging out…" : "Log out"}
+          </button>
         </div>
       </aside>
-      <div className="app-main">
+      <div ref={appMainRef} className="app-main">
         <header className="topbar">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button
+              ref={menuButtonRef}
               className="icon-button mobile-menu-button"
               aria-label="Open navigation"
+              aria-controls="workspace-navigation"
+              aria-expanded={menuOpen}
               onClick={() => setMenuOpen(true)}
             >
               ☰

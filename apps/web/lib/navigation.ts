@@ -69,3 +69,23 @@ export function homeForRole(role: Role): string {
   if (role === "superadmin") return "/admin";
   return "/chat";
 }
+
+/** Accept only local application paths for post-authentication navigation. */
+export function safeNextPath(value: string | null): string | null {
+  if (
+    !value ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    value.includes("\\")
+  ) {
+    return null;
+  }
+  try {
+    const base = "https://bumpabestie.invalid";
+    const target = new URL(value, base);
+    if (target.origin !== base) return null;
+    return `${target.pathname}${target.search}${target.hash}`;
+  } catch {
+    return null;
+  }
+}

@@ -9,6 +9,7 @@ import {
 describe("platform data formatting", () => {
   it("humanises API enum values", () => {
     expect(titleCase("inventory_management")).toBe("Inventory Management");
+    expect(titleCase("sales.total_sales")).toBe("Sales · Total Sales");
     expect(titleCase(null)).toBe("Not available");
   });
 

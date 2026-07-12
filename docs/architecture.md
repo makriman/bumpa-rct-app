@@ -2,18 +2,16 @@
 
 ## Status and reading guide
 
-This document defines the target architecture. The current implementation has
-FastAPI/Next.js/Postgres-compatible models, deterministic in-process mocks,
-explicit Postgres RLS policy DDL, authenticated API-backed production views and a
-same-origin Next.js API proxy. Explicit RLS was exercised through the non-owner
-`bumpabestie_app` role on local Postgres. It does **not** yet have a Redis job queue,
-transactional outbox or live Hermes process/profile topology. Worker and scheduler
-containers are idle local shells and are excluded from the provider-disabled
-production baseline. Explicitly labelled demo fixtures remain available only for
-credential-free local UI testing. Production rejects mock providers; deferred paths
-must return unavailable rather than silently invoking local adapters. Those items
-remain acceptance requirements; see `docs/build-plan-compliance.md` and
-`docs/verification.md` for requirement and evidence status.
+This document describes the implemented architecture. FastAPI, Next.js, Postgres,
+Redis, the durable worker/scheduler runtime, and private Hermes profile gateways are
+wired through explicit service boundaries. The application has deterministic local
+adapters and separately configured production adapters for Meta, Bumpa, and Hermes.
+Explicit RLS was exercised through the non-owner `bumpabestie_app` role on local
+Postgres. Labelled demo fixtures remain available only for credential-free local UI
+testing. Production rejects mock providers, mounts secrets only into the services
+that consume them, and fails unavailable rather than falling back to a local
+adapter. See `docs/build-plan-compliance.md` and `docs/verification.md` for
+environment-specific evidence status.
 
 ## System boundary
 
@@ -45,9 +43,10 @@ Next.js server and browser never receive Bumpa, Meta, Anthropic or Hermes secret
 - **Postgres** is the source of truth and enforces RLS as defense in depth.
 - **Redis** provides queues, bounded rate-limit state and short-lived coordination.
 - **Provider adapters** implement Bumpa, WhatsApp and agent ports. Deterministic
-  mocks are first-class local/test adapters; live adapters are separately gated.
+  mocks are first-class local/test adapters; Meta, direct Bumpa and Hermes adapters
+  are separately configured and fail closed.
 
-The API, worker and future agent service attach to a non-published `egress` network
+The API, worker and Hermes service attach to a non-published `egress` network
 because they must reach provider APIs. Postgres and Redis attach only to the
 `internal: true` `data` network. Caddy reaches web and API through the private `app`
 network and is the only service with host ports.
@@ -91,10 +90,11 @@ process/profile topology must pass their contract and canary checks before
 activation; a port range, database row or mounted profile directory alone is not
 proof of profile isolation.
 
-The pre-integration production service set is Caddy, web, API, Postgres and Redis.
-The worker, scheduler and Hermes runtime join production only after their respective
-activation gates pass. This staged boundary preserves fail-closed behavior without
-pretending that the build plan's production definition of done has been reached.
+The production service set includes Caddy, web, API, worker, scheduler, Hermes,
+Postgres, and Redis. Worker and scheduler claim durable jobs through Redis-backed
+queues; Hermes exposes authenticated, private per-profile gateways. Provider
+selectors can remain disabled independently while their external activation gates
+are incomplete, preserving fail-closed behavior without misreporting readiness.
 
 ## Portability
 

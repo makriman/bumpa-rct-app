@@ -24,6 +24,25 @@ x-app-environment: &app-environment
   SESSION_COOKIE_DOMAIN: ${SESSION_COOKIE_DOMAIN:-}
   DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bumpabestie_app:local-app-postgres-only@postgres:5432/bumpabestie}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  CHAT_RATE_LIMIT_WINDOW_SECONDS: ${CHAT_RATE_LIMIT_WINDOW_SECONDS:-60}
+  CHAT_RATE_LIMIT: ${CHAT_RATE_LIMIT:-12}
+  WHATSAPP_RATE_LIMIT_WINDOW_SECONDS: ${WHATSAPP_RATE_LIMIT_WINDOW_SECONDS:-60}
+  WHATSAPP_RATE_LIMIT: ${WHATSAPP_RATE_LIMIT:-12}
+  BUMPA_SYNC_RATE_LIMIT_WINDOW_SECONDS: ${BUMPA_SYNC_RATE_LIMIT_WINDOW_SECONDS:-3600}
+  BUMPA_SYNC_RATE_LIMIT: ${BUMPA_SYNC_RATE_LIMIT:-6}
+  RESEARCH_REPORT_RATE_LIMIT_WINDOW_SECONDS: ${RESEARCH_REPORT_RATE_LIMIT_WINDOW_SECONDS:-3600}
+  RESEARCH_REPORT_RATE_LIMIT: ${RESEARCH_REPORT_RATE_LIMIT:-10}
+  ASYNC_RUNTIME_ENABLED: ${ASYNC_RUNTIME_ENABLED:-true}
+  ASYNC_QUEUE_NAME: ${ASYNC_QUEUE_NAME:-default}
+  ASYNC_QUEUE_KEY_PREFIX: ${ASYNC_QUEUE_KEY_PREFIX:-bumpabestie}
+  ASYNC_HEARTBEAT_TTL_SECONDS: ${ASYNC_HEARTBEAT_TTL_SECONDS:-45}
+  ASYNC_POP_TIMEOUT_SECONDS: ${ASYNC_POP_TIMEOUT_SECONDS:-5}
+  ASYNC_SCHEDULER_INTERVAL_SECONDS: ${ASYNC_SCHEDULER_INTERVAL_SECONDS:-2}
+  ASYNC_DISPATCH_BATCH_SIZE: ${ASYNC_DISPATCH_BATCH_SIZE:-100}
+  ASYNC_REDISPATCH_SECONDS: ${ASYNC_REDISPATCH_SECONDS:-60}
+  ASYNC_RETRY_BASE_SECONDS: ${ASYNC_RETRY_BASE_SECONDS:-5}
+  ASYNC_RETRY_MAX_SECONDS: ${ASYNC_RETRY_MAX_SECONDS:-900}
+  ASYNC_STALE_LOCK_SECONDS: ${ASYNC_STALE_LOCK_SECONDS:-300}
   WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:-mock}
   AGENT_BACKEND: ${AGENT_BACKEND:-mock}
   BUMPA_BACKEND: ${BUMPA_BACKEND:-mock}
@@ -33,15 +52,29 @@ x-app-environment: &app-environment
   MOCK_PROVIDER_LATENCY_MS: ${MOCK_PROVIDER_LATENCY_MS:-25}
   META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v23.0}
   META_APP_ID: ${META_APP_ID:-}
-  META_APP_SECRET: ${META_APP_SECRET:-local-meta-app-secret}
+  META_APP_SECRET: ${META_APP_SECRET:-}
+  META_APP_SECRET_FILE: ${META_APP_SECRET_FILE:-}
   META_BUSINESS_ID: ${META_BUSINESS_ID:-}
   META_WABA_ID: ${META_WABA_ID:-}
   META_PHONE_NUMBER_ID: ${META_PHONE_NUMBER_ID:-}
   META_PHONE_NUMBER: ${META_PHONE_NUMBER:-}
   META_SYSTEM_USER_ACCESS_TOKEN: ${META_SYSTEM_USER_ACCESS_TOKEN:-}
-  META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-local-webhook-token}
+  META_SYSTEM_USER_ACCESS_TOKEN_FILE: ${META_SYSTEM_USER_ACCESS_TOKEN_FILE:-}
+  META_WEBHOOK_VERIFY_TOKEN: ${META_WEBHOOK_VERIFY_TOKEN:-}
+  META_WEBHOOK_VERIFY_TOKEN_FILE: ${META_WEBHOOK_VERIFY_TOKEN_FILE:-}
+  META_OTP_TEMPLATE_NAME: ${META_OTP_TEMPLATE_NAME:-bb_otp_login}
+  META_TEMPLATE_LANGUAGE_CODE: ${META_TEMPLATE_LANGUAGE_CODE:-en}
   HERMES_BASE_INTERNAL_HOST: ${HERMES_BASE_INTERNAL_HOST:-http://hermes}
-  HERMES_ADMIN_TOKEN: ${HERMES_ADMIN_TOKEN:-}
+  HERMES_PROFILE_ROOT: ${HERMES_PROFILE_ROOT:-./.data/hermes/profiles}
+  HERMES_PROFILE_PORT_START: ${HERMES_PROFILE_PORT_START:-8700}
+  HERMES_PROFILE_PORT_END: ${HERMES_PROFILE_PORT_END:-8999}
+  HERMES_DEFAULT_MODEL: ${HERMES_DEFAULT_MODEL:-claude-sonnet-5}
+  HERMES_CONNECT_TIMEOUT_SECONDS: ${HERMES_CONNECT_TIMEOUT_SECONDS:-3}
+  HERMES_READ_TIMEOUT_SECONDS: ${HERMES_READ_TIMEOUT_SECONDS:-90}
+  HERMES_MAX_RESPONSE_BYTES: ${HERMES_MAX_RESPONSE_BYTES:-262144}
+  HERMES_MAX_CONTEXT_CHARS: ${HERMES_MAX_CONTEXT_CHARS:-12000}
+  HERMES_CIRCUIT_FAILURE_THRESHOLD: ${HERMES_CIRCUIT_FAILURE_THRESHOLD:-3}
+  HERMES_CIRCUIT_RECOVERY_SECONDS: ${HERMES_CIRCUIT_RECOVERY_SECONDS:-30}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_FORMAT: ${LOG_FORMAT:-json}
   ARTIFACT_ROOT: /app/.data/exports
@@ -157,15 +190,32 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    volumes:
+      - exports_data:/app/.data/exports
+      - hermes_staging_data:/data/hermes
 
   worker:
     <<: *api-service
     command: ["python", "-m", "app.jobs.worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.jobs.health", "worker"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    stop_grace_period: 45s
     profiles: ["async"]
 
   scheduler:
     <<: *api-service
     command: ["python", "-m", "app.jobs.scheduler"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.jobs.health", "scheduler"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    stop_grace_period: 30s
     profiles: ["async"]
 
   migrate:
@@ -242,9 +292,8 @@ services:
     volumes:
       - backups_data:/backups
       - exports_data:/source/exports
-      # Reserved for the deferred Hermes runtime. Keeping it in the backup
-      # contract now prevents profile state from being omitted when enabled.
-      - hermes_data:/source/hermes
+      - hermes_data:/source/hermes-runtime
+      - hermes_staging_data:/source/hermes-staging
     networks:
       - data
     restart: "no"
@@ -271,3 +320,4 @@ volumes:
   exports_data:
   backups_data:
   hermes_data:
+  hermes_staging_data:

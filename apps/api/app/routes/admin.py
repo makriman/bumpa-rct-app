@@ -20,6 +20,13 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
+from app.providers.bumpa import BumpaClient, BumpaProviderError
+from app.providers.hermes import (
+    HermesError,
+    HermesProfileError,
+    provision_profile,
+    refresh_profile_status,
+)
 from app.providers.local import local_profile_key
 from app.schemas import BumpaConnectionCreate, PhoneCreate, TenantCreate, TenantUpdate, UserCreate
 from app.services.audit import audit
@@ -184,6 +191,14 @@ def connect_bumpa(
             status_code=422,
             detail="Local Bumpa provider is forbidden in production",
         )
+    if payload.provider == "bumpa" and settings.bumpa_backend == "bumpa":
+        try:
+            with BumpaClient(payload.api_key, payload.scope_type, payload.scope_id) as provider:
+                provider.verify()
+        except (BumpaProviderError, ValueError) as exc:
+            raise HTTPException(
+                status_code=422, detail="Bumpa connection verification failed"
+            ) from exc
     connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
     encrypted = FieldCipher(settings.field_encryption_key).encrypt(payload.api_key)
     if connection:
@@ -226,14 +241,46 @@ def create_profile(
     settings: Settings = Depends(get_settings),
 ) -> dict:
     tenant = _tenant(db, tenant_id)
-    if settings.agent_backend != "mock":
+    if settings.agent_backend == "disabled":
         raise HTTPException(
             status_code=503,
-            detail="Hermes profile provisioning is not configured yet",
+            detail="Hermes profile provisioning is disabled",
         )
     existing = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant.id))
     if existing:
+        if settings.agent_backend == "hermes" and existing.provider == "hermes":
+            try:
+                refresh_profile_status(existing, settings)
+            except HermesError:
+                existing.status = "degraded"
+            db.commit()
         return {"id": existing.id, "profile_name": existing.profile_name, "status": existing.status}
+    if settings.agent_backend == "hermes":
+        try:
+            profile = provision_profile(db, tenant, settings)
+        except HermesProfileError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        audit(
+            db,
+            actor_user_id=principal.user.id,
+            tenant_id=tenant.id,
+            action="hermes.profile.provisioned",
+            resource_type="hermes_profile",
+            resource_id=profile.id,
+            after={
+                "profile_name": profile.profile_name,
+                "provider": "hermes",
+                "api_port": profile.api_port,
+                "status": profile.status,
+            },
+        )
+        db.commit()
+        return {
+            "id": profile.id,
+            "profile_name": profile.profile_name,
+            "status": profile.status,
+        }
     profile = HermesProfile(
         tenant_id=tenant.id,
         profile_name=f"tenant_{tenant.slug.replace('-', '_')}_{tenant.id[:8]}",

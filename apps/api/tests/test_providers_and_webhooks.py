@@ -135,7 +135,7 @@ def test_whatsapp_delivery_status_is_recorded(client: TestClient) -> None:
 
 
 def test_failed_webhook_event_remains_retriable(client: TestClient, monkeypatch) -> None:
-    from app.routes import whatsapp
+    from app.services import whatsapp
 
     body = _webhook_payload("wa-retry-1", "2348012345678", "Retry safely")
     original = whatsapp.handle_chat

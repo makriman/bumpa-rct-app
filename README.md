@@ -6,9 +6,11 @@ permissioned research portal. FastAPI is the control plane; Next.js provides the
 four host-routed surfaces; Postgres provides durable state and Redis provides the
 coordination foundation for queued work.
 
-The repository currently supports credential-free local development through
-deterministic mock adapters. Live WhatsApp Cloud API, Bumpa, Claude/Hermes and
-DigitalOcean activation are deliberately separate deployment gates.
+The repository supports credential-free local development through deterministic
+mock adapters and production adapters for WhatsApp Cloud API, Bumpa, and
+Claude-through-Hermes. Production activation remains an evidence gate: a provider
+is not considered live until its credentials, external account state, canary, and
+operating checks pass for the exact release.
 
 ## Local quick start
 
@@ -48,7 +50,7 @@ tests          Cross-service fixtures and system-test documentation
 
 ## Security boundary
 
-Only Caddy publishes host ports. API, worker and future Hermes services attach to
+Only Caddy publishes host ports. API, worker and Hermes services attach to
 an explicit egress network for provider access; Postgres and Redis remain on a
 private data network. Provider secrets are server-side only. Production startup
 uses `.env.production`, stored on the host with mode `0600`, and fails when required
@@ -69,8 +71,8 @@ secrets retain local defaults.
 
 ## Status
 
-The local gates pass: backend lint/typing plus 29 tests at 91%+ branch-aware
-coverage, frontend lint/typing/build plus 52 unit/component tests, eight
+The local gates pass: backend lint/typing plus 111 tests at 86%+ branch-aware
+coverage, frontend lint/typing/build plus 78 unit/component tests, ten
 desktop/mobile Playwright checks, full Docker image and Compose startup, a
 non-bypass Postgres RLS probe, and a checksum-verified
 Postgres/exports/reserved-Hermes backup and restore drill. `make compose-smoke`
@@ -80,6 +82,9 @@ container and network it created. Production UI data comes from the authenticate
 APIs; synthetic fixtures require an explicit demo build and remain visibly
 labelled. Treat `docs/verification.md` as the evidence source of truth.
 
-Live Bumpa, WhatsApp, and Claude-through-Hermes claims are separately deferred until
-their credentials, adapters, and verification rows are complete. The deployable
-provider-disabled baseline never substitutes local mocks for those integrations.
+The live adapters, durable worker/scheduler runtime, transactional outbox, Redis
+rate limits, tenant profile lifecycle, and scoped secret mounts are implemented and
+contract-tested. The deployable provider-disabled mode remains available for safe
+infrastructure verification and never substitutes local mocks for a live provider.
+See the verification ledger for the distinction between implemented, canaried,
+and production-active capabilities.

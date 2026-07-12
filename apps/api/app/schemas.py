@@ -145,3 +145,33 @@ class ReportView(ORMModel):
     summary: str | None
     created_at: datetime
     finished_at: datetime | None
+
+
+class ResearchConversationEventView(BaseModel):
+    id: str
+    user_pseudonym: str | None
+    channel: str
+    event_type: str
+    redacted_text: str | None
+    primary_intent: str | None
+    business_function: str | None
+    ai_help_type: str | None
+    complexity: str | None
+    bumpa_data_used: str | None
+    created_at: datetime
+
+
+class ResearchConversationSummaryView(BaseModel):
+    id: str
+    tenant_pseudonym: str | None
+    participant_pseudonyms: list[str]
+    channel: str
+    event_count: int
+    primary_intents: dict[str, int]
+    latest_redacted_text: str | None
+    started_at: datetime
+    last_activity_at: datetime
+
+
+class ResearchConversationDetailView(ResearchConversationSummaryView):
+    events: list[ResearchConversationEventView]

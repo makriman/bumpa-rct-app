@@ -23,7 +23,7 @@ SENSITIVE_ORDER_FIELDS = {
 # rules. Keep these patterns here as a reusable, defence-in-depth boundary for
 # every researcher-facing read and export.
 PHONE_RE = re.compile(r"(?<!\w)\+?\d[\d\s().-]{7,}\d(?!\w)")
-EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}(?![\w-])")
 URL_RE = re.compile(r"(?i)(?:https?://|www\.)[^\s<>{}\[\]\"']+")
 WHATSAPP_MESSAGE_ID_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])wamid\.[A-Za-z0-9_=+./-]{6,}")
 LABELLED_WHATSAPP_ID_RE = re.compile(

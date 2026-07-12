@@ -21,12 +21,36 @@ value_for() {
 }
 for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
-  API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE \
+  API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
   WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
   value="$(value_for "$key")"
   printf -v "$key" '%s' "$value"
   export "${key?}"
+done
+
+if [[ ! -d "$SECRETS_DIR" || -L "$SECRETS_DIR" ]]; then
+  echo "SECRETS_DIR must be a real directory" >&2
+  exit 2
+fi
+secret_dir_permissions="$(stat -c '%a' "$SECRETS_DIR" 2>/dev/null || stat -f '%Lp' "$SECRETS_DIR")"
+if [[ "$secret_dir_permissions" != "700" ]]; then
+  echo "SECRETS_DIR permissions must be 0700; found $secret_dir_permissions" >&2
+  exit 2
+fi
+for secret_name in \
+  meta_app_secret meta_system_user_access_token meta_webhook_verify_token \
+  hermes_anthropic_api_key; do
+  secret_path="$SECRETS_DIR/$secret_name"
+  if [[ ! -f "$secret_path" || -L "$secret_path" || ! -s "$secret_path" ]]; then
+    echo "Required production secret file is missing or unsafe: $secret_name" >&2
+    exit 2
+  fi
+  secret_permissions="$(stat -c '%a' "$secret_path" 2>/dev/null || stat -f '%Lp' "$secret_path")"
+  if [[ "$secret_permissions" != "600" ]]; then
+    echo "Production secret file permissions must be 0600: $secret_name" >&2
+    exit 2
+  fi
 done
 
 if [[ -z "${DEPLOY_REF:-}" || -z "${IMAGE_TAG:-}" || -z "${INFRA_IMAGE_TAG:-}" ]]; then
@@ -46,6 +70,17 @@ if [[ "$IMAGE_TAG" != "sha-$deploy_commit" ]]; then
   exit 2
 fi
 git checkout --detach "$deploy_commit"
+
+for unit_name in bumpabestie-backup.service bumpabestie-backup.timer; do
+  repository_unit="infra/systemd/$unit_name"
+  installed_unit="/etc/systemd/system/$unit_name"
+  if [[ ! -f "$installed_unit" || ! -r "$installed_unit" ]] || \
+    ! cmp --silent "$repository_unit" "$installed_unit"; then
+    echo "Installed systemd unit is missing or stale: $unit_name" >&2
+    echo "Install the reviewed unit as root and run systemctl daemon-reload before retrying" >&2
+    exit 2
+  fi
+done
 
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
 
@@ -81,11 +116,22 @@ running_image() {
 
 previous_api_image="$(running_image api)"
 previous_web_image="$(running_image web)"
+previous_hermes_image="$(running_image hermes)"
+previous_worker_running=0
+previous_scheduler_running=0
+previous_hermes_running=0
 previous_writer_containers=()
-for service in api web worker scheduler caddy; do
+for service in api web worker scheduler hermes caddy; do
   container_id="$("${compose[@]}" ps --status running -q "$service")"
   if [[ -n "$container_id" ]]; then
     previous_writer_containers+=("$container_id")
+    if [[ "$service" == "worker" ]]; then
+      previous_worker_running=1
+    elif [[ "$service" == "scheduler" ]]; then
+      previous_scheduler_running=1
+    elif [[ "$service" == "hermes" ]]; then
+      previous_hermes_running=1
+    fi
   fi
 done
 previous_application_revision=""
@@ -109,7 +155,7 @@ rollback() {
   echo "Deployment of $deploy_commit failed." >&2
   rm -f .deployed-revision.tmp.* .deployed-release.json.tmp.*
   "${compose[@]}" ps >&2 || true
-  "${compose[@]}" logs --no-color --tail=200 caddy api web postgres redis >&2 || true
+  "${compose[@]}" logs --no-color --tail=200 caddy api web worker scheduler hermes postgres redis >&2 || true
 
   if ((writers_quiesced && !deployment_started && ${#previous_writer_containers[@]} > 0)); then
     echo "Restarting the previously running application after pre-deployment failure." >&2
@@ -125,14 +171,28 @@ rollback() {
     fi
   elif ((deployment_started)) \
     && [[ -n "$previous_api_image" && -n "$previous_web_image" ]]; then
-    echo "Attempting API and web rollback while retaining forward-only infrastructure." >&2
+    echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
     export API_IMAGE="$previous_api_image"
     export WEB_IMAGE="$previous_web_image"
-    "${compose[@]}" pull web api
+    rollback_services=(api web caddy)
+    rollback_images=(api web)
+    if ((previous_hermes_running)) && [[ -n "$previous_hermes_image" ]]; then
+      export HERMES_IMAGE="$previous_hermes_image"
+      rollback_services+=(hermes)
+      rollback_images+=(hermes)
+    else
+      "${compose[@]}" rm -f hermes 2>/dev/null || true
+    fi
+    "${compose[@]}" pull "${rollback_images[@]}"
     "${compose[@]}" up --no-deps --force-recreate \
       --abort-on-container-exit --exit-code-from caddy-init caddy-init
-    "${compose[@]}" up -d --no-deps api web caddy
+    if ((previous_worker_running && previous_scheduler_running)); then
+      rollback_services+=(worker scheduler)
+    else
+      "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
+    fi
+    "${compose[@]}" --profile async up -d --no-deps "${rollback_services[@]}"
     SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
     rollback_result=$?
     set -e
@@ -148,7 +208,7 @@ rollback() {
 }
 trap rollback EXIT
 
-"${compose[@]}" --profile tools pull caddy postgres redis web api backup
+"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes
 
 verify_image_revision() {
   local image="$1"
@@ -168,6 +228,7 @@ verify_image_revision "$WEB_IMAGE" "$deploy_commit" web
 verify_image_revision "$CADDY_IMAGE" "$infra_commit" caddy
 verify_image_revision "$POSTGRES_IMAGE" "$infra_commit" postgres
 verify_image_revision "$BACKUP_IMAGE" "$infra_commit" backup
+verify_image_revision "$HERMES_IMAGE" "$deploy_commit" hermes
 
 target_pg_version="$(docker run --rm --entrypoint postgres "$POSTGRES_IMAGE" --version)"
 target_pg_version="${target_pg_version##* }"
@@ -185,7 +246,7 @@ fi
 
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
 writers_quiesced=1
-"${compose[@]}" stop --timeout 60 caddy web api worker scheduler
+"${compose[@]}" stop --timeout 60 caddy web api worker scheduler hermes
 if [[ -n "$postgres_container" ]]; then
   running_pg_version_num="$(
     docker exec "$postgres_container" psql \
@@ -231,7 +292,6 @@ if [[ -n "$postgres_container" ]]; then
 fi
 
 deployment_started=1
-"${compose[@]}" rm -f worker scheduler 2>/dev/null || true
 "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
 docker exec \
@@ -240,10 +300,13 @@ docker exec \
   --env "APP_POSTGRES_PASSWORD=$(value_for APP_POSTGRES_PASSWORD)" \
   "$postgres_container" /docker-entrypoint-initdb.d/10-app-role.sh
 "${compose[@]}" --profile tools run --rm migrate
-"${compose[@]}" up -d --wait --wait-timeout 240 --remove-orphans api web caddy
+"${compose[@]}" up -d --wait --wait-timeout 180 hermes
+ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
+"${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \
+  api web worker scheduler hermes caddy
 SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
 
-for service in caddy postgres redis api web; do
+for service in caddy postgres redis api web worker scheduler hermes; do
   container_id="$("${compose[@]}" ps -q "$service")"
   if [[ -z "$container_id" ]]; then
     echo "Required service has no container: $service" >&2
@@ -256,7 +319,7 @@ for service in caddy postgres redis api web; do
     exit 1
   fi
 done
-for service in postgres redis api web; do
+for service in postgres redis api web worker scheduler hermes; do
   container_id="$("${compose[@]}" ps -q "$service")"
   health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
   if [[ "$health" != "healthy" ]]; then
@@ -298,11 +361,14 @@ jq --null-input \
   --arg image_tag "$IMAGE_TAG" \
   --arg infra_image_tag "$INFRA_IMAGE_TAG" \
   --arg api "$(running_image_ref api)" \
+  --arg worker "$(running_image_ref worker)" \
+  --arg scheduler "$(running_image_ref scheduler)" \
   --arg web "$(running_image_ref web)" \
   --arg caddy "$(running_image_ref caddy)" \
   --arg postgres "$(running_image_ref postgres)" \
   --arg redis "$(running_image_ref redis)" \
   --arg backup "$BACKUP_IMAGE" \
+  --arg hermes "$(running_image_ref hermes)" \
   '{
     deployed_at: $deployed_at,
     revision: $revision,
@@ -310,11 +376,14 @@ jq --null-input \
     infra_image_tag: $infra_image_tag,
     images: {
       api: $api,
+      worker: $worker,
+      scheduler: $scheduler,
       web: $web,
       caddy: $caddy,
       postgres: $postgres,
       redis: $redis,
-      backup: $backup
+      backup: $backup,
+      hermes: $hermes
     }
   }' > "$release_tmp"
 chmod 0600 "$revision_tmp" "$release_tmp"

@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 !.env.*.example
+/bumpa bestie secrets.md
+/.secrets/
+/.evidence/
 *.pem
 *.key
 *.p12

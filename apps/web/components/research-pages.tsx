@@ -1,18 +1,22 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { apiRequest, demoFallbackEnabled } from "@/lib/api";
+import { apiRequest } from "@/lib/api";
 import {
   countValues,
   formatDate,
   titleCase,
   type Report,
+  type ResearchConversationDetail,
+  type ResearchConversationSummary,
   type ResearchEvent,
   type ResearchOverviewData,
   type Taxonomy,
 } from "@/lib/platform-data";
 import {
   previewReports,
+  previewResearchConversationDetails,
+  previewResearchConversations,
   previewResearchEvents,
   previewResearchOverview,
   previewTaxonomy,
@@ -442,22 +446,190 @@ export function Questions() {
 }
 
 export function Conversations() {
+  const resource = useApiResource<ResearchConversationSummary[]>(
+    "/research/conversations",
+    previewResearchConversations,
+  );
+  const [selected, setSelected] = useState<ResearchConversationDetail | null>(
+    null,
+  );
+  const [detailStatus, setDetailStatus] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+  const [detailError, setDetailError] = useState<string | null>(null);
+
+  async function openConversation(conversation: ResearchConversationSummary) {
+    setSelected(null);
+    setDetailError(null);
+    setDetailStatus("loading");
+    if (resource.source === "demo") {
+      const fixture = previewResearchConversationDetails[conversation.id];
+      if (fixture) {
+        setSelected(fixture);
+        setDetailStatus("idle");
+        return;
+      }
+    }
+    try {
+      const detail = await apiRequest<ResearchConversationDetail>(
+        `/research/conversations/${encodeURIComponent(conversation.id)}`,
+      );
+      setSelected(detail);
+      setDetailStatus("idle");
+    } catch (reason) {
+      setDetailError(
+        reason instanceof Error
+          ? reason.message
+          : "The conversation could not be loaded.",
+      );
+      setDetailStatus("error");
+    }
+  }
+
   return (
     <AppShell surface="research" title="Conversation log">
       <PageHeader
         title="Conversation log"
-        description="Multi-turn research requires a dedicated pseudonymised conversation endpoint."
+        description="Explore consented, pseudonymised research events grouped into multi-turn conversations."
       />
-      <StatePanel
-        type="empty"
-        title="Conversation summaries are not available"
-        description="The research API currently exposes event-level records without a conversation identifier. This page intentionally does not reconstruct or invent conversations from unrelated events."
-        action={
-          <button className="button button-secondary" disabled>
-            Open conversation unavailable
-          </button>
-        }
+      <LiveDataBanner
+        label="research conversations"
+        source={resource.source}
+        status={resource.status}
+        error={resource.error}
+        count={resource.data?.length}
       />
+      <div className="alert alert-info">
+        Only consented, redacted research events are shown. Tenant, participant,
+        conversation and event identifiers are pseudonymised.
+      </div>
+      {resource.status !== "ready" ? (
+        <ResourceState
+          status={resource.status}
+          error={resource.error}
+          retry={resource.reload}
+        />
+      ) : !resource.data?.length ? (
+        <ResourceState
+          status="ready"
+          error={null}
+          retry={resource.reload}
+          empty="No consented conversations yet"
+        />
+      ) : (
+        <section className="card table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Last activity</th>
+                <th>Conversation</th>
+                <th>Tenant</th>
+                <th>Channel</th>
+                <th>Events</th>
+                <th>Latest redacted event</th>
+                <th>Top intent</th>
+                <th>
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {resource.data.map((conversation) => (
+                <tr key={conversation.id}>
+                  <td>{formatDate(conversation.last_activity_at)}</td>
+                  <td className="table-primary">{conversation.id}</td>
+                  <td>{conversation.tenant_pseudonym ?? "Unavailable"}</td>
+                  <td>
+                    <Badge>{titleCase(conversation.channel)}</Badge>
+                  </td>
+                  <td>{conversation.event_count.toLocaleString()}</td>
+                  <td className="table-primary" style={{ maxWidth: 340 }}>
+                    {conversation.latest_redacted_text ?? "Text unavailable"}
+                  </td>
+                  <td>
+                    {titleCase(Object.keys(conversation.primary_intents)[0])}
+                  </td>
+                  <td>
+                    <button
+                      className="button button-ghost button-small"
+                      aria-label={`Open ${conversation.id}`}
+                      onClick={() => void openConversation(conversation)}
+                    >
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {detailStatus === "loading" && (
+        <div style={{ marginTop: 18 }}>
+          <StatePanel type="loading" />
+        </div>
+      )}
+      {detailStatus === "error" && (
+        <div style={{ marginTop: 18 }}>
+          <StatePanel
+            type="error"
+            title="Conversation unavailable"
+            description={detailError ?? undefined}
+          />
+        </div>
+      )}
+      {selected && (
+        <Modal
+          title="Pseudonymised conversation"
+          onClose={() => setSelected(null)}
+          actions={
+            <button
+              className="button button-secondary"
+              onClick={() => setSelected(null)}
+            >
+              Close
+            </button>
+          }
+        >
+          <div className="alert alert-info">
+            Research-safe event timeline · raw identities and raw message text
+            are not available in this view.
+          </div>
+          {[
+            ["Conversation pseudonym", selected.id],
+            ["Tenant pseudonym", selected.tenant_pseudonym ?? "Unavailable"],
+            [
+              "Participant pseudonyms",
+              selected.participant_pseudonyms.join(", ") || "None",
+            ],
+            ["Channel", titleCase(selected.channel)],
+            ["Event count", String(selected.event_count)],
+            ["Started", formatDate(selected.started_at)],
+            ["Last activity", formatDate(selected.last_activity_at)],
+          ].map(([label, value]) => (
+            <div className="detail-row" key={label}>
+              <span className="detail-label">{label}</span>
+              <span className="detail-value">{value}</span>
+            </div>
+          ))}
+          <div className="timeline" style={{ marginTop: 22 }}>
+            {selected.events.map((event) => (
+              <div className="timeline-item" key={event.id}>
+                <strong>
+                  {titleCase(event.primary_intent)} ·{" "}
+                  {formatDate(event.created_at)}
+                </strong>
+                <p>{event.redacted_text ?? "Text unavailable"}</p>
+                <span className="table-secondary">
+                  {event.user_pseudonym ?? "Participant unavailable"} ·{" "}
+                  {titleCase(event.ai_help_type)} ·{" "}
+                  {titleCase(event.bumpa_data_used)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
     </AppShell>
   );
 }
@@ -731,7 +903,7 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
       resource.replace([created, ...(resource.data ?? [])]);
       setModal(false);
       setToast(
-        `${mode === "reports" ? "Report" : "Export"} generated by the local report adapter.`,
+        `${mode === "reports" ? "Report" : "Export"} queued. Its status will appear in the artifact list shortly.`,
       );
     } catch (reason) {
       setError(
@@ -774,13 +946,11 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
         actions={
           <button
             className="button button-primary"
-            disabled={!demoFallbackEnabled || resource.source !== "live"}
+            disabled={resource.source !== "live"}
             title={
-              !demoFallbackEnabled
-                ? "A production report queue adapter is not configured."
-                : resource.source !== "live"
-                  ? "Artifact creation requires a reachable local API."
-                  : undefined
+              resource.source !== "live"
+                ? "Artifact creation requires a reachable live API."
+                : undefined
             }
             onClick={() => setModal(true)}
           >
@@ -795,13 +965,6 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
         count={resource.data?.length}
         error={resource.error}
       />
-      {!demoFallbackEnabled && (
-        <div className="alert alert-warning">
-          Artifact creation is disabled because the production report queue
-          adapter is not configured. Existing artifact metadata remains
-          readable.
-        </div>
-      )}
       {error && (
         <div className="alert alert-danger" role="alert">
           {error}
@@ -917,8 +1080,8 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
             </select>
           </div>
           <div className="alert alert-info">
-            Local generation is synchronous and consent-filtered. Production
-            generation remains disabled until a durable queue is configured.
+            Requests are consent-filtered and audit-logged. In production,
+            generation runs on the durable report queue.
           </div>
         </Modal>
       )}

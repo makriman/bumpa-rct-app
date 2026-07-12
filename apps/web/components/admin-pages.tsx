@@ -1161,6 +1161,20 @@ type OnboardingForm = {
   ownerPhone: string;
   ownerEmail: string;
   phoneLabel: string;
+  bumpaApiKey: string;
+  bumpaScopeId: string;
+};
+
+type BumpaConnectionResult = {
+  id: string;
+  status: string;
+  provider: string;
+};
+
+type HermesProfileResult = {
+  id: string;
+  profile_name: string;
+  status: string;
 };
 
 export function Onboarding() {
@@ -1182,6 +1196,8 @@ export function Onboarding() {
     ownerPhone: "",
     ownerEmail: "",
     phoneLabel: "Owner",
+    bumpaApiKey: "",
+    bumpaScopeId: "",
   });
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [owner, setOwner] = useState<{
@@ -1189,6 +1205,13 @@ export function Onboarding() {
     membership_id: string;
   } | null>(null);
   const [phoneCreated, setPhoneCreated] = useState(false);
+  const [bumpaScopeType, setBumpaScopeType] = useState<
+    "business_id" | "location_id"
+  >("business_id");
+  const [bumpaConnection, setBumpaConnection] =
+    useState<BumpaConnectionResult | null>(null);
+  const [hermesProfile, setHermesProfile] =
+    useState<HermesProfileResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const update = (key: keyof OnboardingForm, value: string) =>
@@ -1238,8 +1261,34 @@ export function Onboarding() {
         });
         setPhoneCreated(true);
       }
+      if (step === 3 && tenant && !bumpaConnection) {
+        const created = await apiRequest<BumpaConnectionResult>(
+          `/admin/tenants/${tenant.id}/bumpa`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              api_key: form.bumpaApiKey,
+              scope_type: bumpaScopeType,
+              scope_id: form.bumpaScopeId,
+              provider: "bumpa",
+            }),
+          },
+        );
+        setBumpaConnection(created);
+        setForm((current) => ({ ...current, bumpaApiKey: "" }));
+      }
+      if (step === 4 && tenant && !hermesProfile) {
+        const created = await apiRequest<HermesProfileResult>(
+          `/admin/tenants/${tenant.id}/hermes-profile`,
+          { method: "POST" },
+        );
+        setHermesProfile(created);
+      }
       setStep((current) => Math.min(current + 1, steps.length - 1));
     } catch (reason) {
+      if (step === 3) {
+        setForm((current) => ({ ...current, bumpaApiKey: "" }));
+      }
       setError(
         reason instanceof Error
           ? reason.message
@@ -1406,34 +1455,112 @@ export function Onboarding() {
             </>
           )}
           {step === 3 && (
-            <StatePanel
-              type="empty"
-              title="Bumpa activation is the next integration"
-              description="The tenant is ready, but production credentials and the live adapter are intentionally not configured. No connection is claimed."
-              action={
-                <button className="button button-secondary" disabled>
-                  Connect Bumpa unavailable
-                </button>
-              }
-            />
+            <div aria-busy={busy}>
+              {bumpaConnection ? (
+                <div className="alert alert-success" role="status">
+                  Bumpa accepted the write-only credential. Connection status:{" "}
+                  {titleCase(bumpaConnection.status)}.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-2">
+                    <div className="field">
+                      <label htmlFor="bumpa-api-key">Bumpa API key</label>
+                      <input
+                        id="bumpa-api-key"
+                        className="input"
+                        type="password"
+                        required
+                        autoComplete="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        disabled={busy}
+                        aria-describedby="bumpa-key-help"
+                        value={form.bumpaApiKey}
+                        onChange={(event) =>
+                          update("bumpaApiKey", event.target.value)
+                        }
+                      />
+                      <span className="field-help" id="bumpa-key-help">
+                        Write only. The key is encrypted by the API, never
+                        returned, and cleared here after every attempt.
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="bumpa-scope-type">Account scope</label>
+                      <select
+                        id="bumpa-scope-type"
+                        className="select"
+                        disabled={busy}
+                        value={bumpaScopeType}
+                        onChange={(event) =>
+                          setBumpaScopeType(
+                            event.target.value as "business_id" | "location_id",
+                          )
+                        }
+                      >
+                        <option value="business_id">Business</option>
+                        <option value="location_id">Location</option>
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="bumpa-scope-id">
+                        {bumpaScopeType === "business_id"
+                          ? "Business ID"
+                          : "Location ID"}
+                      </label>
+                      <input
+                        id="bumpa-scope-id"
+                        className="input"
+                        required
+                        autoComplete="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        disabled={busy}
+                        value={form.bumpaScopeId}
+                        onChange={(event) =>
+                          update("bumpaScopeId", event.target.value)
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div className="alert alert-info">
+                    Saving asks the production API to verify this credential
+                    directly with Bumpa before activating the connection.
+                  </div>
+                </>
+              )}
+            </div>
           )}
           {step === 4 && (
-            <StatePanel
-              type="empty"
-              title="Hermes activation is the next integration"
-              description="The tenant-specific Hermes profile will be provisioned after the shared deployment is verified. No local simulator is presented as a live agent."
-              action={
-                <button className="button button-secondary" disabled>
-                  Provision Hermes unavailable
-                </button>
-              }
-            />
+            <div aria-busy={busy}>
+              {hermesProfile ? (
+                <div className="alert alert-success" role="status">
+                  Hermes profile {hermesProfile.profile_name} reports{" "}
+                  {titleCase(hermesProfile.status)}.
+                </div>
+              ) : (
+                <>
+                  <h3>Provision an isolated agent profile</h3>
+                  <p style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>
+                    The API allocates this tenant its own authenticated Hermes
+                    runtime profile. No model credential or profile key is
+                    exposed to the browser.
+                  </p>
+                  <div className="alert alert-info">
+                    Provisioning can report as in progress until the private
+                    runtime health check succeeds. The exact state is retained
+                    in the final review.
+                  </div>
+                </>
+              )}
+            </div>
           )}
           {step === 5 && (
             <div>
               <div className="alert alert-success">
-                Tenant, owner membership, and approved identity are persisted.
-                Provider integrations remain explicitly pending.
+                Onboarding records and provider setup requests are persisted.
+                The states below are reported by the API.
               </div>
               {[
                 ["Tenant", tenant?.name ?? "Not created"],
@@ -1442,8 +1569,18 @@ export function Onboarding() {
                   "WhatsApp identity",
                   phoneCreated ? "Recorded" : "Not recorded",
                 ],
-                ["Bumpa", "Pending integration"],
-                ["Hermes", "Pending integration"],
+                [
+                  "Bumpa",
+                  bumpaConnection
+                    ? `${titleCase(bumpaConnection.status)} · ${titleCase(bumpaConnection.provider)}`
+                    : "Not connected",
+                ],
+                [
+                  "Hermes",
+                  hermesProfile
+                    ? `${titleCase(hermesProfile.status)} · ${hermesProfile.profile_name}`
+                    : "Not provisioned",
+                ],
               ].map(([label, value]) => (
                 <div className="detail-row" key={label}>
                   <span className="detail-value">{label}</span>
@@ -1474,15 +1611,27 @@ export function Onboarding() {
                   busy ||
                   (step === 0 && (!form.name || !form.slug)) ||
                   (step === 1 && (!form.ownerName || !form.ownerPhone)) ||
-                  (step === 2 && (!tenant || !owner))
+                  (step === 2 && (!tenant || !owner)) ||
+                  (step === 3 &&
+                    (!tenant ||
+                      (!bumpaConnection &&
+                        (!form.bumpaApiKey || !form.bumpaScopeId)))) ||
+                  (step === 4 && !tenant)
                 }
                 onClick={() => void continueStep()}
+                aria-busy={busy}
               >
                 {busy
                   ? "Saving…"
-                  : step >= 3
-                    ? "Continue with integration pending →"
-                    : "Save and continue →"}
+                  : step === 3
+                    ? bumpaConnection
+                      ? "Continue →"
+                      : "Connect and verify Bumpa →"
+                    : step === 4
+                      ? hermesProfile
+                        ? "Continue →"
+                        : "Provision Hermes profile →"
+                      : "Save and continue →"}
               </button>
             ) : tenant ? (
               <Link
