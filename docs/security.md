@@ -83,9 +83,10 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Publish run 29194814472 completed
-that gate for all five images deployed at release
-`54bb8e9b29295171d65972e094e508d25a7bc53d`.
+and SBOM, then scans each exact registry digest. Publish run 29205487124 completed
+that gate for all six application/infrastructure images deployed at release
+`41935d67696fee45b184a65c0a9bf39e0708ae89`; Redis remains pinned to its
+reviewed upstream digest.
 
 ## Research governance
 
