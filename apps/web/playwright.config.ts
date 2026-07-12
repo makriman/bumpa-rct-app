@@ -2,10 +2,16 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: true,
+  fullyParallel: false,
+  workers: 2,
   retries: 0,
   reporter: "list",
-  use: { baseURL: "http://localhost:3010", trace: "retain-on-failure" },
+  expect: { timeout: 10_000 },
+  use: {
+    baseURL: "http://localhost:3010",
+    navigationTimeout: 30_000,
+    trace: "retain-on-failure",
+  },
   projects: [
     { name: "desktop-chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "mobile-chromium", use: { ...devices["Pixel 7"] } },

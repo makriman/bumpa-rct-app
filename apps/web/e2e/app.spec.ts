@@ -8,6 +8,7 @@ test("public lander presents the product and reaches login", async ({
     page.getByRole("heading", { name: /Know your business/i }),
   ).toBeVisible();
   await page.getByRole("link", { name: /Talk to your Bestie/i }).click();
+  await expect(page).toHaveURL(/\/login$/);
   await expect(
     page.getByRole("heading", { name: "Welcome back." }),
   ).toBeVisible();

@@ -46,9 +46,9 @@ def test_root_environment_aliases_and_production_guards() -> None:
     with pytest.raises(ValidationError, match="Production secrets"):
         Settings(
             app_env="production",
-            jwt_secret="local-only-test-jwt-secret",
-            otp_secret="local-only-test-otp-secret",
-            field_encryption_key="local-only-test-field-key",
+            jwt_secret="local-only-test-jwt-secret",  # noqa: S106 - weak fixture
+            otp_secret="local-only-test-otp-secret",  # noqa: S106 - weak fixture
+            field_encryption_key="local-only-test-field-key",  # noqa: S106 - weak fixture
             expose_local_otp=False,
             seed_demo_data=False,
         )
