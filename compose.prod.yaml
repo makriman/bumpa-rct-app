@@ -295,9 +295,27 @@ services:
         max-size: 20m
         max-file: "5"
 
+  backup-data-init:
+    image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
+    build: !reset null
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/init-backup-volume"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_READ_SEARCH", "FOWNER"]
+    volumes:
+      - backups_data:/backups
+      - ./scripts/init_backup_volume.sh:/usr/local/bin/init-backup-volume:ro
+    restart: "no"
+    profiles: ["tools"]
+
   backup:
     image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     build: !reset null
+    user: "0:0"
     entrypoint: ["/usr/local/bin/backup.sh"]
     environment:
       APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
@@ -325,6 +343,8 @@ services:
   restore:
     image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
     build: !reset null
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/restore.sh"]
     environment:
       APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
       BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:?Set immutable INFRA_IMAGE_TAG}

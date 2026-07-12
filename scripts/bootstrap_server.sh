@@ -25,7 +25,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
-apt-get install -y ca-certificates curl fail2ban git gnupg jq unattended-upgrades ufw
+apt-get install -y ca-certificates curl fail2ban git gnupg jq unattended-upgrades ufw util-linux
 
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -41,6 +41,7 @@ else
   usermod --append --groups docker bumpabestie
 fi
 install -d -m 0750 -o bumpabestie -g bumpabestie /opt/bumpabestie /opt/bumpabestie/releases
+install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie
 if [[ -f /root/.ssh/authorized_keys ]]; then
   install -d -m 0700 -o bumpabestie -g bumpabestie /home/bumpabestie/.ssh
   install -m 0600 -o bumpabestie -g bumpabestie \
@@ -66,7 +67,10 @@ if ! swapon --show --noheadings | grep -q .; then
   swapon /swapfile
   echo "/swapfile none swap sw 0 0" >> /etc/fstab
 fi
-echo "vm.swappiness=10" >/etc/sysctl.d/99-bumpabestie.conf
+printf '%s\n' \
+  'vm.overcommit_memory=1' \
+  'vm.swappiness=10' \
+  >/etc/sysctl.d/99-bumpabestie.conf
 sysctl --system >/dev/null
 
 ufw --force reset

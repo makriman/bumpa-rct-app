@@ -7,6 +7,33 @@ After=docker.service
 Type=oneshot
 User=bumpabestie
 WorkingDirectory=/opt/bumpabestie
+StateDirectory=bumpabestie
+StateDirectoryMode=0700
 ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh
 ExecStartPost=/opt/bumpabestie/scripts/offsite_backup.sh --env-file /opt/bumpabestie/.env.production
 Nice=10
+UMask=0077
+
+# The backup workflow needs the local Docker socket and the optional off-host
+# hook may need IPv4/IPv6. Everything else in this unit can remain sandboxed.
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RemoveIPC=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=read-only
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=

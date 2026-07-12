@@ -4,6 +4,13 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Deployment and scheduled backup both stop and resume application writers.
+# Serialize them before either workflow reads mutable checkout or environment
+# state so one workflow cannot restart services during the other's critical
+# section.
+source "$ROOT_DIR/scripts/maintenance_lock.sh"
+acquire_maintenance_lock
+
 if [[ ! -f .env.production ]]; then
   echo ".env.production is required and must have mode 0600" >&2
   exit 2
@@ -285,6 +292,7 @@ if [[ -n "$postgres_container" ]]; then
     exit 1
   fi
   echo "Creating a pre-deployment database and artifact backup."
+  "${compose[@]}" --profile tools run --rm --no-deps backup-data-init
   "${compose[@]}" --profile tools run --rm --no-deps \
     --env "APPLICATION_REVISION=${previous_application_revision:-unknown}" \
     --env "BACKUP_IMAGE_REF=$BACKUP_IMAGE" \
