@@ -7,6 +7,11 @@ Bumpa and Hermes/Claude are disabled; worker and scheduler are not production
 services yet. An incident procedure below marked **future activation** is a required
 procedure for the eventual adapter, not proof that the adapter exists.
 
+Revision `1929771abe932dfd44aad6763e1f5caff19fa833` is the already-live sslip.io
+baseline. The hardened five-image candidate is not production evidence until its
+final SHA is published, deployed and reverified; always read `.deployed-revision`
+and `.deployed-release.json` before applying a procedure.
+
 Never:
 
 - use local fixed OTPs, demo data or mock providers in production;
@@ -46,6 +51,7 @@ docker compose --env-file .env.production \
 curl -fsS https://api.bumpabestie.com/health/live | jq
 curl -fsS https://api.bumpabestie.com/health/ready | jq
 cat .deployed-revision
+jq . .deployed-release.json
 df -h
 ```
 
@@ -93,7 +99,8 @@ containing:
 - `exports.tar.gz` when the exports source exists;
 - `hermes.tar.gz` for the reserved Hermes volume, which is empty until Hermes is
   implemented;
-- `manifest.json`; and
+- `manifest.json` (format 2, including server/dump versions, migration revision,
+  application revision, backup image tag and exact backup image reference); and
 - `SHA256SUMS`.
 
 Retention deletes local backup directories older than `BACKUP_RETENTION_DAYS`.
@@ -104,14 +111,20 @@ This is not an off-host durability mechanism.
 ```bash
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
 "${compose[@]}" --profile tools run --rm backup
-"${compose[@]}" --profile tools run --rm --entrypoint sh backup -c \
+"${compose[@]}" --profile tools run --rm backup sh -c \
   'latest=$(find /backups -mindepth 1 -maxdepth 1 -type d | sort | tail -1); test -n "$latest"; cd "$latest"; sha256sum -c SHA256SUMS; cat manifest.json'
 ```
 
-Record the backup directory name, UTC time, revision, database name, checksum
-result, duration and operator. The manifest currently lists the reserved Hermes and
-exports components by contract; inspect archive presence/size rather than assuming
-they contain usable runtime state.
+Record the backup directory name, UTC time, revision, database name, server/dump
+versions, schema revision, backup image tag and exact digest reference, checksum
+result, duration and operator.
+The manifest lists the reserved Hermes and exports components by contract; inspect
+archive presence/size rather than assuming they contain usable runtime state.
+
+`caddy_data` and `caddy_config` are not included. Caddy can reissue certificates,
+but loss also discards its ACME account/state and can encounter issuer rate limits.
+Before real traffic, add an encrypted off-host volume snapshot or a separately
+reviewed Caddy-state backup and prove recovery.
 
 ### Off-host handoff
 
@@ -149,8 +162,9 @@ across downtime. Alert if no verified backup ID appears within the expected wind
 
 ### Important behavior
 
-Restore is destructive: `pg_restore --clean --if-exists` replaces database objects,
-and the exports/Hermes volume contents are cleared before archive extraction.
+Restore is destructive: the guarded restore resets the supported `public` schema,
+restores its database objects, reapplies the restricted application-role grants,
+and clears the exports/Hermes volume contents before archive extraction.
 `BACKUP_PATH` is a path **inside the backup container**, normally
 `/backups/<UTC-backup-id>`; a host path is not automatically mounted there.
 
@@ -168,7 +182,9 @@ For production, use the exact production Compose files below. Do not use
    `backups_data` volume. Record how it was staged.
 5. Verify `manifest.json`, `SHA256SUMS`, `postgres.dump` and expected archives.
 6. Confirm free space for the dump, extracted data and rollback material.
-7. Stop all writers. In the current baseline that means Caddy, web and API; future
+7. Confirm the restore PostgreSQL image has the same major as the manifest and the
+   backup client is not older than the recorded server.
+8. Stop all writers. In the current baseline that means Caddy, web and API; future
    workers/scheduler/Hermes must also be stopped.
 
 ### Restore command
@@ -178,10 +194,10 @@ compose=(docker compose --env-file .env.production -f compose.yaml -f compose.pr
 backup_id=YYYYMMDDTHHMMSSZ
 
 "${compose[@]}" stop caddy web api
-"${compose[@]}" --profile tools run --rm \
+"${compose[@]}" --profile restore run --rm \
   -e RESTORE_CONFIRM=restore-bumpabestie \
   -e BACKUP_PATH="/backups/$backup_id" \
-  --entrypoint /usr/local/bin/restore.sh backup
+  restore
 "${compose[@]}" --profile tools run --rm migrate
 "${compose[@]}" up -d caddy postgres redis api web
 SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh

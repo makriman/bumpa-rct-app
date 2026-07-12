@@ -8,9 +8,9 @@ webhook retry and delivery status tests. `make integration` exercises Postgres-b
 OTP, commerce sync, chat, research logging and PDF reports through the same-origin
 Next.js proxy. Redis-backed queues/rate limits, generated OpenAPI clients/MSW
 handlers and full browser E2E against every API surface remain unimplemented.
-Settings/admin/research screens remain partly synthetic previews, and an explicit
-demo-cookie path remains for credential-free local UI testing. Live providers are
-intentionally deferred.
+Production user/settings/admin/research views use authenticated APIs; an explicit,
+labelled demo-cookie path remains only for credential-free local UI testing. Live
+providers are intentionally deferred.
 
 The pre-integration production baseline uses `disabled` selectors for WhatsApp,
 Bumpa and agent providers. Provider-dependent routes must fail closed, report an
@@ -79,7 +79,7 @@ live-profile evidence.
 
 FastAPI OpenAPI is intended to be the source of truth. A checked-in OpenAPI
 artifact, generated TypeScript client, drift comparison and MSW handlers have not
-yet been added. Six Playwright checks exercise desktop/mobile public navigation,
+yet been added. Eight Playwright project checks exercise desktop/mobile public navigation,
 the labelled demo chat path and privileged-host login reachability. The separate
 `make integration` gate exercises the real FastAPI/Postgres path through the web
 proxy without a browser.

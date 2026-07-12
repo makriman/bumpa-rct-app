@@ -20,6 +20,13 @@ In this baseline:
 - `/health/ready` proves database access and reports configured provider modes; it
   does not probe Meta, Bumpa or Hermes.
 
+As of 2026-07-12, revision
+`1929771abe932dfd44aad6763e1f5caff19fa833` is already live as this disabled
+baseline on five temporary sslip.io hosts with valid TLS. It is prior-release
+evidence, not evidence that the hardened five-image candidate described below has
+been published or deployed. The candidate remains blocked on its final SHA, exact
+registry digests, CI/publication gates and a new deployment transcript.
+
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
 
@@ -31,8 +38,8 @@ The following are outside the repository and are still required:
    deploy user. Never share or commit the private key.
 2. DNS-provider access to create A records for the apex, `www`, `api`, `admin` and
    `research` hosts.
-3. Published immutable API/web images and either public GHCR packages or a
-   least-privilege host credential with `read:packages` only.
+3. Published immutable API/web/Caddy/PostgreSQL/backup images and either public
+   GHCR packages or a least-privilege host credential with `read:packages` only.
 4. An encrypted off-host backup target and its host-only credential.
 5. An alert destination and an identified operator for deployment and restore.
 
@@ -110,8 +117,20 @@ ASYNC_RUNTIME_ENABLED=false
 
 Do not include `DEV_FIXED_OTP` or `DEV_OTP_SINK`. Set the five production domains
 and HTTPS origins, independent high-entropy application/database secrets, internal
-database URLs, `GHCR_OWNER`, immutable `DEPLOY_REF` and
-`IMAGE_TAG=sha-<full-commit-sha>`. `IMAGE_TAG=latest` is forbidden.
+database URLs, `GHCR_OWNER`, immutable `DEPLOY_REF`,
+`IMAGE_TAG=sha-<full-commit-sha>` and a separately promoted
+`INFRA_IMAGE_TAG=sha-<full-infrastructure-commit-sha>`. `latest` is forbidden.
+Set `API_IMAGE`, `WEB_IMAGE`, `CADDY_IMAGE`, `POSTGRES_IMAGE` and `BACKUP_IMAGE`
+to exact `ghcr.io/<owner>/<repository>@sha256:<64-hex-digest>` references. Tags
+identify releases; production Compose consumes digests.
+
+```dotenv
+API_IMAGE=ghcr.io/<owner>/bumpabestie-api@sha256:<index-digest>
+WEB_IMAGE=ghcr.io/<owner>/bumpabestie-web@sha256:<index-digest>
+CADDY_IMAGE=ghcr.io/<owner>/bumpabestie-caddy@sha256:<index-digest>
+POSTGRES_IMAGE=ghcr.io/<owner>/bumpabestie-postgres@sha256:<index-digest>
+BACKUP_IMAGE=ghcr.io/<owner>/bumpabestie-backup@sha256:<index-digest>
+```
 
 `ANTHROPIC_API_KEY` and model settings do not belong in the shared API/web/worker/
 scheduler environment. Per-tenant Bumpa keys do not belong in this file; the future
@@ -131,16 +150,34 @@ the rendered environment into a ticket or evidence artifact.
 
 ## Image release
 
-Pull-request CI builds `linux/amd64` API and web images without publishing them.
-`.github/workflows/publish-images.yml` publishes both images to GHCR after it finds
-a successful CI run for the exact commit. The deployable tag is
+Pull-request CI builds `linux/amd64` API, web, Caddy, PostgreSQL and backup images
+without publishing them. It also boots the infrastructure images, adopts a 16.9
+data volume with 16.14, creates a backup and restores it into an isolated database.
+`.github/workflows/publish-images.yml` publishes all five images to GHCR after it
+finds a successful CI run for the exact commit. The deployable tag is
 `sha-<full-commit-sha>`; a release tag is an alias, and `latest` is never emitted.
-The build requests provenance and SBOM attestations.
+The build requests provenance and SBOM attestations. CI scans every locally built
+runtime, and publication scans each exact registry digest for fixable critical/high
+findings; JSON reports are retained as workflow artifacts.
 
-Before deploy, record both image digests and scan the exact published images. A
-successful build or SBOM is not a vulnerability scan. If GHCR packages remain
+Before deploy, put the exact published index digests in the five image-reference
+settings, record the platform manifests and scan those exact images. A successful
+build or SBOM is not a vulnerability scan. If GHCR packages remain
 private, log in on the host using a dedicated pull-only credential and ensure the
 credential file is owned by the deploy user with restrictive permissions.
+
+The infrastructure tag is intentionally independent from the application tag.
+Routine application releases keep the promoted Caddy/PostgreSQL/backup references
+unchanged. Changing `POSTGRES_IMAGE` is a data-plane operation, even within major
+16, and requires the compatibility checks and backup performed by the deploy
+script.
+
+Caddy runs as fixed UID/GID `10001` with a read-only root filesystem and only
+`NET_BIND_SERVICE`. A one-shot, networkless initializer owns the persistent Caddy
+volumes before the edge process starts. The PostgreSQL server and routine backup
+work retain the official UID/GID 70 boundary. The destructive restore profile runs
+only on operator request as root with a separate narrow capability set, including
+`DAC_OVERRIDE`, so it can replace stale restricted artifact contents.
 
 ## Provider-disabled deploy sequence
 
@@ -148,15 +185,17 @@ credential file is owned by the deploy user with restrictive permissions.
 2. Confirm SSH, DNS, firewall, free disk and GHCR pull access.
 3. Confirm `.env.production` validates and its mode is `0600`.
 4. Confirm no real user traffic or provider webhooks point to this baseline.
-5. The deploy script creates a local pre-deploy backup when Postgres is already
-   running; verify that step rather than bypassing it.
+5. The deploy script verifies image revision labels, checks the PostgreSQL major,
+   inventories extensions and affected legacy BRIN indexes, then creates and
+   checksum-verifies a local pre-deploy backup while the old server is running.
 6. Run `./scripts/deploy.sh` as `bumpabestie` from a clean checkout.
-7. The script checks out the immutable `DEPLOY_REF`, pulls all required images,
-   migrates, removes worker/scheduler, starts the baseline services, verifies
+7. The script checks out the immutable `DEPLOY_REF`, pulls all required images
+   including backup, stops writers, upgrades PostgreSQL/Redis first, migrates,
+   removes worker/scheduler, starts the application/edge services, verifies
    health/restart counts and runs HTTPS smoke checks.
 8. Inspect readiness and confirm all provider modes are `disabled`.
 9. Run and verify the first local backup, then start the timer.
-10. Record revision, image digests, DNS/TLS results, service state and backup ID.
+10. Preserve `.deployed-release.json`, DNS/TLS results, service state and backup ID.
 
 Expected service boundary:
 
@@ -204,9 +243,13 @@ journal contains a separately verified off-host object ID/checksum. See
 
 ## Rollback boundary
 
-`scripts/deploy.sh` records the verified revision and, on a failed later release,
-automatically attempts to restore the previous API/web images and rerun smoke. It
-does not reverse database migrations, so forward/backward migration compatibility
+`scripts/deploy.sh` records the verified revision and actual running repository
+digests. On a failed later release it can restore the prior API and web image
+references and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
+automatic rollback never recreates an older infrastructure image and never reverses
+migrations. Before the recovery-point backup, the deploy script quiesces every
+application writer; if backup or compatibility validation then fails, it restarts
+the exact previously running containers. Forward/backward schema compatibility
 remains a release requirement. Never run a destructive down-migration during an
 outage without a separately reviewed recovery plan.
 

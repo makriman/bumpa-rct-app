@@ -23,18 +23,28 @@ jobs:
       contents: read
       actions: read
     steps:
-      - name: Require a successful CI run for this commit
+      - name: Check out the selected revision with main history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Require a merged-main revision with successful push CI
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -Eeuo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_SHA is not reachable from origin/main; refusing image publication" >&2
+            exit 1
+          fi
           conclusion="$(gh api \
             --header 'Accept: application/vnd.github+json' \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=20" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=$GITHUB_SHA&status=completed&per_page=20" \
             --jq '[.workflow_runs[] | select(.conclusion == "success")][0].conclusion // ""')"
           if [[ "$conclusion" != "success" ]]; then
-            echo "No successful CI run exists for $GITHUB_SHA; refusing image publication" >&2
+            echo "No successful main push CI run exists for $GITHUB_SHA; refusing image publication" >&2
             exit 1
           fi
 
@@ -52,8 +62,19 @@ jobs:
         include:
           - name: api
             dockerfile: apps/api/Dockerfile
+            target: ""
           - name: web
             dockerfile: apps/web/Dockerfile
+            target: ""
+          - name: caddy
+            dockerfile: infra/caddy/Dockerfile
+            target: runtime
+          - name: postgres
+            dockerfile: infra/postgres/Dockerfile
+            target: runtime
+          - name: backup
+            dockerfile: infra/postgres/Dockerfile
+            target: backup
     steps:
       - name: Check out the selected revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -66,6 +87,8 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           image_name="ghcr.io/$owner/bumpabestie-${{ matrix.name }}"
           {
+            echo "image_name=$image_name"
+            echo "sha_tag=$image_name:sha-$GITHUB_SHA"
             echo 'tags<<EOF'
             echo "$image_name:sha-$GITHUB_SHA"
             if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
@@ -89,10 +112,12 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish
+        id: publish
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.image.outputs.tags }}
@@ -103,3 +128,40 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Scan exact published digest
+        shell: bash
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p image-security
+          exact_ref="$IMAGE_NAME@$PUBLISHED_DIGEST"
+          set +e
+          docker run --rm \
+            --env TRIVY_USERNAME \
+            --env TRIVY_PASSWORD \
+            --volume "$PWD/image-security:/evidence" \
+            --volume trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            image --scanners vuln --ignore-unfixed \
+            --severity CRITICAL,HIGH --exit-code 1 \
+            --format json --output "/evidence/${{ matrix.name }}.json" \
+            "$exact_ref"
+          scan_status=$?
+          set -e
+          findings="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "image-security/${{ matrix.name }}.json")"
+          echo "${{ matrix.name }} $PUBLISHED_DIGEST fixable critical/high findings: $findings"
+          exit "$scan_status"
+
+      - name: Upload exact image security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: published-image-security-${{ matrix.name }}
+          path: image-security/${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 30

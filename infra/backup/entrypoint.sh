@@ -7,4 +7,4 @@ if [ "${1:-}" = "/usr/local/bin/restore.sh" ]; then
   exec "$@"
 fi
 
-exec su-exec 70:70 "$@"
+exec gosu 70:70 "$@"
