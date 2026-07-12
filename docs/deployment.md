@@ -20,12 +20,21 @@ In this baseline:
 - `/health/ready` proves database access and reports configured provider modes; it
   does not probe Meta, Bumpa or Hermes.
 
-As of 2026-07-12, revision
-`1929771abe932dfd44aad6763e1f5caff19fa833` is already live as this disabled
-baseline on five temporary sslip.io hosts with valid TLS. It is prior-release
-evidence, not evidence that the hardened five-image candidate described below has
-been published or deployed. The candidate remains blocked on its final SHA, exact
-registry digests, CI/publication gates and a new deployment transcript.
+As of 2026-07-12, hardened release
+`54bb8e9b29295171d65972e094e508d25a7bc53d` is live as this disabled baseline
+on five temporary sslip.io hosts with valid TLS. [PR 14](https://github.com/makriman/bumpa-rct-app/pull/14),
+[PR CI 29194474957](https://github.com/makriman/bumpa-rct-app/actions/runs/29194474957),
+[main CI 29194621699](https://github.com/makriman/bumpa-rct-app/actions/runs/29194621699)
+and [publish run 29194814472](https://github.com/makriman/bumpa-rct-app/actions/runs/29194814472)
+are its release gates. Exact deployed image index references are recorded in
+`docs/verification.md`.
+
+Production verification found exactly five healthy services with zero restarts,
+Caddy 2.11.4 built with Go 1.26.5 running as UID 10001 with restricted
+capabilities, PostgreSQL 16.14, Redis 7.4.9, disabled-provider readiness, negative
+API-docs/OTP canaries and correct desktop/mobile presentation. Backup
+`20260712T140353Z` passed its format-2 manifest and checksum checks; the nightly
+timer is enabled. This does not activate providers or authorize real traffic.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -240,6 +249,11 @@ it there alone is not activation. Therefore a green systemd unit proves only the
 local backup unless a reviewed unit/credential boundary invokes the handoff and the
 journal contains a separately verified off-host object ID/checksum. See
 `docs/runbook.md`.
+
+For the hardened baseline, backup `20260712T140353Z` was verified against release
+`54bb8e9b29295171d65972e094e508d25a7bc53d` and the exact backup image reference.
+The timer is enabled; its next recorded run is `2026-07-13 02:32 UTC`. This proves
+only the local stage. Off-host copy and remote restore evidence remain open.
 
 ## Rollback boundary
 
