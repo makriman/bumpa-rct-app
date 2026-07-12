@@ -38,4 +38,5 @@ if ((${#running_services[@]} > 0)); then
   "${compose[@]}" stop --timeout 60 "${running_services[@]}"
 fi
 
+"${compose[@]}" run --rm --no-deps backup-data-init
 "${compose[@]}" run --rm --no-deps backup

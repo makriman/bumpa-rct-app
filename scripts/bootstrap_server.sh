@@ -66,7 +66,10 @@ if ! swapon --show --noheadings | grep -q .; then
   swapon /swapfile
   echo "/swapfile none swap sw 0 0" >> /etc/fstab
 fi
-echo "vm.swappiness=10" >/etc/sysctl.d/99-bumpabestie.conf
+printf '%s\n' \
+  'vm.overcommit_memory=1' \
+  'vm.swappiness=10' \
+  >/etc/sysctl.d/99-bumpabestie.conf
 sysctl --system >/dev/null
 
 ufw --force reset

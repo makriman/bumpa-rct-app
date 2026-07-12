@@ -10,6 +10,7 @@ duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
 runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
+backup_init_volume="bumpabestie-backup-init-contract-$$"
 offsite_env="$(mktemp)"
 offsite_hook="$(mktemp)"
 offsite_marker="$(mktemp)"
@@ -18,6 +19,7 @@ cleanup() {
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets"
   docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
+  docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -124,6 +126,44 @@ docker run --rm --network none --user 100:101 --read-only \
     test "$(find /run/runtime-secrets -mindepth 1 -maxdepth 1 -type f | wc -l)" = 3
   '
 
+# Reproduce the ownership left by the former image entrypoint, then verify the
+# capability-restricted initializer can migrate it without network access or
+# DAC_OVERRIDE. A root process with no capabilities must subsequently be able
+# to write the root-owned destination using only its owner permissions.
+docker volume create "$backup_init_volume" >/dev/null
+docker run --rm --network none --user 0:0 --cap-drop ALL \
+  --cap-add CHOWN --cap-add DAC_READ_SEARCH --cap-add FOWNER \
+  --volume "$backup_init_volume:/backups" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  sh -eu -c '
+    mkdir -p /backups/legacy/nested
+    printf legacy > /backups/legacy/nested/manifest.json
+    chown -R 70:70 /backups
+    chmod 0700 /backups /backups/legacy /backups/legacy/nested
+    chmod 0600 /backups/legacy/nested/manifest.json
+  '
+docker run --rm --network none --user 0:0 --read-only \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL --cap-add CHOWN --cap-add DAC_READ_SEARCH --cap-add FOWNER \
+  --env BACKUP_DIR=/backups \
+  --volume "$backup_init_volume:/backups" \
+  --volume "$ROOT_DIR/scripts/init_backup_volume.sh:/usr/local/bin/init-backup-volume:ro" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  /usr/local/bin/init-backup-volume
+docker run --rm --network none --user 0:0 --read-only --cap-drop ALL \
+  --volume "$backup_init_volume:/backups:ro" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  sh -eu -c '
+    test "$(stat -c "%u:%g:%a" /backups)" = 0:0:700
+    test "$(stat -c "%u:%g:%a" /backups/legacy)" = 0:0:700
+    test "$(stat -c "%u:%g" /backups/legacy/nested/manifest.json)" = 0:0
+    test "$(cat /backups/legacy/nested/manifest.json)" = legacy
+  '
+docker run --rm --network none --user 0:0 --cap-drop ALL \
+  --volume "$backup_init_volume:/backups" \
+  python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
+  sh -eu -c 'mkdir /backups/new-backup && test -d /backups/new-backup'
+
 ./scripts/validate_env.sh "$contract_env" production
 compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile async --profile tools --profile restore)
 "${compose[@]}" config --quiet
@@ -138,6 +178,17 @@ if ! jq --exit-status '
   .services.postgres.image == "ghcr.io/makriman/bumpabestie-postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" and
   .services.postgres.stop_grace_period == "1m0s" and
   .services.backup.image == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
+  .services["backup-data-init"].image == .services.backup.image and
+  .services["backup-data-init"].build == null and
+  .services["backup-data-init"].user == "0:0" and
+  .services["backup-data-init"].entrypoint == ["/usr/local/bin/init-backup-volume"] and
+  .services["backup-data-init"].network_mode == "none" and
+  .services["backup-data-init"].read_only == true and
+  .services["backup-data-init"].cap_drop == ["ALL"] and
+  .services["backup-data-init"].cap_add == ["CHOWN", "DAC_READ_SEARCH", "FOWNER"] and
+  ([.services["backup-data-init"].volumes[] | select(.target == "/backups" and .read_only != true)] | length == 1) and
+  ([.services["backup-data-init"].volumes[] | select(.type == "bind" and .target == "/usr/local/bin/init-backup-volume" and .read_only == true)] | length == 1) and
+  .services.backup.user == "0:0" and
   .services.restore.image == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
   .services.caddy.build == null and .services.postgres.build == null and .services.backup.build == null and .services.restore.build == null and
   .services.backup.environment.BACKUP_IMAGE_REF == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
@@ -164,7 +215,8 @@ if ! jq --exit-status '
     caddy: (.services.caddy | {image, build, cap_drop, cap_add, security_opt}),
     caddy_init: (.services["caddy-init"] | {image, build, network_mode}),
     postgres: (.services.postgres | {image, build, stop_grace_period}),
-    backup: (.services.backup | {image, build, networks, cap_add, environment}),
+    backup_data_init: (.services["backup-data-init"] | {image, build, user, entrypoint, network_mode, read_only, cap_drop, cap_add, volumes}),
+    backup: (.services.backup | {image, build, user, networks, cap_add, environment}),
     restore: (.services.restore | {image, build, networks, cap_add}),
     api: (.services.api | {environment}),
     worker: (.services.worker | {environment, healthcheck, cap_drop}),
@@ -233,6 +285,7 @@ fi
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
+backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
 quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
 role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh | cut -d: -f1)"
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
@@ -240,8 +293,9 @@ reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_herme
 # The following patterns intentionally match literal shell source.
 # shellcheck disable=SC2016
 application_start_line="$(grep -n -F '"${compose[@]}" --profile async up -d --wait' scripts/deploy.sh | tail -1 | cut -d: -f1)"
-if [[ -z "$stop_line" || -z "$backup_line" || -z "$quiesced_line" \
-  || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_line" ]]; then
+if [[ -z "$stop_line" || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
+  || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_init_line" \
+  || "$backup_init_line" -ge "$backup_line" ]]; then
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
   exit 1
 fi
@@ -266,11 +320,33 @@ grep -Fq 'ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh' infra/systemd/
 # shellcheck disable=SC2016
 grep -Fq 'stop --timeout 60 "${running_services[@]}"' scripts/scheduled_backup.sh
 grep -Fq 'run --rm --no-deps backup' scripts/scheduled_backup.sh
+scheduled_backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/scheduled_backup.sh | cut -d: -f1)"
+scheduled_backup_line="$(grep -n -F 'run --rm --no-deps backup' scripts/scheduled_backup.sh | tail -1 | cut -d: -f1)"
+if [[ -z "$scheduled_backup_init_line" || -z "$scheduled_backup_line" \
+  || "$scheduled_backup_init_line" -ge "$scheduled_backup_line" ]]; then
+  echo "Scheduled backup does not initialize its destination before backup execution" >&2
+  exit 1
+fi
 grep -Fq 'ExecStartPost=/opt/bumpabestie/scripts/offsite_backup.sh --env-file /opt/bumpabestie/.env.production' infra/systemd/bumpabestie-backup.service
 if grep -Fq 'EnvironmentFile=' infra/systemd/bumpabestie-backup.service; then
   echo "Backup unit must not export the application environment to the off-host hook" >&2
   exit 1
 fi
+for hardening_directive in \
+  'UMask=0077' \
+  'NoNewPrivileges=yes' \
+  'PrivateDevices=yes' \
+  'PrivateTmp=yes' \
+  'RemoveIPC=yes' \
+  'ProtectHome=read-only' \
+  'ProtectSystem=strict' \
+  'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+  'RestrictNamespaces=yes' \
+  'RestrictSUIDSGID=yes' \
+  'SystemCallArchitectures=native' \
+  'CapabilityBoundingSet='; do
+  grep -Fxq "$hardening_directive" infra/systemd/bumpabestie-backup.service
+done
 grep -Fq -- '--profile async up -d --wait' scripts/deploy.sh
 # Match literal deploy-script variables.
 # shellcheck disable=SC2016
