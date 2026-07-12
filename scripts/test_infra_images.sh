@@ -490,6 +490,35 @@ docker run --rm --entrypoint gosu "$postgres_image" --version | grep -F 'go1.26.
 docker run --rm --entrypoint postgres "$postgres_image" --version | grep -F 'PostgreSQL) 16.14' >/dev/null
 docker run --rm --entrypoint caddy "$caddy_image" version | grep -Fx 'v2.11.4' >/dev/null
 docker run --rm --entrypoint caddy "$caddy_image" build-info | grep -F 'go1.26.5' >/dev/null
+adapted_caddy_config="$(
+  docker run --rm \
+    --network none \
+    --env CADDY_SITE_SCHEME=http \
+    --env APP_DOMAIN=bumpabestie.localhost \
+    --env WWW_DOMAIN=www.bumpabestie.localhost \
+    --env ADMIN_DOMAIN=admin.bumpabestie.localhost \
+    --env RESEARCH_DOMAIN=research.bumpabestie.localhost \
+    --env API_DOMAIN=api.bumpabestie.localhost \
+    --entrypoint caddy \
+    "$caddy_image" adapt --config /etc/caddy/Caddyfile --adapter caddyfile
+)"
+jq --exit-status '
+  .logging.logs.default.encoder == {
+    "format": "filter",
+    "fields": {
+      "request>uri": {
+        "filter": "query",
+        "actions": [{
+          "type": "replace",
+          "parameter": "hub.verify_token",
+          "value": "REDACTED"
+        }]
+      }
+    },
+    "wrap": {"format": "json"}
+  } and
+  .logging.logs.default.exclude == ["http.log.access"]
+' <<<"$adapted_caddy_config" >/dev/null
 docker run --rm \
   --env CADDY_SITE_SCHEME=http \
   --env APP_DOMAIN=bumpabestie.localhost \
@@ -520,10 +549,16 @@ docker run --detach \
 test "$(docker exec "$edge" id -u)" = 10001
 edge_port="$(docker port "$edge" 80/tcp | sed -E 's/^.*:([0-9]+)$/\1/' | head -1)"
 edge_status=""
+verify_token_canary="caddy-runtime-secret-canary-$suffix"
 for _attempt in {1..30}; do
   edge_status="$(
     curl --silent --output /dev/null --write-out '%{http_code}' \
-      --header 'Host: bumpabestie.localhost' "http://127.0.0.1:$edge_port/" || true
+      --header 'Host: api.bumpabestie.localhost' \
+      --get \
+      --data-urlencode 'hub.mode=subscribe' \
+      --data-urlencode "hub.verify_token=$verify_token_canary" \
+      --data-urlencode 'visible_marker=preserved' \
+      "http://127.0.0.1:$edge_port/v1/webhooks/whatsapp" || true
   )"
   if [[ "$edge_status" == "503" ]]; then
     break
@@ -531,6 +566,31 @@ for _attempt in {1..30}; do
   sleep 1
 done
 test "$edge_status" = 503
+caddy_runtime_logs="$(docker logs "$edge" 2>&1)"
+if grep -Fq "$verify_token_canary" <<<"$caddy_runtime_logs"; then
+  echo "Caddy leaked the webhook verification token in runtime logs" >&2
+  exit 1
+fi
+while IFS= read -r log_line; do
+  jq --exit-status . <<<"$log_line" >/dev/null
+done <<<"$caddy_runtime_logs"
+jq --exit-status --slurp '
+  any(
+    .[];
+    .logger == "http.log.error" and
+    .request.host == "api.bumpabestie.localhost" and
+    .request.method == "GET" and
+    (.request.uri | startswith("/v1/webhooks/whatsapp?")) and
+    (.request.uri | contains("hub.verify_token=REDACTED")) and
+    (.request.uri | contains("hub.mode=subscribe")) and
+    (.request.uri | contains("visible_marker=preserved")) and
+    (.status == 502 or .status == 503) and
+    (.duration | type == "number") and
+    (.msg | type == "string") and
+    (.err_id | type == "string") and
+    (.err_trace | type == "string")
+  )
+' <<<"$caddy_runtime_logs" >/dev/null
 docker exec "$edge" test -d /data/caddy
 
 echo "Infrastructure image runtime, persistence, backup and isolated restore contracts passed"

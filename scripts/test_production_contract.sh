@@ -370,6 +370,10 @@ if grep -Fq "export CADDY_IMAGE=\"\$previous_caddy_image\"" scripts/deploy.sh; t
 fi
 grep -Fq -- '--exit-code-from caddy-init caddy-init' scripts/deploy.sh
 grep -Fq 'exclude http.log.access' infra/caddy/Caddyfile
+grep -Fq 'format filter {' infra/caddy/Caddyfile
+grep -Fq 'request>uri query {' infra/caddy/Caddyfile
+grep -Fq 'replace hub.verify_token REDACTED' infra/caddy/Caddyfile
+grep -Fq 'wrap json' infra/caddy/Caddyfile
 grep -Fq 'health_uri /health/live' infra/caddy/Caddyfile
 if grep -Fq 'health_uri /health/ready' infra/caddy/Caddyfile; then
   echo "Caddy must not remove durable ingress solely because an async dependency is degraded" >&2
