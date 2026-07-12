@@ -13,13 +13,46 @@ if [[ ! -f "$BACKUP_PATH/postgres.dump" || ! -f "$BACKUP_PATH/SHA256SUMS" ]]; th
   echo "Backup is incomplete" >&2
   exit 2
 fi
+: "${POSTGRES_USER:?POSTGRES_USER is required}"
+: "${POSTGRES_DB:?POSTGRES_DB is required}"
+: "${APP_POSTGRES_PASSWORD:?APP_POSTGRES_PASSWORD is required}"
 
 (
   cd "$BACKUP_PATH"
   sha256sum -c SHA256SUMS
 )
 
-pg_restore --clean --if-exists --no-owner --no-privileges --exit-on-error --dbname "${PGDATABASE}" "$BACKUP_PATH/postgres.dump"
+unexpected_schemas="$(
+  psql -X --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
+    "SELECT nspname FROM pg_namespace
+     WHERE nspname !~ '^pg_'
+       AND nspname NOT IN ('information_schema', 'public')
+     ORDER BY nspname"
+)"
+if [[ -n "$unexpected_schemas" ]]; then
+  echo "Restore requires manual review because non-public user schemas exist" >&2
+  exit 2
+fi
+
+unexpected_extensions="$(
+  psql -X --tuples-only --no-align --set ON_ERROR_STOP=1 --command \
+    "SELECT extname FROM pg_extension WHERE extname <> 'plpgsql' ORDER BY extname"
+)"
+if [[ -n "$unexpected_extensions" ]]; then
+  echo "Restore requires manual review because non-core extensions exist" >&2
+  exit 2
+fi
+
+psql -X --set ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION pg_database_owner;
+COMMIT;
+SQL
+
+/docker-entrypoint-initdb.d/10-app-role.sh
+pg_restore --no-owner --no-privileges --exit-on-error --dbname "${PGDATABASE}" "$BACKUP_PATH/postgres.dump"
+/docker-entrypoint-initdb.d/10-app-role.sh
 
 if [[ -f "$BACKUP_PATH/exports.tar.gz" && -d /source/exports ]]; then
   find /source/exports -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +

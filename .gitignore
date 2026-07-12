@@ -38,6 +38,7 @@ hermes_data/
 *.log
 *.pid
 .deployed-revision
+.deployed-release.json
 
 # Editors and operating systems
 .DS_Store

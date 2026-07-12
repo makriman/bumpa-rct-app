@@ -5,13 +5,14 @@
 The sections below are the required security baseline. They are not a statement
 that every control is already present. Implemented local controls include signed
 WhatsApp webhook verification, hashed/expiring/single-use OTP records, revocable
-JWT sessions, application RBAC checks, authenticated field encryption, basic text
-and order redaction, explicit Postgres RLS policy DDL, and non-root application
-images. A local non-owner/non-bypass Postgres probe and production-off demo build
-default have also been verified. Still pending are CSRF protection, IP/Redis rate
-limits, credential key rotation, raw-access reason gates, export expiry, nested PII
-redaction coverage and image vulnerability scanning. Consult the verification
-ledger before relying on a control.
+JWT sessions, application RBAC checks, authenticated field encryption, deep
+non-mutating structured/text redaction, explicit Postgres RLS policy DDL, and
+non-root application images. A local non-owner/non-bypass Postgres probe,
+production-off demo build default and local image vulnerability scans have also been
+verified. Still pending are CSRF protection, IP/Redis rate limits, credential key
+rotation, raw-access reason gates, export expiry and final exact-registry scan
+evidence for the hardened release. Consult the verification ledger before relying
+on a control.
 
 The pre-integration production baseline uses explicit `disabled` provider modes and
 does not start worker/scheduler. That is a containment state, not a security signoff
@@ -73,10 +74,15 @@ be passed through the shared Compose application environment or stored per tenan
 ### Containers and network
 
 The rendered Compose contract publishes only Caddy ports and keeps database/cache
-networks internal. Application Dockerfiles use non-root users; the production
-overlay drops capabilities and enables `no-new-privileges`. The release workflow
-is configured to publish commit-SHA-tagged images with provenance and SBOM. No
-image has yet been published or vulnerability-scanned as evidence.
+networks internal. Application Dockerfiles use non-root users; the hardened Caddy
+runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
+`NET_BIND_SERVICE`. Backup runs as UID/GID 70 with a narrow capability set; the
+separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
+service. Production enables `no-new-privileges`, and exact image references are
+required. The release workflow publishes commit-SHA-tagged images with provenance
+and SBOM, then scans each exact registry digest. The prior baseline API/web images
+were published, and all five candidate runtimes have local scan gates; final
+five-image publication and exact-registry scan evidence remain pending.
 
 ## Research governance
 

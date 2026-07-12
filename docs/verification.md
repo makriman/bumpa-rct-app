@@ -10,8 +10,10 @@ For requirement coverage and the distinct statuses `implemented-tested`,
 
 ## Evidence rules
 
-- CI uploads JUnit, branch coverage, Playwright reports/traces/screenshots, visual
-  diffs, image build provenance and SBOM outputs for 14 days.
+- CI retains backend JUnit/coverage, frontend coverage/Playwright output and local
+  image-scan JSON for 14 days. Visual-diff evidence is not implemented. The publish
+  workflow attaches provenance/SBOM to registry images and retains each exact
+  registry-digest scan report for 30 days.
 - Tests use stable IDs that can be mapped back to acceptance claims.
 - Screenshots and fixtures contain synthetic/redacted data only.
 - Mock evidence never satisfies live-provider or production infrastructure claims.
@@ -24,18 +26,21 @@ For requirement coverage and the distinct statuses `implemented-tested`,
 
 ## Current ledger
 
-The statuses below record commands actually executed on 2026-07-12. The final
-production-hardening working tree has fresh complete local evidence but is not
-bound to a release SHA until it is committed and CI passes that exact revision. A
-present implementation or aspirational document is not evidence.
+The statuses below record commands actually executed on 2026-07-12. Revision
+`1929771abe932dfd44aad6763e1f5caff19fa833` is the already-live, provider-disabled
+sslip.io baseline. The hardened five-image candidate has fresh local evidence but is
+not bound to a release SHA until it is committed and CI passes that exact revision.
+A present implementation or aspirational document is not evidence.
 
 | Claim | Required evidence | Current status |
 |---|---|---|
 | Local Compose renders with only Caddy publishing ports | `docker compose --env-file .env.example config --quiet` and rendered-port assertion | `local` — Compose rendering and the Caddy-only port assertion passed |
 | Local environment contract is valid | `scripts/validate_env.sh .env.example local` | `local` — passed |
 | Production rejects mock/demo provider configuration | production config unit tests plus `scripts/validate_env.sh <synthetic-env> production` | `local` — typed provider modes, production mock rejection, disabled-mode side-effect assertions and rendered production Compose checks passed |
-| Shell scripts parse and pass ShellCheck | `scripts/validate_shell.sh` with ShellCheck installed | `contract` — Bash syntax passed; ShellCheck was unavailable locally and remains pending CI |
-| Caddy configuration is valid | Caddy 2.10 validation or a healthy Compose start | `local` — Caddy started in Compose and routed public, `www`, API, admin and research hosts; the production sslip.io config also validated |
+| Production image/configuration contract is immutable and least-exposed | `scripts/test_production_contract.sh` | `contract` — duplicate/malformed environment entries are rejected; five exact GHCR digests are required; production builds are absent; only Caddy publishes ports; backup/restore use only the data network and separate capability sets |
+| Shell scripts parse and pass ShellCheck | `scripts/validate_shell.sh` with ShellCheck installed | `contract` — Bash syntax and pinned-container ShellCheck passed locally; final-SHA CI remains required |
+| Caddy configuration is valid | Caddy 2.11 validation or a healthy Compose start | `local` — the patched-Go Caddy image validates the production config; Compose routed public, `www`, API, admin and research hosts |
+| Hardened infrastructure images preserve and restore state | `scripts/test_infra_images.sh` | `local` — PostgreSQL 16.14 adopted a gracefully stopped 16.9 volume and preserved its row/role; restricted-capability backup produced checksum-verified manifest format 2; isolated restore reset `public`, removed a newer-only object, restored exports/Hermes artifacts and reapplied the non-superuser/non-bypass application role; Caddy 2.11.4 built with Go 1.26.5 ran as UID 10001 under its production capability boundary |
 | Clean-clone bootstrap is repeatable | fresh runner transcript for `make bootstrap` | `pending` |
 | Backend lint, format and strict typing pass | Ruff and mypy commands from `make quality` | `local` — passed |
 | Backend required test gate passes | pytest with branch coverage at the configured 85% threshold | `local` — 29 tests passed at 91.33% branch-aware coverage, pending binding to the final commit SHA |
@@ -43,12 +48,12 @@ present implementation or aspirational document is not evidence.
 | Frontend lint, unit coverage and production build pass | the matching npm scripts | `local` — lint/format/typecheck/build and 52 unit/component tests passed; coverage is reported without an enforced threshold |
 | Browser E2E, accessibility and visual checks pass | real Playwright browser run with assertions/artifacts | `contract` — eight desktop/mobile Playwright checks passed; axe, keyboard and visual-diff coverage remain pending |
 | Local Compose stack boots and cross-surface smoke/integration checks pass | `scripts/compose_smoke.sh` | `local` — fresh images built; migration through `0002`; Postgres, Redis, API, worker, scheduler, web and Caddy healthy; six surface checks plus OTP, tenant session, Bumpa sync, chat, research event and PDF report passed; all containers/networks removed cleanly |
-| Provider-disabled production baseline starts only intended services | rendered production Compose, deploy transcript and `docker compose ps` | `pending` — intended boundary is Caddy/web/API/Postgres/Redis; worker/scheduler must be absent and Hermes is not implemented |
-| Production readiness reports disabled provider state | `/health/ready` response plus database-loss negative test | `local` — injected disabled configuration reports all three selectors and a live database query; production proof remains pending |
+| Provider-disabled production baseline starts only intended services | rendered production Compose, deploy transcript and `docker compose ps` | `production` — revision `1929771abe932dfd44aad6763e1f5caff19fa833` runs exactly Caddy/web/API/Postgres/Redis on the sslip.io baseline; worker/scheduler/Hermes are absent. The hardened candidate is not deployed yet |
+| Production readiness reports disabled provider state | `/health/ready` response plus database-loss negative test | `production` — the live `1929771abe932dfd44aad6763e1f5caff19fa833` baseline returns database `ok` and all three providers `disabled`; local database-loss behavior is also tested. This is not provider reachability evidence |
 | Provider-dependent production actions fail closed | negative OTP/webhook/chat/sync/report/profile tests with all selectors disabled | `contract` — OTP, webhook, chat, sync, report and profile provisioning reject disabled modes without mock side effects |
 | API migrations succeed on empty Postgres and RLS uses a non-bypass role | backend CI migration plus direct RLS integration JUnit | `local` — explicit migration passed on fresh Postgres; `bumpabestie_app` saw 0 rows without context, 1 tenant with tenant context and 2 with privileged context |
 | Additive schema-completeness migration is reversible and isolates new tenant tables | SQLite and Postgres 16 upgrade/downgrade/upgrade plus catalog and non-bypass role assertions | `local` — `0002_schema_completeness` completed both migration cycles; Postgres confirmed INET/nullability and ENABLE+FORCE RLS policies; a NOSUPERUSER/NOBYPASSRLS tenant-a role saw tenant-a rows only; final SHA binding remains pending |
-| OTP login is secure and mock OTP is environment-gated | expiry, attempts, consumption, phone/IP rate-limit and production rejection tests | `pending` — happy-path/local tests cover only part of this contract |
+| OTP login is secure and mock OTP is environment-gated | expiry, attempts, consumption, phone/IP rate-limit and production rejection tests | `pending` — single use, cooldown, maximum-attempt lockout, secure cookie, token revocation and production mock rejection are tested; explicit expiry and real IP/Redis-backed rate limiting remain open |
 | User cannot read or mutate another tenant | negative API, direct RLS and browser tampering tests | `local` — API header isolation and direct non-bypass Postgres RLS probes passed; broader browser tampering remains covered by middleware/API role tests |
 | Admin and researcher hosts/routes enforce roles | host/path matrix and Playwright role projects | `contract` — public login routing, tenant-vs-operator middleware authorization and API RBAC tests pass; release builds compile demo mode off |
 | Web surfaces use the real local API | browser E2E against FastAPI/Postgres with no canned response path | `local` — `make compose-smoke` passed OTP, sync, chat, research event and PDF report flows through the web proxy; production user/settings/admin/research views use authenticated APIs, and fixtures require explicitly labelled demo mode |
@@ -61,11 +66,11 @@ present implementation or aspirational document is not evidence.
 | Reports produce valid polished artifacts | parser assertions, rendered PDF review and download authorization | `local` — authorized CSV/JSONL/PDF generation and download passed through the running stack; richer chart/report visual QA remains future work |
 | Stack handles 50 concurrent inbound events | load report with latency/error/duplicate counts | `pending` |
 | Redis/Postgres restart paths preserve correctness | controlled Compose failure test | `pending` |
-| Release images are published and portable | successful `publish-images.yml` run, digests, provenance, SBOM and image scan | `pending` — workflow exists; no publish run or image scan evidence yet |
-| Backup is locally restorable | checksum and isolated Postgres/exports/reserved-Hermes-volume comparison | `local` — checksum verification and same-host restore preserved row/message counts and the stack passed smoke afterward |
+| Release images are published and portable | successful `publish-images.yml` run, five digests, provenance, SBOM and exact image scans | `pending` — the prior baseline API/web images were published, and hardened infrastructure runtimes have zero local fixable critical/high findings; the final five-image candidate has not been published or scanned by exact registry digest |
+| Backup is locally restorable | checksum and isolated Postgres/exports/reserved-Hermes-volume comparison | `local` — the restricted-capability format-2 backup and isolated restore contract passed, preserving database state and replacing stale exports/reserved-Hermes contents; production restore remains intentionally unexercised |
 | Backup is off-host durable | remote object ID/checksum, failure alert and restore on an isolated host | `pending` — no off-host provider/credential or verified handoff exists; a green timer alone is insufficient |
-| Production host is accessible and hardened | SSH fingerprint, non-root login, OS/firewall/listening-port transcript | `production` — Ubuntu 24.04.4 host `165.227.228.20`; exact ED25519 key accepted for root and deploy user; Docker 29.6.1/Compose 5.3.1, UFW, fail2ban, unattended upgrades and 2 GB swap verified; application release not yet installed |
-| Production domains have TLS and health | DNS/TLS probes and smoke transcript tied to a release digest | `pending` — DNS records, certificate issuance and deployment remain external |
+| Production host is accessible and hardened | SSH fingerprint, non-root login, OS/firewall/listening-port transcript | `production` — Ubuntu 24.04.4 host `165.227.228.20`; exact ED25519 key accepted for root and deploy user; Docker 29.6.1/Compose 5.3.1, UFW, fail2ban, unattended upgrades and 2 GB swap verified; the provider-disabled baseline is installed |
+| Production domains have TLS and health | DNS/TLS probes and smoke transcript tied to a release digest | `production` — revision `1929771abe932dfd44aad6763e1f5caff19fa833` served valid TLS and healthy routing on `bumpabestie.165-227-228-20.sslip.io`, `www`, `api`, `admin` and `research` host variants; `bumpabestie.com` remains unregistered and blocked for launch |
 
 ## Release decision
 

@@ -1,7 +1,17 @@
 services:
+  caddy-init:
+    image: ${CADDY_IMAGE:?Set immutable CADDY_IMAGE}
+    build: !reset null
+
   caddy:
+    image: ${CADDY_IMAGE:?Set immutable CADDY_IMAGE}
+    build: !reset null
     environment:
       CADDY_SITE_SCHEME: https
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE"]
     deploy:
       resources:
         limits:
@@ -13,7 +23,7 @@ services:
         max-file: "5"
 
   web:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-web:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    image: ${WEB_IMAGE:?Set immutable WEB_IMAGE}
     build: !reset null
     environment:
       NODE_ENV: production
@@ -35,7 +45,7 @@ services:
         max-file: "5"
 
   api:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
     environment:
       APP_ENV: production
@@ -66,7 +76,7 @@ services:
         max-file: "5"
 
   worker:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
     environment:
       APP_ENV: production
@@ -89,7 +99,7 @@ services:
           memory: 2G
 
   scheduler:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
     environment:
       APP_ENV: production
@@ -112,7 +122,7 @@ services:
           memory: 1G
 
   migrate:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/bumpabestie-api:${IMAGE_TAG:?Set immutable IMAGE_TAG}
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
     environment:
       APP_ENV: production
@@ -121,6 +131,8 @@ services:
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
 
   postgres:
+    image: ${POSTGRES_IMAGE:?Set immutable POSTGRES_IMAGE}
+    build: !reset null
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
@@ -138,6 +150,48 @@ services:
         max-file: "5"
 
   redis:
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  backup:
+    image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
+    build: !reset null
+    environment:
+      APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
+      BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:?Set immutable INFRA_IMAGE_TAG}
+      BACKUP_IMAGE_REF: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "FOWNER", "SETGID", "SETUID"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  restore:
+    image: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
+    build: !reset null
+    environment:
+      APPLICATION_REVISION: ${DEPLOY_REF:?Set immutable DEPLOY_REF}
+      BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:?Set immutable INFRA_IMAGE_TAG}
+      BACKUP_IMAGE_REF: ${BACKUP_IMAGE:?Set immutable BACKUP_IMAGE}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
     deploy:
       resources:
         limits:

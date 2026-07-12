@@ -13,10 +13,14 @@ SELECT format('CREATE ROLE bumpabestie_app LOGIN PASSWORD %L', :'app_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'bumpabestie_app')
 \gexec
 
-ALTER ROLE bumpabestie_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+SELECT format('ALTER ROLE bumpabestie_app PASSWORD %L', :'app_password')
+\gexec
+ALTER ROLE bumpabestie_app NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 SELECT format('GRANT CONNECT ON DATABASE %I TO bumpabestie_app', current_database())
 \gexec
 GRANT USAGE ON SCHEMA public TO bumpabestie_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO bumpabestie_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bumpabestie_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO bumpabestie_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

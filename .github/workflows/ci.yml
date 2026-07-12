@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16.9-alpine
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
         env:
           POSTGRES_USER: bumpabestie
           POSTGRES_PASSWORD: ci-postgres-only
@@ -34,7 +34,7 @@ jobs:
           --health-cmd "pg_isready -U bumpabestie -d bumpabestie_test"
           --health-interval 5s --health-timeout 5s --health-retries 20
       redis:
-        image: redis:7.4.5-alpine
+        image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
         ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
@@ -60,7 +60,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Install uv
-        run: python -m pip install --disable-pip-version-check uv==${UV_VERSION}
+        run: python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
       - name: Install locked dependencies
         working-directory: apps/api
         run: uv sync --all-extras --locked
@@ -142,15 +142,27 @@ jobs:
       - name: Validate environment example
         run: ./scripts/validate_env.sh .env.example local
       - name: Validate Compose
-        run: docker compose --env-file .env.example config --quiet
+        run: |
+          docker compose --env-file .env.example config --quiet
+          ./scripts/test_production_contract.sh
       - name: Assert published-port boundary
         run: |
           published="$(docker compose --env-file .env.example config --format json | jq -r '.services | to_entries[] | select(.value.ports != null) | .key')"
           test "$published" = "caddy"
 
+  infrastructure:
+    name: Infrastructure runtime contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Build and exercise infrastructure images
+        run: ./scripts/test_infra_images.sh
+
   images:
     name: Build linux/amd64 images
-    needs: [backend, frontend, repository]
+    needs: [backend, frontend, repository, infrastructure]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -158,8 +170,19 @@ jobs:
         include:
           - name: api
             dockerfile: apps/api/Dockerfile
+            target: ""
           - name: web
             dockerfile: apps/web/Dockerfile
+            target: ""
+          - name: caddy
+            dockerfile: infra/caddy/Dockerfile
+            target: runtime
+          - name: postgres
+            dockerfile: infra/postgres/Dockerfile
+            target: runtime
+          - name: backup
+            dockerfile: infra/postgres/Dockerfile
+            target: backup
     steps:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -170,13 +193,43 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64
           push: false
-          provenance: mode=max
-          sbom: true
+          load: true
+          provenance: false
+          sbom: false
           tags: bumpabestie-${{ matrix.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Scan ${{ matrix.name }} image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p image-security
+          set +e
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "$PWD/image-security:/evidence" \
+            --volume trivy-cache:/root/.cache/trivy \
+            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            image --scanners vuln --ignore-unfixed \
+            --severity CRITICAL,HIGH --exit-code 1 \
+            --format json --output "/evidence/${{ matrix.name }}.json" \
+            "bumpabestie-${{ matrix.name }}:${{ github.sha }}"
+          scan_status=$?
+          set -e
+          findings="$(jq '[.Results[]?.Vulnerabilities[]?] | length' "image-security/${{ matrix.name }}.json")"
+          echo "${{ matrix.name }} fixable critical/high findings: $findings"
+          exit "$scan_status"
+      - name: Upload ${{ matrix.name }} image security evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-security-${{ matrix.name }}
+          path: image-security/${{ matrix.name }}.json
+          if-no-files-found: error
+          retention-days: 14
 
   security:
     name: Secrets and dependency audit
@@ -197,7 +250,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Audit Python lock
         run: |
-          python -m pip install --disable-pip-version-check uv==${UV_VERSION} pip-audit==2.9.0
+          python -m pip install --disable-pip-version-check "uv==${UV_VERSION}" pip-audit==2.9.0
           cd apps/api
           uv export --locked --no-dev --no-emit-project --output-file /tmp/api-requirements.txt
           pip-audit --requirement /tmp/api-requirements.txt

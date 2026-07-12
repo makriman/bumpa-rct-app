@@ -66,9 +66,30 @@ x-api-service: &api-service
     - exports_data:/app/.data/exports
   restart: unless-stopped
 
+x-caddy-image: &caddy-image
+  image: bumpabestie-caddy:${INFRA_IMAGE_TAG:-local}
+  build:
+    context: .
+    dockerfile: infra/caddy/Dockerfile
+
 services:
+  caddy-init:
+    <<: *caddy-image
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /data /config"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: "no"
+
   caddy:
-    image: caddy:2.10.0-alpine
+    <<: *caddy-image
     init: true
     environment:
       APP_DOMAIN: ${APP_DOMAIN:-bumpabestie.localhost}
@@ -81,10 +102,11 @@ services:
       - "${CADDY_BIND_ADDRESS:-127.0.0.1}:${CADDY_HTTP_PORT:-8080}:80"
       - "${CADDY_BIND_ADDRESS:-127.0.0.1}:${CADDY_HTTPS_PORT:-8443}:443"
     volumes:
-      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
+      caddy-init:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
       web:
@@ -156,7 +178,11 @@ services:
     profiles: ["tools"]
 
   postgres:
-    image: postgres:16.9-alpine
+    image: bumpabestie-postgres:${INFRA_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: infra/postgres/Dockerfile
+      target: runtime
     init: true
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-bumpabestie}
@@ -165,7 +191,6 @@ services:
       APP_POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD:-local-app-postgres-only}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
     networks:
       - data
     healthcheck:
@@ -173,10 +198,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    stop_grace_period: 60s
     restart: unless-stopped
 
   redis:
-    image: redis:7.4.5-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     init: true
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1000"]
     volumes:
@@ -190,19 +216,26 @@ services:
       retries: 20
     restart: unless-stopped
 
-  backup:
-    image: bumpabestie-backup:${IMAGE_TAG:-local}
+  backup: &backup-service
+    image: bumpabestie-backup:${INFRA_IMAGE_TAG:-local}
     build:
       context: .
-      dockerfile: infra/backup/Dockerfile
+      dockerfile: infra/postgres/Dockerfile
+      target: backup
     environment:
       PGHOST: postgres
       PGPORT: "5432"
       PGUSER: ${POSTGRES_USER:-bumpabestie}
       PGPASSWORD: ${POSTGRES_PASSWORD:-local-postgres-only}
       PGDATABASE: ${POSTGRES_DB:-bumpabestie}
+      POSTGRES_USER: ${POSTGRES_USER:-bumpabestie}
+      POSTGRES_DB: ${POSTGRES_DB:-bumpabestie}
+      APP_POSTGRES_PASSWORD: ${APP_POSTGRES_PASSWORD:-local-app-postgres-only}
       BACKUP_DIR: /backups
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      APPLICATION_REVISION: ${DEPLOY_REF:-local}
+      BACKUP_IMAGE_TAG: ${INFRA_IMAGE_TAG:-local}
+      BACKUP_IMAGE_REF: ${BACKUP_IMAGE_REF:-local}
     depends_on:
       postgres:
         condition: service_healthy
@@ -214,9 +247,13 @@ services:
       - hermes_data:/source/hermes
     networks:
       - data
-      - egress
     restart: "no"
     profiles: ["tools"]
+
+  restore:
+    <<: *backup-service
+    entrypoint: ["/usr/local/bin/restore.sh"]
+    profiles: ["restore"]
 
 networks:
   edge:

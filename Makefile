@@ -2,7 +2,7 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap install lint format-check typecheck test test-api test-web e2e integration \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
-	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck clean
+	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract clean
 
 COMPOSE := docker compose
 PROD_COMPOSE := docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml
@@ -44,7 +44,7 @@ e2e: ## Run the current desktop/mobile Playwright browser checks
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
 	./scripts/local_e2e.sh
 
-quality: format-check lint typecheck test compose-config ## Run the local merge gate
+quality: format-check lint typecheck test compose-config production-contract ## Run the local merge gate
 
 dev: ## Build and start the credential-free local stack
 	$(COMPOSE) up -d --build postgres redis
@@ -78,6 +78,9 @@ compose-prod-config: ## Validate production Compose using .env.production
 	./scripts/validate_env.sh .env.production production
 	$(PROD_COMPOSE) config --quiet
 
+production-contract: ## Validate immutable production environment and Compose contracts
+	./scripts/test_production_contract.sh
+
 compose-smoke: ## Start the stack, migrate, seed and run cross-surface smoke checks
 	./scripts/compose_smoke.sh
 
@@ -89,10 +92,10 @@ backup: ## Create a database/export backup in the backups volume
 
 restore: ## Restore BACKUP_PATH after explicit confirmation
 	@test -n "$(BACKUP_PATH)" || (echo "Set BACKUP_PATH" >&2; exit 2)
-	$(COMPOSE) --profile tools run --rm \
+	$(COMPOSE) --profile restore run --rm \
 		-e RESTORE_CONFIRM=restore-bumpabestie \
 		-e BACKUP_PATH="$(BACKUP_PATH)" \
-		--entrypoint /usr/local/bin/restore.sh backup
+		restore
 
 deploy: ## Deploy the immutable production release selected in .env.production
 	./scripts/deploy.sh

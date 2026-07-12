@@ -2,17 +2,17 @@
 
 ## Status and reading guide
 
-This document defines the target architecture. The current local implementation
-has FastAPI/Next.js/Postgres-compatible models, deterministic in-process mocks,
-explicit Postgres RLS policy DDL, a same-origin Next.js API proxy for login/chat and
-Compose service shells. Explicit RLS was exercised through the non-owner
+This document defines the target architecture. The current implementation has
+FastAPI/Next.js/Postgres-compatible models, deterministic in-process mocks,
+explicit Postgres RLS policy DDL, authenticated API-backed production views and a
+same-origin Next.js API proxy. Explicit RLS was exercised through the non-owner
 `bumpabestie_app` role on local Postgres. It does **not** yet have a Redis job queue,
-transactional outbox, live Hermes process/profile topology, or fully API-backed
-settings/admin/research screens. Worker and scheduler
+transactional outbox or live Hermes process/profile topology. Worker and scheduler
 containers are idle local shells and are excluded from the provider-disabled
-production baseline. Production rejects mock providers; deferred paths must return
-unavailable rather than silently invoking local adapters. Those items remain
-acceptance requirements; see `docs/build-plan-compliance.md` and
+production baseline. Explicitly labelled demo fixtures remain available only for
+credential-free local UI testing. Production rejects mock providers; deferred paths
+must return unavailable rather than silently invoking local adapters. Those items
+remain acceptance requirements; see `docs/build-plan-compliance.md` and
 `docs/verification.md` for requirement and evidence status.
 
 ## System boundary
@@ -38,7 +38,7 @@ Next.js server and browser never receive Bumpa, Meta, Anthropic or Hermes secret
 
 - **Caddy** is the sole published ingress and routes by validated host.
 - **Next.js** provides public, SME, admin and research surfaces from one codebase;
-  only login/chat currently call the same-origin API proxy.
+  authenticated production views call FastAPI through the same-origin API proxy.
 - **FastAPI** is the synchronous control plane and owns the OpenAPI contract.
 - **Worker** executes outbound messages, provider sync, classification and exports.
 - **Scheduler** enqueues idempotent scheduled work; it does not execute jobs inline.
@@ -98,8 +98,9 @@ pretending that the build plan's production definition of done has been reached.
 
 ## Portability
 
-Compose files contain no host-specific absolute paths. Images target `linux/amd64`,
-run with immutable tags, drop Linux capabilities and use read-only filesystems where
-the application permits. Persistent state is confined to named volumes and export/
-backup interfaces. The same images may later run on another container platform
-without changing domain logic or provider ports.
+Compose files contain no host-specific absolute paths. Images target `linux/amd64`;
+production consumes exact immutable digests, drops Linux capabilities where the
+service permits and uses read-only filesystems where the application permits.
+Persistent state is confined to named volumes and export/backup interfaces. The same
+images may later run on another container platform without changing domain logic or
+provider ports.
