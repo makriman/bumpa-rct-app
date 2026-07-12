@@ -22,6 +22,15 @@ export type TeamMember = {
   status: string;
 };
 
+export type PlatformAdmin = {
+  user_id: string;
+  name: string | null;
+  phone_e164: string;
+  status: string;
+  platform_roles: Array<"operator" | "superadmin">;
+  created_at: string;
+};
+
 export type WhatsAppNumber = {
   id: string;
   user_id: string;

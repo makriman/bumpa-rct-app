@@ -26,7 +26,7 @@ export const adminNav: NavGroup[] = [
     items: [
       { label: "Overview", href: "/admin", icon: "▦" },
       { label: "Tenants", href: "/admin/tenants", icon: "⌂" },
-      { label: "Users", href: "/admin/users", icon: "♢" },
+      { label: "Administrators", href: "/admin/users", icon: "♢" },
       { label: "Sync runs", href: "/admin/sync", icon: "↻" },
     ],
   },

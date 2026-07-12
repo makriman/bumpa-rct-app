@@ -4,7 +4,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import Any, BinaryIO, TextIO
+from typing import Any, BinaryIO, Literal, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import select
@@ -22,6 +22,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import SessionLocal, set_security_context
+from app.providers.bumpa import BumpaClient, BumpaProviderError
 from app.services.audit import audit
 
 MAX_STDIN_BYTES = 65_536
@@ -63,6 +64,7 @@ class OperatorInput(StrictInput):
     phone_e164: str
     name: str = Field(default="Bootstrap Operator", min_length=1, max_length=200)
     bootstrap_if_missing: bool = False
+    platform_role: Literal["operator", "superadmin"] = "operator"
 
     @field_validator("phone_e164")
     @classmethod
@@ -163,8 +165,11 @@ def onboard(
     if len(field_encryption_key) < 24 or field_encryption_key.startswith("local-only"):
         raise OnboardingError("field_encryption_key_invalid")
     result = OnboardingResult()
-    set_security_context(db, privileged=True)
     try:
+        # Verify upstream credentials before opening a privileged database
+        # transaction or creating any mutable ORM state.
+        _verify_bumpa(bundle.bumpa)
+        set_security_context(db, privileged=True)
         actor = _upsert_operator(db, bundle.operator, result)
         tenant = _upsert_tenant(db, bundle.tenant, actor.id, result)
         owner = _upsert_owner(db, tenant, bundle.owner, actor.id, result)
@@ -223,6 +228,14 @@ def _mark(result: OnboardingResult, state: str) -> None:
     result.counts[state] += 1
 
 
+def _verify_bumpa(data: BumpaInput) -> None:
+    try:
+        with BumpaClient(data.api_key, "business_id", data.business_id) as provider:
+            provider.verify()
+    except (BumpaProviderError, ValueError) as exc:
+        raise OnboardingError("bumpa_connection_verification_failed") from exc
+
+
 def _record_audit(
     db: Session,
     result: OnboardingResult,
@@ -263,13 +276,13 @@ def _upsert_operator(db: Session, data: OperatorInput, result: OnboardingResult)
     role = db.scalar(
         select(PlatformRole).where(
             PlatformRole.user_id == user.id,
-            PlatformRole.role.in_(("operator", "superadmin")),
+            PlatformRole.role == data.platform_role,
         )
     )
     if not role:
         if not data.bootstrap_if_missing:
             raise OnboardingError("operator_role_required")
-        role = PlatformRole(user_id=user.id, role="operator")
+        role = PlatformRole(user_id=user.id, role=data.platform_role)
         db.add(role)
         db.flush()
         _mark(result, "created")
@@ -277,10 +290,10 @@ def _upsert_operator(db: Session, data: OperatorInput, result: OnboardingResult)
             db,
             result,
             actor_id=user.id,
-            action="platform.operator.bootstrapped",
+            action=f"platform.{data.platform_role}.bootstrapped",
             resource_type="platform_role",
             resource_id=role.id,
-            after={"role": "operator", "user_created": created_user},
+            after={"role": data.platform_role, "user_created": created_user},
         )
     else:
         _mark(result, "unchanged")
@@ -297,9 +310,10 @@ def _upsert_tenant(
         db.flush()
         _mark(result, "created")
         action = "tenant.created"
-    elif tenant.name != data.name or tenant.status != "active":
+    elif tenant.status != "active":
+        raise OnboardingError("tenant_inactive")
+    elif tenant.name != data.name:
         tenant.name = data.name
-        tenant.status = "active"
         _mark(result, "updated")
         action = "tenant.updated"
     else:
@@ -332,9 +346,16 @@ def _upsert_owner(
         db.flush()
         _mark(result, "created")
         action = "tenant.owner.created"
-    elif user.name != data.name or user.status != "active":
+    elif user.id == actor_id:
+        # A platform administrator may also own a tenant. The platform identity is
+        # authoritative for this shared User row, so tenant onboarding must not
+        # repeatedly rewrite its display name.
+        _mark(result, "unchanged")
+        return user
+    elif user.status != "active":
+        raise OnboardingError("owner_inactive")
+    elif user.name != data.name:
         user.name = data.name
-        user.status = "active"
         _mark(result, "updated")
         action = "tenant.owner.updated"
     else:
@@ -384,10 +405,7 @@ def _upsert_membership(
         _mark(result, "created")
         action = "tenant.owner_membership.created"
     elif membership.role != "owner" or membership.status != "active":
-        membership.role = "owner"
-        membership.status = "active"
-        _mark(result, "updated")
-        action = "tenant.owner_membership.updated"
+        raise OnboardingError("owner_membership_inactive_or_conflicting")
     else:
         _mark(result, "unchanged")
         return membership
@@ -427,11 +445,10 @@ def _upsert_phone(
         db.flush()
         _mark(result, "created")
         action = "phone.approved"
-    elif identity.status != "approved" or identity.opt_out:
-        identity.status = "approved"
-        identity.opt_out = False
-        _mark(result, "updated")
-        action = "phone.reapproved"
+    elif identity.opt_out:
+        raise OnboardingError("phone_identity_opted_out")
+    elif identity.status != "approved":
+        raise OnboardingError("phone_identity_not_approved")
     else:
         _mark(result, "unchanged")
         return identity
@@ -471,6 +488,8 @@ def _upsert_bumpa(
         _mark(result, "created")
         action = "tenant.bumpa_connection.created"
     else:
+        if connection.status != "active":
+            raise OnboardingError("bumpa_connection_inactive")
         try:
             same_key = cipher.decrypt(connection.encrypted_api_key) == data.api_key
         except (ValueError, UnicodeDecodeError):
@@ -480,7 +499,6 @@ def _upsert_bumpa(
             and connection.scope_type == "business_id"
             and connection.scope_id == data.business_id
             and connection.provider == "bumpa"
-            and connection.status == "active"
         ):
             _mark(result, "unchanged")
             return connection
@@ -488,7 +506,6 @@ def _upsert_bumpa(
         connection.scope_type = "business_id"
         connection.scope_id = data.business_id
         connection.provider = "bumpa"
-        connection.status = "active"
         _mark(result, "updated")
         action = "tenant.bumpa_connection.updated"
     _record_audit(

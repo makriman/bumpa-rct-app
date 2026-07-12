@@ -140,9 +140,16 @@ def get_principal(
     return Principal(user, platform_roles, membership, tenant)
 
 
-def require_tenant(principal: Principal = Depends(get_principal)) -> Principal:
+def require_tenant(
+    principal: Principal = Depends(get_principal),
+    db: Session = Depends(get_db),
+) -> Principal:
     if not principal.tenant or not principal.membership:
         raise HTTPException(status_code=403, detail="An active tenant membership is required")
+    # Platform administrators retain privileged context for global admin routes,
+    # but dual-role users must be narrowed before any tenant-scoped dependency
+    # returns. This prevents their platform role from bypassing tenant RLS.
+    set_security_context(db, tenant_id=principal.tenant.id)
     return principal
 
 
@@ -156,6 +163,12 @@ def require_operator(principal: Principal = Depends(get_principal)) -> Principal
     if principal.has_platform_role("operator", "superadmin"):
         return principal
     raise HTTPException(status_code=403, detail="Operator access required")
+
+
+def require_superadmin(principal: Principal = Depends(get_principal)) -> Principal:
+    if principal.has_platform_role("superadmin"):
+        return principal
+    raise HTTPException(status_code=403, detail="Superadministrator access required")
 
 
 def require_researcher(principal: Principal = Depends(get_principal)) -> Principal:

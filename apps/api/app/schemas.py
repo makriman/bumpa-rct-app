@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 ReportFormat = Literal["csv", "jsonl", "pdf"]
+PlatformAdminRole = Literal["operator", "superadmin"]
 AsyncJobStatus = Literal[
     "pending",
     "queued",
@@ -106,7 +107,31 @@ class UserCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     phone_e164: str
     email: EmailStr | None = None
+    role: Literal["admin", "member"] = "member"
+
+
+class TenantUserCreate(BaseModel):
+    """Platform-only tenant identity creation, including the initial owner."""
+
+    name: str = Field(min_length=1, max_length=200)
+    phone_e164: str
+    email: EmailStr | None = None
     role: Literal["owner", "admin", "member"] = "member"
+
+
+class PlatformAdminCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    phone_e164: str
+    role: Literal["operator"] = "operator"
+
+
+class PlatformAdminView(BaseModel):
+    user_id: str
+    name: str | None
+    phone_e164: str
+    status: str
+    platform_roles: list[PlatformAdminRole]
+    created_at: datetime
 
 
 class ProfileUpdate(BaseModel):

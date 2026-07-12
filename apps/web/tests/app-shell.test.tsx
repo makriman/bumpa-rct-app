@@ -7,7 +7,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AppShell } from "@/components/app-shell";
+import { AppShell, crossSurfaceHref } from "@/components/app-shell";
 
 const replace = vi.fn();
 const apiRequest = vi.hoisted(() => vi.fn());
@@ -49,6 +49,82 @@ afterEach(() => {
 });
 
 describe("workspace mobile navigation", () => {
+  it("routes workspace switches across the dedicated production hosts", () => {
+    expect(
+      crossSurfaceHref(
+        "tenant",
+        "https://admin.bumpabestie.165-227-228-20.sslip.io/admin",
+      ),
+    ).toBe("https://bumpabestie.165-227-228-20.sslip.io/chat");
+    expect(
+      crossSurfaceHref(
+        "admin",
+        "https://bumpabestie.165-227-228-20.sslip.io/chat",
+      ),
+    ).toBe("https://admin.bumpabestie.165-227-228-20.sslip.io/admin");
+    expect(
+      crossSurfaceHref(
+        "admin",
+        "https://www.bumpabestie.165-227-228-20.sslip.io/chat?view=owner#latest",
+      ),
+    ).toBe("https://admin.bumpabestie.165-227-228-20.sslip.io/admin");
+  });
+
+  it("offers a direct workspace switch for a dual-role administrator", async () => {
+    apiRequest.mockResolvedValueOnce({
+      ...session,
+      platform_roles: ["operator", "superadmin"],
+    });
+    render(
+      <AppShell surface="admin" title="Platform administration">
+        <p>Admin content</p>
+      </AppShell>,
+    );
+
+    const switcher = await screen.findByRole("link", {
+      name: "Switch to your tenant workspace",
+    });
+    expect(switcher).toHaveAttribute("href", "/chat");
+    expect(screen.getByText("Open your store membership")).toBeVisible();
+  });
+
+  it("offers a direct return to administration from a tenant workspace", async () => {
+    apiRequest.mockResolvedValueOnce({
+      ...session,
+      platform_roles: ["operator"],
+    });
+    render(
+      <AppShell surface="user" title="Bestie chat">
+        <p>Workspace content</p>
+      </AppShell>,
+    );
+
+    const switcher = await screen.findByRole("link", {
+      name: "Switch to platform administration",
+    });
+    expect(switcher).toHaveAttribute("href", "/admin");
+    expect(screen.getByText("Manage tenant mappings")).toBeVisible();
+    expect(
+      screen.queryByRole("link", { name: "Administrators" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows administrator management only to superadmins", async () => {
+    apiRequest.mockResolvedValueOnce({
+      ...session,
+      platform_roles: ["superadmin"],
+    });
+    render(
+      <AppShell surface="admin" title="Platform administration">
+        <p>Admin content</p>
+      </AppShell>,
+    );
+
+    expect(
+      await screen.findByRole("link", { name: "Administrators" }),
+    ).toBeVisible();
+  });
+
   it("moves focus into the drawer, makes the page inert, and restores focus on Escape", async () => {
     apiRequest.mockResolvedValueOnce(session);
     render(

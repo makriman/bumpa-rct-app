@@ -39,6 +39,31 @@ function navFor(surface: Surface): NavGroup[] {
       : userNav;
 }
 
+export function crossSurfaceHref(
+  target: "tenant" | "admin",
+  currentHref: string,
+): string {
+  const path = target === "tenant" ? "/chat" : "/admin";
+  try {
+    const url = new URL(currentHref);
+    const baseHostname = url.hostname.replace(/^(admin|research|www)\./, "");
+    if (
+      baseHostname === "localhost" ||
+      baseHostname === "127.0.0.1" ||
+      baseHostname === "::1"
+    ) {
+      return path;
+    }
+    url.hostname = target === "admin" ? `admin.${baseHostname}` : baseHostname;
+    url.pathname = path;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return path;
+  }
+}
+
 export function AppShell({
   surface,
   title,
@@ -63,6 +88,10 @@ export function AppShell({
   const [session, setSession] = useState<SessionView | null>(null);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [workspaceLinks, setWorkspaceLinks] = useState({
+    tenant: "/chat",
+    admin: "/admin",
+  });
   useEffect(() => {
     void apiRequest<SessionView>("/auth/me")
       .then((result) => {
@@ -79,6 +108,12 @@ export function AppShell({
         }
       });
   }, [pathname, router]);
+  useEffect(() => {
+    setWorkspaceLinks({
+      tenant: crossSurfaceHref("tenant", window.location.href),
+      admin: crossSurfaceHref("admin", window.location.href),
+    });
+  }, []);
   useEffect(() => {
     if (!menuOpen) return;
     const sidebar = sidebarRef.current;
@@ -119,7 +154,16 @@ export function AppShell({
       menuButton?.focus();
     };
   }, [menuOpen]);
-  const nav = navFor(surface);
+  const canManagePlatformAdmins = Boolean(
+    session?.platform_roles.includes("superadmin") ||
+      (!session && dataSource === "demo"),
+  );
+  const nav = navFor(surface).map((group) => ({
+    ...group,
+    items: group.items.filter(
+      (item) => item.href !== "/admin/users" || canManagePlatformAdmins,
+    ),
+  }));
   const demoName =
     surface === "admin"
       ? "Demo operator"
@@ -143,6 +187,12 @@ export function AppShell({
       : surface === "research"
         ? "Demo preview · researcher"
         : "Demo preview · owner";
+  const hasPlatformAdminAccess = Boolean(
+    session?.platform_roles.some((role) =>
+      ["operator", "superadmin"].includes(role),
+    ),
+  );
+  const hasActiveWorkspace = currentMembership?.status === "active";
   async function handleLogout() {
     if (logoutPending) return;
     setLogoutPending(true);
@@ -221,6 +271,38 @@ export function AppShell({
           </div>
         ))}
         <div className="sidebar-bottom">
+          {surface === "admin" && hasActiveWorkspace && (
+            <Link
+              className="workspace-switch"
+              href={workspaceLinks.tenant}
+              aria-label="Switch to your tenant workspace"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="workspace-switch-icon" aria-hidden="true">
+                ↙
+              </span>
+              <span>
+                <strong>My tenant workspace</strong>
+                <small>Open your store membership</small>
+              </span>
+            </Link>
+          )}
+          {surface === "user" && hasPlatformAdminAccess && (
+            <Link
+              className="workspace-switch"
+              href={workspaceLinks.admin}
+              aria-label="Switch to platform administration"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="workspace-switch-icon" aria-hidden="true">
+                ↗
+              </span>
+              <span>
+                <strong>Platform administration</strong>
+                <small>Manage tenant mappings</small>
+              </span>
+            </Link>
+          )}
           <div className="user-chip">
             <span className="avatar">
               {displayName

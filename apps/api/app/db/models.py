@@ -53,7 +53,13 @@ class User(IdMixin, TimestampMixin, Base):
 
 class PlatformRole(IdMixin, TimestampMixin, Base):
     __tablename__ = "platform_roles"
-    __table_args__ = (UniqueConstraint("user_id", "role"),)
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('operator', 'researcher', 'superadmin')",
+            name="ck_platform_roles_role",
+        ),
+        UniqueConstraint("user_id", "role"),
+    )
 
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(24), index=True)

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import Principal, require_tenant, require_tenant_admin
@@ -66,34 +67,62 @@ def add_team_member(
 ) -> dict:
     assert principal.tenant is not None
     phone = normalize_phone(payload.phone_e164)
-    user = db.scalar(select(User).where(User.primary_phone_e164 == phone))
-    if not user:
-        user = User(
-            name=payload.name,
-            primary_phone_e164=phone,
-            email=str(payload.email) if payload.email else None,
+    try:
+        user = db.scalar(select(User).where(User.primary_phone_e164 == phone))
+        if not user:
+            user = User(
+                name=payload.name,
+                primary_phone_e164=phone,
+                email=str(payload.email) if payload.email else None,
+            )
+            db.add(user)
+            # The unique phone constraint closes the concurrent-new-user race.
+            db.flush()
+        membership = db.scalar(
+            select(TenantMembership).where(
+                TenantMembership.tenant_id == principal.tenant.id,
+                TenantMembership.user_id == user.id,
+            )
         )
-        db.add(user)
-        db.flush()
-    if db.scalar(
-        select(TenantMembership).where(
-            TenantMembership.tenant_id == principal.tenant.id,
-            TenantMembership.user_id == user.id,
+        action = "team.member.added"
+        before: dict[str, str] | None = None
+        if membership:
+            if membership.role == "owner":
+                raise HTTPException(
+                    status_code=409, detail="The tenant owner is managed by the platform"
+                )
+            if membership.status == "active":
+                raise HTTPException(status_code=409, detail="User is already an active team member")
+            if membership.status != "revoked":
+                raise HTTPException(status_code=409, detail="Team membership cannot be reactivated")
+            before = {"role": membership.role, "status": membership.status}
+            membership.role = payload.role
+            membership.status = "active"
+            action = "team.member.reactivated"
+        else:
+            membership = TenantMembership(
+                tenant_id=principal.tenant.id,
+                user_id=user.id,
+                role=payload.role,
+            )
+            db.add(membership)
+            # Populate the identifier and surface the membership uniqueness
+            # race before audit creation.
+            db.flush()
+        audit(
+            db,
+            actor_user_id=principal.user.id,
+            tenant_id=principal.tenant.id,
+            action=action,
+            resource_type="membership",
+            resource_id=membership.id,
+            before=before,
+            after={"user_id": user.id, "role": payload.role, "status": "active"},
         )
-    ):
-        raise HTTPException(status_code=409, detail="User is already a team member")
-    membership = TenantMembership(tenant_id=principal.tenant.id, user_id=user.id, role=payload.role)
-    db.add(membership)
-    audit(
-        db,
-        actor_user_id=principal.user.id,
-        tenant_id=principal.tenant.id,
-        action="team.member.added",
-        resource_type="membership",
-        resource_id=membership.id,
-        after={"user_id": user.id, "role": payload.role},
-    )
-    db.commit()
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Team member conflict") from exc
     return {"membership_id": membership.id, "user_id": user.id, "role": membership.role}
 
 
@@ -108,6 +137,10 @@ def remove_team_member(
         raise HTTPException(status_code=404, detail="Membership not found")
     if membership.role == "owner":
         raise HTTPException(status_code=409, detail="The tenant owner cannot be removed")
+    if membership.status == "revoked":
+        return
+    if membership.status != "active":
+        raise HTTPException(status_code=409, detail="Team membership cannot be revoked")
     membership.status = "revoked"
     audit(
         db,
@@ -116,6 +149,8 @@ def remove_team_member(
         action="team.member.revoked",
         resource_type="membership",
         resource_id=membership.id,
+        before={"role": membership.role, "status": "active"},
+        after={"role": membership.role, "status": "revoked"},
     )
     db.commit()
 
@@ -157,10 +192,14 @@ def add_whatsapp_number(
     )
     if not membership:
         raise HTTPException(status_code=422, detail="User must be an active team member")
+    phone = normalize_phone(payload.phone_e164)
+    existing = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
+    if existing:
+        raise HTTPException(status_code=409, detail="WhatsApp number is already approved")
     identity = PhoneIdentity(
         tenant_id=principal.tenant.id,
         user_id=payload.user_id,
-        phone_e164=normalize_phone(payload.phone_e164),
+        phone_e164=phone,
         label=payload.label,
     )
     db.add(identity)
@@ -173,7 +212,14 @@ def add_whatsapp_number(
         resource_id=identity.id,
         after={"user_id": payload.user_id},
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The unique phone constraint remains the cross-tenant concurrency
+        # authority. Convert races (and identities hidden by tenant RLS) into a
+        # stable API conflict without ever reassigning the existing identity.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="WhatsApp number is already approved") from None
     return {"id": identity.id, "status": identity.status}
 
 
