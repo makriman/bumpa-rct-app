@@ -7,7 +7,7 @@ trap 'rm -rf "$work_dir"' EXIT
 
 wait_for_stack() {
   local attempt
-  for attempt in {1..30}; do
+  for ((attempt = 1; attempt <= 30; attempt++)); do
     if curl -fsS --max-time 3 "$base/api/health" >/dev/null 2>&1; then
       return 0
     fi

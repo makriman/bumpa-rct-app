@@ -9,7 +9,9 @@ if [[ -z "${ADMIN_SSH_CIDR:-}" ]]; then
   echo "Set ADMIN_SSH_CIDR, for example 203.0.113.10/32" >&2
   exit 2
 fi
-if [[ "$(. /etc/os-release && echo "$ID:$VERSION_ID")" != "ubuntu:24.04" ]]; then
+os_id="$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')"
+os_version="$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')"
+if [[ "$os_id:$os_version" != "ubuntu:24.04" ]]; then
   echo "This bootstrap is supported only on Ubuntu 24.04" >&2
   exit 2
 fi
@@ -22,8 +24,8 @@ apt-get install -y ca-certificates curl fail2ban git gnupg jq unattended-upgrade
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
-. /etc/os-release
-printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' "$(dpkg --print-architecture)" "$VERSION_CODENAME" > /etc/apt/sources.list.d/docker.list
+version_codename="$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release | tr -d '"')"
+printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' "$(dpkg --print-architecture)" "$version_codename" > /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 

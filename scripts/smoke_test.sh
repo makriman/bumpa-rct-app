@@ -17,7 +17,7 @@ request() {
   local url="$2"
   local expected="$3"
   local attempt status
-  for attempt in {1..30}; do
+  for ((attempt = 1; attempt <= 30; attempt++)); do
     status="$(curl --silent --show-error --output /tmp/bumpabestie-smoke-body --write-out '%{http_code}' --max-time 10 "$url" || true)"
     if [[ "$status" =~ $expected ]]; then
       echo "PASS $name ($status)"
