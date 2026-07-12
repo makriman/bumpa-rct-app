@@ -118,7 +118,7 @@ a {
 .public-links a:hover {
   color: var(--forest);
 }
-.mobile-nav {
+.public-nav > .mobile-nav {
   display: none;
 }
 
@@ -1541,7 +1541,7 @@ a {
   .public-links {
     display: none;
   }
-  .mobile-nav {
+  .public-nav > .mobile-nav {
     display: inline-flex;
   }
   .hero {

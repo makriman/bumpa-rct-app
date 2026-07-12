@@ -4,6 +4,7 @@ test("public lander presents the product and reaches login", async ({
   page,
 }) => {
   await page.goto("/");
+  await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(1);
   await expect(
     page.getByRole("heading", { name: /Know your business/i }),
   ).toBeVisible();
