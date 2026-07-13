@@ -26,23 +26,41 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		Cross-Origin-Opener-Policy "same-origin"
-		Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self' blob:"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	}
 }
 
+(non_document_csp) {
+	header Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
+}
+
 (web_proxy) {
 	import security_headers
+	# Next owns document CSP because only its renderer can apply the matching
+	# per-request nonce. This fail-closed default applies only when the upstream
+	# omits CSP (for example, a health response or an upstream error).
+	header ?Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
 	encode zstd gzip
 	reverse_proxy web:3000 {
+		# Do not allow a client-supplied policy or nonce to reach Next. Middleware
+		# creates and overwrites both again before rendering as defense in depth.
+		header_up -Content-Security-Policy
+		header_up -Content-Security-Policy-Report-Only
+		header_up -X-Nonce
 		health_uri /api/health
 		health_interval 30s
 	}
 }
 
-{$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost}, {$CADDY_SITE_SCHEME:http}://{$WWW_DOMAIN:www.bumpabestie.localhost} {
+{$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost} {
 	request_header X-Bumpa-Surface public
 	import web_proxy
+}
+
+{$CADDY_SITE_SCHEME:http}://{$WWW_DOMAIN:www.bumpabestie.localhost} {
+	import security_headers
+	import non_document_csp
+	redir {$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost}{uri} 308
 }
 
 {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost} {
@@ -57,6 +75,7 @@
 
 {$CADDY_SITE_SCHEME:http}://{$API_DOMAIN:api.bumpabestie.localhost} {
 	import security_headers
+	import non_document_csp
 	encode zstd gzip
 	request_body {
 		max_size 10MB

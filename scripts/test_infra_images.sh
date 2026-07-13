@@ -673,6 +673,18 @@ docker run --detach \
   "$caddy_image" >/dev/null
 test "$(docker exec "$edge" id -u)" = 10001
 edge_port="$(docker port "$edge" 80/tcp | sed -E 's/^.*:([0-9]+)$/\1/' | head -1)"
+www_headers="$(
+  curl --silent --show-error --dump-header - --output /dev/null \
+    --header 'Host: www.bumpabestie.localhost' \
+    "http://127.0.0.1:$edge_port/canonical-path?source=www"
+)"
+grep -Eq '^HTTP/[0-9.]+ 308' <<<"$www_headers"
+grep -Eiq '^location: http://bumpabestie\.localhost/canonical-path\?source=www\r?$' \
+  <<<"$www_headers"
+test "$(grep -Eic '^content-security-policy:' <<<"$www_headers")" = 1
+grep -Eiq \
+  "^content-security-policy: default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'\r?$" \
+  <<<"$www_headers"
 edge_status=""
 verify_token_canary="caddy-runtime-secret-canary-$suffix"
 for _attempt in {1..30}; do

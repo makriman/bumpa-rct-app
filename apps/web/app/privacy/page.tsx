@@ -1,4 +1,14 @@
+import type { Metadata } from "next";
 import { PublicShell } from "@/components/public-shell";
+import { publicPageMetadata } from "@/lib/site-metadata";
+
+export const metadata: Metadata = publicPageMetadata({
+  path: "/privacy",
+  pageTitle: "Privacy notice",
+  pageDescription:
+    "How Bumpa Bestie processes, protects, and governs business and research data.",
+});
+
 export default function PrivacyPage() {
   return (
     <PublicShell>

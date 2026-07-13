@@ -42,6 +42,15 @@ async function settleVisuals(page: Page) {
   });
 }
 
+function cspDirective(policy: string, name: string): string {
+  return (
+    policy
+      .split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith(`${name} `)) ?? ""
+  );
+}
+
 test("public landing and login have zero automated Axe WCAG A/AA violations", async ({
   page,
 }) => {
@@ -122,6 +131,67 @@ test("authenticated surfaces have zero automated Axe violations and keyboard-rea
   });
   await expectKeyboardReachable(page, questionTable);
   await expectWcagAA(page);
+});
+
+test("public and authenticated documents enforce request-scoped nonce CSP", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const scope = window as typeof window & { __cspViolations?: string[] };
+    scope.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", (event) => {
+      scope.__cspViolations?.push(
+        `${event.effectiveDirective}:${event.blockedURI || "inline"}`,
+      );
+    });
+  });
+  await mockBumpa(page);
+
+  const nonces: string[] = [];
+  for (const path of ["/", "/settings/bumpa"]) {
+    const response = await page.goto(path);
+    expect(response).not.toBeNull();
+    const headers = await response!.allHeaders();
+    const policy = headers["content-security-policy"] ?? "";
+    const scriptSource = cspDirective(policy, "script-src");
+    const nonce = scriptSource.match(/'nonce-([^']+)'/)?.[1] ?? "";
+
+    expect(nonce).toMatch(/^[A-Za-z0-9+/_-]{20,}={0,2}$/);
+    expect(scriptSource).toContain("'strict-dynamic'");
+    expect(scriptSource).not.toContain("'unsafe-inline'");
+    expect(scriptSource).not.toContain("'unsafe-eval'");
+    expect(cspDirective(policy, "script-src-attr")).toBe(
+      "script-src-attr 'none'",
+    );
+    expect(cspDirective(policy, "style-src-attr")).toBe(
+      "style-src-attr 'unsafe-inline'",
+    );
+    expect(headers["cache-control"]).toContain("no-store");
+    expect(headers["x-nonce"]).toBeUndefined();
+
+    const scriptNonces = await page
+      .locator("script")
+      .evaluateAll((scripts) =>
+        scripts.map((script) => (script as HTMLScriptElement).nonce),
+      );
+    expect(scriptNonces.length).toBeGreaterThan(0);
+    expect(scriptNonces.every((value) => value === nonce)).toBe(true);
+    const styleNonces = await page
+      .locator("style")
+      .evaluateAll((styles) =>
+        styles.map((style) => (style as HTMLStyleElement).nonce),
+      );
+    expect(styleNonces.every((value) => value === nonce)).toBe(true);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as typeof window & { __cspViolations?: string[] })
+            .__cspViolations ?? [],
+      ),
+    ).toEqual([]);
+    nonces.push(nonce);
+  }
+  expect(new Set(nonces).size).toBe(nonces.length);
 });
 
 test("public and authenticated visual baselines do not regress", async ({

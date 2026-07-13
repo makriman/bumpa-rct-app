@@ -1,4 +1,13 @@
+import type { Metadata } from "next";
 import { PublicShell } from "@/components/public-shell";
+import { publicPageMetadata } from "@/lib/site-metadata";
+
+export const metadata: Metadata = publicPageMetadata({
+  path: "/about",
+  pageTitle: "About",
+  pageDescription:
+    "Why Bumpa Bestie gives small businesses practical answers from their own commerce data.",
+});
 
 export default function AboutPage() {
   return (

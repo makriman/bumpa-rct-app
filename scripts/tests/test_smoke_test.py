@@ -15,6 +15,7 @@ FAKE_CURL = r"""#!/usr/bin/env bash
 set -Eeuo pipefail
 
 output=""
+header_output=""
 url=""
 args=("$@")
 for ((index = 0; index < ${#args[@]}; index++)); do
@@ -22,23 +23,42 @@ for ((index = 0; index < ${#args[@]}; index++)); do
     --output)
       output="${args[$((index + 1))]}"
       ;;
+    --dump-header)
+      header_output="${args[$((index + 1))]}"
+      ;;
     http://* | https://*)
       url="${args[$index]}"
       ;;
   esac
 done
 
+call_number="$(grep -c '^CALL$' "$SMOKE_TEST_LOG" 2>/dev/null || true)"
+nonce="fakeNonce${call_number}000000000000000000000000"
+
 {
   printf 'CALL\n'
   printf 'ARG=%s\n' "$@"
   printf 'BODY=%s\n' "$output"
+  printf 'HEADER=%s\n' "$header_output"
 } >> "$SMOKE_TEST_LOG"
-printf 'test response\n' > "$output"
+if [[ -n "$header_output" && "$url" == *bumpabestie.example.com/ \
+  && "$url" != *www.* && "$url" != *admin.* && "$url" != *research.* ]]; then
+  printf '<html><script nonce="%s"></script></html>\n' "$nonce" > "$output"
+  printf '%s\r\n' \
+    'HTTP/1.1 200 OK' \
+    "Content-Security-Policy: default-src 'none'; script-src 'self' 'nonce-$nonce' 'strict-dynamic'; script-src-attr 'none'; style-src 'self' 'nonce-$nonce'; style-src-attr 'unsafe-inline';" \
+    'Cache-Control: private, no-store' \
+    '' > "$header_output"
+else
+  printf 'test response\n' > "$output"
+fi
 mode="$(stat -c '%a' "$output" 2>/dev/null || stat -f '%Lp' "$output")"
 printf 'MODE=%s\n' "$mode" >> "$SMOKE_TEST_LOG"
 
 if [[ "${SMOKE_TEST_CURL_MODE:-success}" == "failure" ]]; then
   printf '503'
+elif [[ "$url" == *www.* ]]; then
+  printf '308'
 elif [[ "$url" == *admin.* || "$url" == *research.* ]]; then
   printf '307'
 else
@@ -98,11 +118,11 @@ class SmokeTestScriptTest(unittest.TestCase):
             result, log_path = self.run_smoke(directory, origin_address="127.0.0.1")
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.count("PASS "), 6)
+            self.assertEqual(result.stdout.count("PASS "), 7)
             log = log_path.read_text(encoding="utf-8")
-            self.assertEqual(log.count("CALL\n"), 6)
-            self.assertEqual(log.count("ARG=--noproxy\n"), 6)
-            self.assertEqual(log.count("ARG=*\n"), 6)
+            self.assertEqual(log.count("CALL\n"), 8)
+            self.assertEqual(log.count("ARG=--noproxy\n"), 8)
+            self.assertEqual(log.count("ARG=*\n"), 8)
             self.assertNotIn("ARG=--insecure\n", log)
             self.assertNotIn("ARG=-k\n", log)
             for host in (
@@ -113,7 +133,7 @@ class SmokeTestScriptTest(unittest.TestCase):
                 "api.bumpabestie.example.com",
             ):
                 self.assertIn(f"ARG={host}:443:127.0.0.1\n", log)
-            self.assertEqual(log.count("MODE=600\n"), 6)
+            self.assertEqual(log.count("MODE=600\n"), 8)
             body_paths = {
                 Path(line.removeprefix("BODY="))
                 for line in log.splitlines()
