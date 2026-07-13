@@ -9,10 +9,10 @@ if [ -L "$runtime_root" ]; then
   exit 1
 fi
 mkdir -p "$runtime_root"
-[ -d "$runtime_root" ] && [ ! -L "$runtime_root" ] || {
+if [ ! -d "$runtime_root" ] || [ -L "$runtime_root" ]; then
   echo "Hermes runtime profile root is invalid" >&2
   exit 1
-}
+fi
 chown hermes:hermes "$runtime_root"
 chmod 0700 "$runtime_root"
 imported=0
