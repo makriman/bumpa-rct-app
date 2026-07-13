@@ -691,12 +691,26 @@ if ! grep -Eq '^HTTP/[0-9.]+ 308' <<<"$www_headers"; then
   docker logs "$edge" >&2 || true
   exit 1
 fi
-grep -Eiq '^location: http://bumpabestie\.localhost/canonical-path\?source=www\r?$' \
-  <<<"$www_headers"
-test "$(grep -Eic '^content-security-policy:' <<<"$www_headers")" = 1
-grep -Eiq \
-  "^content-security-policy: default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'\r?$" \
-  <<<"$www_headers"
+www_headers_normalized="$(tr -d '\r' <<<"$www_headers")"
+if ! grep -Eiq '^location: http://bumpabestie\.localhost/canonical-path\?source=www$' \
+  <<<"$www_headers_normalized"; then
+  echo "Caddy www redirect did not preserve the request path and query" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
+www_csp_count="$(grep -Eic '^content-security-policy:' <<<"$www_headers_normalized")"
+if [[ "$www_csp_count" != "1" ]]; then
+  echo "Caddy www redirect returned $www_csp_count Content-Security-Policy headers; expected 1" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
+if ! grep -Eiq \
+  "^content-security-policy: default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'$" \
+  <<<"$www_headers_normalized"; then
+  echo "Caddy www redirect returned an unexpected Content-Security-Policy" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
 edge_status=""
 verify_token_canary="caddy-runtime-secret-canary-$suffix"
 for _attempt in {1..30}; do
