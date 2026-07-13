@@ -224,6 +224,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
       WHATSAPP_BACKEND: disabled
+      META_TEST_SENDER_VERIFICATION_MODE: disabled
       BUMPA_BACKEND: disabled
       AGENT_BACKEND: disabled
 
@@ -261,7 +262,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "/command/s6-svstat /run/service/main-hermes | grep -q '^up' && /command/s6-svstat /run/service/bumpabestie-hermes-control | grep -q '^up' && curl --fail --silent --max-time 3 http://127.0.0.1:$${HERMES_CONTROL_PORT}/health >/dev/null",
+          "/command/s6-svstat /run/service/main-hermes | grep -q '^up' && { [ ! -f /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type ] || { /command/s6-svstat /run/service/bumpabestie-hermes-control | grep -q '^up' && curl --fail --silent --max-time 3 http://127.0.0.1:$${HERMES_CONTROL_PORT}/health >/dev/null; }; }",
         ]
       interval: 15s
       timeout: 5s

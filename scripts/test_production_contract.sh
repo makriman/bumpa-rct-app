@@ -13,6 +13,7 @@ duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 verification_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
+hermes_health_probe="$(mktemp -d)"
 runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
 backup_init_volume="bumpabestie-backup-init-contract-$$"
 offsite_env="$(mktemp)"
@@ -21,7 +22,7 @@ offsite_marker="$(mktemp)"
 cleanup() {
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$offsite_env" "$offsite_hook" "$offsite_marker"
-  rm -rf "$contract_secrets"
+  rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
   docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
 }
@@ -310,7 +311,9 @@ if ! jq --exit-status '
   .services.hermes.environment.HERMES_STAGING_ROOT == "/staged/profiles" and
   .services.api.environment.HERMES_CONTROL_PORT == "8699" and
   .services.api.group_add == ["10000"] and
-  (.services.hermes.healthcheck.test[1] | contains("bumpabestie-hermes-control")) and
+  (.services.hermes.healthcheck.test[1] | contains("/run/service/main-hermes")) and
+  (.services.hermes.healthcheck.test[1] | contains("/etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type")) and
+  (.services.hermes.healthcheck.test[1] | contains("/run/service/bumpabestie-hermes-control")) and
   (.services.hermes.healthcheck.test[1] | contains("HERMES_CONTROL_PORT")) and
   (.services.hermes.environment | has("ANTHROPIC_API_KEY") | not) and
   (.services.hermes.secrets | length == 1) and
@@ -379,6 +382,64 @@ if ! jq --exit-status '
   }' <<<"$rendered" >&2
   exit 1
 fi
+hermes_healthcheck="$(jq --raw-output '.services.hermes.healthcheck.test[1]' <<<"$rendered")"
+sh -n -c "$hermes_healthcheck"
+mkdir -p \
+  "$hermes_health_probe/command-main-only" \
+  "$hermes_health_probe/command-all-up" \
+  "$hermes_health_probe/control-absent" \
+  "$hermes_health_probe/control-present/s6-rc.d/bumpabestie-hermes-control" \
+  "$hermes_health_probe/curl-fail" \
+  "$hermes_health_probe/curl-success"
+cat > "$hermes_health_probe/command-main-only/s6-svstat" <<'EOF'
+#!/bin/sh
+if [ "$1" = /run/service/main-hermes ]; then
+  printf 'up (pid 100) 1 seconds\n'
+  exit 0
+fi
+exit 1
+EOF
+cat > "$hermes_health_probe/command-all-up/s6-svstat" <<'EOF'
+#!/bin/sh
+printf 'up (pid 100) 1 seconds\n'
+EOF
+cat > "$hermes_health_probe/curl-fail/curl" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+cat > "$hermes_health_probe/curl-success/curl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+printf 'longrun\n' > \
+  "$hermes_health_probe/control-present/s6-rc.d/bumpabestie-hermes-control/type"
+chmod 0555 \
+  "$hermes_health_probe/command-main-only/s6-svstat" \
+  "$hermes_health_probe/command-all-up/s6-svstat" \
+  "$hermes_health_probe/curl-fail/curl" \
+  "$hermes_health_probe/curl-success/curl"
+health_probe_image='python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df'
+docker run --rm --network none --read-only \
+  --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+  --volume "$hermes_health_probe/command-main-only:/command:ro" \
+  --volume "$hermes_health_probe/control-absent:/etc/s6-overlay:ro" \
+  --volume "$hermes_health_probe/curl-fail:/stubs:ro" \
+  "$health_probe_image" sh -eu -c "$hermes_healthcheck"
+if docker run --rm --network none --read-only \
+    --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+    --volume "$hermes_health_probe/command-main-only:/command:ro" \
+    --volume "$hermes_health_probe/control-present:/etc/s6-overlay:ro" \
+    --volume "$hermes_health_probe/curl-success:/stubs:ro" \
+    "$health_probe_image" sh -eu -c "$hermes_healthcheck"; then
+  echo "Hermes healthcheck accepted a failed control service in a control-capable image" >&2
+  exit 1
+fi
+docker run --rm --network none --read-only \
+  --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+  --volume "$hermes_health_probe/command-all-up:/command:ro" \
+  --volume "$hermes_health_probe/control-present:/etc/s6-overlay:ro" \
+  --volume "$hermes_health_probe/curl-success:/stubs:ro" \
+  "$health_probe_image" sh -eu -c "$hermes_healthcheck"
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
@@ -426,7 +487,11 @@ grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=180' scripts/deploy.sh
 grep -Fq 'if ! SMOKE_SCHEME=https' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=' scripts/deploy.sh
 grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=60' scripts/deploy.sh
-test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 3
+test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
+test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 2
+grep -Fq 'if docker start "${previous_writer_containers[@]}" >/dev/null' scripts/deploy.sh
+grep -Fq '&& "${compose[@]}" --profile async up -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq 'COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type' infra/hermes/Dockerfile
 if grep -Fq 'SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh' scripts/deploy.sh; then
   echo "Deployment bypasses the bounded direct-origin and edge smoke gates" >&2
   exit 1
@@ -709,6 +774,32 @@ awk '
 ' "$live_env" > "$verification_env"
 chmod 0600 "$verification_env"
 ./scripts/validate_env.sh "$verification_env" production >/dev/null
+
+# The one-shot migration process intentionally disables provider backends. A
+# live Meta test-sender setting must therefore remain available to the API while
+# being neutralized for migrations, whose settings are loaded before Alembic
+# can run. This reproduces the production release boundary rather than merely
+# checking the all-disabled contract fixture above.
+verification_rendered="$(docker compose --env-file "$verification_env" \
+  -f compose.yaml -f compose.prod.yaml --profile tools config --format json)"
+if ! jq --exit-status '
+  .services.api.environment.WHATSAPP_BACKEND == "meta" and
+  .services.api.environment.META_TEST_SENDER_VERIFICATION_MODE == "inbound_replies_only" and
+  .services.migrate.environment.WHATSAPP_BACKEND == "disabled" and
+  .services.migrate.environment.META_TEST_SENDER_VERIFICATION_MODE == "disabled"
+' <<<"$verification_rendered" >/dev/null; then
+  jq '{
+    api: (.services.api.environment | {
+      WHATSAPP_BACKEND,
+      META_TEST_SENDER_VERIFICATION_MODE
+    }),
+    migrate: (.services.migrate.environment | {
+      WHATSAPP_BACKEND,
+      META_TEST_SENDER_VERIFICATION_MODE
+    })
+  }' <<<"$verification_rendered" >&2
+  exit 1
+fi
 
 awk '
   /^META_TEST_SENDER_WABA_ID=/ { print "META_TEST_SENDER_WABA_ID="; next }

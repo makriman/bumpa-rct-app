@@ -484,9 +484,12 @@ rollback() {
       exit "$result"
     fi
     set +e
-    docker start "${previous_writer_containers[@]}" >/dev/null
-    run_production_smoke
-    restart_result=$?
+    if docker start "${previous_writer_containers[@]}" >/dev/null \
+        && run_production_smoke; then
+      restart_result=0
+    else
+      restart_result=1
+    fi
     set -e
     if ((restart_result == 0)); then
       echo "The previous application resumed successfully." >&2
@@ -515,17 +518,21 @@ rollback() {
     else
       "${compose[@]}" rm -f hermes 2>/dev/null || true
     fi
-    "${compose[@]}" pull "${rollback_images[@]}"
-    "${compose[@]}" up --no-deps --force-recreate \
-      --abort-on-container-exit --exit-code-from caddy-init caddy-init
     if ((previous_worker_running && previous_scheduler_running)); then
       rollback_services+=(worker scheduler)
     else
       "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
     fi
-    "${compose[@]}" --profile async up -d --no-deps "${rollback_services[@]}"
-    run_production_smoke
-    rollback_result=$?
+    if "${compose[@]}" pull "${rollback_images[@]}" \
+        && "${compose[@]}" up --no-deps --force-recreate \
+          --abort-on-container-exit --exit-code-from caddy-init caddy-init \
+        && "${compose[@]}" --profile async up -d --wait --wait-timeout 240 \
+          --no-deps "${rollback_services[@]}" \
+        && run_production_smoke; then
+      rollback_result=0
+    else
+      rollback_result=1
+    fi
     set -e
     if ((rollback_result == 0)); then
       # The forward infrastructure has already crossed its migration boundary.
