@@ -42,6 +42,10 @@ else
 fi
 install -d -m 0750 -o bumpabestie -g bumpabestie /opt/bumpabestie /opt/bumpabestie/releases
 install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie
+if [[ -n "$ROOT_DIR" && -f "$ROOT_DIR/infra/bin/bumpabestie-promote" ]]; then
+  install -m 0755 -o root -g root \
+    "$ROOT_DIR/infra/bin/bumpabestie-promote" /usr/local/sbin/bumpabestie-promote
+fi
 if [[ -f /root/.ssh/authorized_keys ]]; then
   install -d -m 0700 -o bumpabestie -g bumpabestie /home/bumpabestie/.ssh
   install -m 0600 -o bumpabestie -g bumpabestie \

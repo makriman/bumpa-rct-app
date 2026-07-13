@@ -170,6 +170,12 @@ class SyncCanaryValidationTest(unittest.TestCase):
                 )
             )
 
+    def test_rejects_legacy_run_as_unverified(self) -> None:
+        with self.assertRaisesRegex(helper.OpsError, "completion_evidence_invalid"):
+            helper._validate_completed_sync_run(
+                _run(completion_quality="legacy")
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

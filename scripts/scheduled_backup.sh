@@ -6,6 +6,13 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/maintenance_lock.sh"
 acquire_maintenance_lock
+coordinator_state="${BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock}.coordinator-state.json"
+if [[ -e "$coordinator_state" || -L "$coordinator_state" ]]; then
+  echo "A stable promotion is incomplete; scheduled backup is blocked" >&2
+  exit 78
+fi
+source "$ROOT_DIR/scripts/promotion_state.sh"
+assert_maintenance_clear
 
 env_file="${ENV_FILE:-.env.production}"
 compose=(

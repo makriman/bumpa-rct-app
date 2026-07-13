@@ -187,21 +187,73 @@ only on operator request as root with a separate narrow capability set, includin
 
 1. Confirm the exact revision's CI and local integration gates are green.
 2. Confirm SSH, DNS, firewall, free disk and GHCR pull access.
-3. Confirm `.env.production` validates and its mode is `0600`.
-4. Confirm webhook routing and provider selectors match the intended activation state.
-5. The deploy script verifies image revision labels, checks the PostgreSQL major,
+3. Run the installed, root-owned promotion coordinator with the reviewed merge
+   SHA and exact published digests. It acquires the maintenance lock before
+   reading the mutable checkout or environment, writes a private durable journal,
+   fetches and verifies `origin/main`, extracts and syntax-checks the target
+   promotion helpers into `/var/lib/bumpabestie`, and runs that target worker as a
+   child while retaining the lock:
+
+   ```bash
+   target_revision=<full-reviewed-merge-sha>
+   /usr/local/sbin/bumpabestie-promote \
+     "$target_revision" "sha-<infra-commit>" \
+     'ghcr.io/<owner>/bumpabestie-api@sha256:<digest>' \
+     'ghcr.io/<owner>/bumpabestie-web@sha256:<digest>' \
+     'ghcr.io/<owner>/bumpabestie-caddy@sha256:<digest>' \
+     'ghcr.io/<owner>/bumpabestie-postgres@sha256:<digest>' \
+     'ghcr.io/<owner>/bumpabestie-backup@sha256:<digest>' \
+     'ghcr.io/<owner>/bumpabestie-hermes@sha256:<digest>'
+   ```
+
+   Run it as `bumpabestie`, not as root. The inherited descriptor keeps the same
+   host lock across target selection, checkout, pointer selection and deploy;
+   scheduled/manual backup cannot observe or resume a half-promoted release. The
+   worker preserves every non-release setting and the file owner, requires exactly
+   one of each of the nine release keys, writes mode `0600`, and renames atomically.
+   Never source `.env.production` or print it into a generated file. Before the
+   forward boundary, failures restore both the recorded prior pointers and recorded
+   operations checkout. A post-migration hybrid rollback deliberately retains the
+   target operations checkout. A kill, reboot, corrupt terminal state or failed
+   restoration leaves a persistent maintenance interlock; backups and later
+   promotions then fail closed until an operator reconciles the journal.
+
+   For the one-time upgrade from a release that predates the coordinator, install
+   the reviewed launcher directly from the fetched target commit without checking
+   out that commit. This is the only root step; the launcher remains root-owned and
+   immutable to the deployment account:
+
+   ```bash
+   cd /opt/bumpabestie
+   sudo -u bumpabestie -H git fetch --tags --prune origin main
+   test "$(sudo -u bumpabestie -H git rev-parse origin/main)" = "$target_revision"
+   launcher_tmp="$(mktemp)"
+   sudo -u bumpabestie -H git show \
+     "$target_revision:infra/bin/bumpabestie-promote" >"$launcher_tmp"
+   bash -n "$launcher_tmp"
+   install -o root -g root -m 0755 "$launcher_tmp" /usr/local/sbin/bumpabestie-promote
+   rm -f "$launcher_tmp"
+   sudo -u bumpabestie -H /usr/local/sbin/bumpabestie-promote \
+     "$target_revision" "sha-<infra-commit>" \
+     '<api-digest-ref>' '<web-digest-ref>' '<caddy-digest-ref>' \
+     '<postgres-digest-ref>' '<backup-digest-ref>' '<hermes-digest-ref>'
+   ```
+4. Confirm `.env.production` validates and its mode is `0600`.
+5. Confirm webhook routing and provider selectors match the intended activation state.
+6. The deploy script verifies image revision labels, checks the PostgreSQL major,
    inventories extensions and affected legacy BRIN indexes, then creates and
    checksum-verifies a local pre-deploy backup while the old server is running.
-6. Install any changed reviewed backup service/timer units as root, run
-   `systemctl daemon-reload`, then run `./scripts/deploy.sh` as `bumpabestie` from a
-   clean checkout. The deploy preflight rejects stale installed units.
-7. The script checks out the immutable `DEPLOY_REF`, pulls all required images,
+7. Install any changed reviewed backup service/timer units as root and run
+   `systemctl daemon-reload` before the lock-owning promotion command above. The
+   deploy preflight rejects stale installed units.
+8. The coordinator checks out the immutable `DEPLOY_REF`; the guarded deploy
+   verifies that exact checkout and pulls all required images,
    stops writers, backs up the recovery point, reconciles the database role,
    migrates, imports staged Hermes profiles through a networkless one-shot service,
    starts Hermes gateways and then starts API/web/worker/scheduler/Caddy.
-8. Inspect readiness and confirm all provider modes match the intended release.
-9. Run and verify the first local backup, then start the timer.
-10. Preserve `.deployed-release.json`, DNS/TLS results, service state and backup ID.
+9. Inspect readiness and confirm all provider modes match the intended release.
+10. Run and verify the first local backup, then start the timer.
+11. Preserve `.deployed-release.json`, DNS/TLS results, service state and backup ID.
 
 Expected service boundary:
 
@@ -302,14 +354,36 @@ fail closed; reactivation is a separate administrative decision.
 ## Rollback boundary
 
 `scripts/deploy.sh` records the verified revision and actual running repository
-digests. On a failed later release it can restore the prior API and web image
-references and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
+digests. It validates that record as private, immutable metadata and compares its
+API, worker, scheduler, web, Hermes, Caddy, PostgreSQL and Redis references with
+the actual running containers before enabling automatic rollback. A mismatch is a
+hard preflight stop. Any pre-deployment failure after a valid record is loaded
+atomically restores all nine prior release pointers in `.env.production`.
+
+After migrations begin, a failed later release can restore the prior application
+images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
 automatic rollback never recreates an older infrastructure image and never reverses
-migrations. Before the recovery-point backup, the deploy script quiesces every
+migrations. Only after rollback smoke passes, the script persists a hybrid boundary:
+the prior application revision/tag and API/web/Hermes references with the target
+infrastructure tag and Caddy/PostgreSQL/backup references. Its separate
+`operations_revision` remains the target checkout so subsequent recovery and
+promotion use schema-compatible tooling; older records default this field to their
+application `revision`. If either smoke or
+persistence fails, it leaves the deployment failed for operator intervention and
+does not claim a verified rollback. Before the recovery-point backup, the deploy script quiesces every
 application writer; if backup or compatibility validation then fails, it restarts
 the exact previously running containers. Forward/backward schema compatibility
 remains a release requirement. Never run a destructive down-migration during an
 outage without a separately reviewed recovery plan.
+
+Migration `0007_legacy_sync_writer` preserves the application-image rollback
+boundary introduced by `0006_sync_completion`. SQL that omits the new completion
+evidence receives the server-only quality `legacy`; the current ORM still writes
+`pending` explicitly and must transition to a fully typed terminal state. Legacy
+rows may finish under a pre-0006 writer, but remain excluded from trusted Bumpa
+freshness and chat context until a current writer records a new evidenced run.
+The 0007 downgrade refuses while any legacy row remains; it never fabricates
+completion evidence merely to satisfy the older constraint.
 
 ## GitHub controls before launch
 

@@ -103,8 +103,14 @@ restore: ## Restore BACKUP_PATH after explicit confirmation
 		-e BACKUP_PATH="$(BACKUP_PATH)" \
 		restore
 
-deploy: ## Deploy the immutable production release selected in .env.production
-	./scripts/deploy.sh
+deploy: ## Promote an immutable production release through the installed stable coordinator
+	@test -n "$(REVISION)" -a -n "$(INFRA_IMAGE_TAG)" -a -n "$(API_IMAGE)" \
+		-a -n "$(WEB_IMAGE)" -a -n "$(CADDY_IMAGE)" -a -n "$(POSTGRES_IMAGE)" \
+		-a -n "$(BACKUP_IMAGE)" -a -n "$(HERMES_IMAGE)" || \
+		(echo "Set REVISION, INFRA_IMAGE_TAG and all six immutable image references" >&2; exit 2)
+	/usr/local/sbin/bumpabestie-promote \
+		"$(REVISION)" "$(INFRA_IMAGE_TAG)" "$(API_IMAGE)" "$(WEB_IMAGE)" \
+		"$(CADDY_IMAGE)" "$(POSTGRES_IMAGE)" "$(BACKUP_IMAGE)" "$(HERMES_IMAGE)"
 
 shellcheck: ## Validate shell syntax and run shellcheck when installed
 	./scripts/validate_shell.sh

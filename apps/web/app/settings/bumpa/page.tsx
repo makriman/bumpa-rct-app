@@ -312,6 +312,10 @@ export default function BumpaPage() {
     : "";
   const degradedPartial =
     latest?.status === "partial" && latest.completion_quality === "degraded";
+  const unverifiedLegacyRun =
+    latest !== undefined &&
+    isTerminalSyncStatus(latest.status) &&
+    latest.completion_quality === "legacy";
   return (
     <AppShell surface="user" title="Bumpa connection">
       <PageHeader
@@ -457,6 +461,23 @@ export default function BumpaPage() {
                           This refresh could not update every required dataset.
                           Review dataset availability before relying on these
                           figures.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                  {unverifiedLegacyRun && (
+                    <div
+                      className="alert alert-warning sync-quality-notice"
+                      role="status"
+                      aria-label="Bumpa data verification warning"
+                    >
+                      <span aria-hidden="true">!</span>
+                      <div>
+                        <strong>Latest refresh is unverified</strong>
+                        <p>
+                          This run was completed by an earlier app version
+                          without the evidence required to mark its data as
+                          current. Request a new refresh before relying on it.
                         </p>
                       </div>
                     </div>
