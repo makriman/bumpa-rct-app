@@ -710,6 +710,32 @@ awk '
 chmod 0600 "$verification_env"
 ./scripts/validate_env.sh "$verification_env" production >/dev/null
 
+# The one-shot migration process intentionally disables provider backends. A
+# live Meta test-sender setting must therefore remain available to the API while
+# being neutralized for migrations, whose settings are loaded before Alembic
+# can run. This reproduces the production release boundary rather than merely
+# checking the all-disabled contract fixture above.
+verification_rendered="$(docker compose --env-file "$verification_env" \
+  -f compose.yaml -f compose.prod.yaml --profile tools config --format json)"
+if ! jq --exit-status '
+  .services.api.environment.WHATSAPP_BACKEND == "meta" and
+  .services.api.environment.META_TEST_SENDER_VERIFICATION_MODE == "inbound_replies_only" and
+  .services.migrate.environment.WHATSAPP_BACKEND == "disabled" and
+  .services.migrate.environment.META_TEST_SENDER_VERIFICATION_MODE == "disabled"
+' <<<"$verification_rendered" >/dev/null; then
+  jq '{
+    api: (.services.api.environment | {
+      WHATSAPP_BACKEND,
+      META_TEST_SENDER_VERIFICATION_MODE
+    }),
+    migrate: (.services.migrate.environment | {
+      WHATSAPP_BACKEND,
+      META_TEST_SENDER_VERIFICATION_MODE
+    })
+  }' <<<"$verification_rendered" >&2
+  exit 1
+fi
+
 awk '
   /^META_TEST_SENDER_WABA_ID=/ { print "META_TEST_SENDER_WABA_ID="; next }
   { print }
