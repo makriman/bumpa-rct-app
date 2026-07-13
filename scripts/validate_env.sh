@@ -147,7 +147,7 @@ if [[ "$expected_environment" == "production" ]]; then
     failed=1
   fi
 
-  secret_keys=(JWT_SECRET OTP_SECRET FIELD_ENCRYPTION_KEY INTERNAL_SERVICE_TOKEN COOKIE_SECRET POSTGRES_PASSWORD APP_POSTGRES_PASSWORD)
+  secret_keys=(JWT_SECRET OTP_SECRET FIELD_ENCRYPTION_KEY RESEARCH_PSEUDONYM_KEY ONBOARDING_INTEGRITY_KEY INTERNAL_SERVICE_TOKEN COOKIE_SECRET POSTGRES_PASSWORD APP_POSTGRES_PASSWORD)
   for key in "${secret_keys[@]}"; do
     value="$(value_for "$key")"
     if [[ ${#value} -lt 24 || "$value" == *local-only* || "$value" == *ADD_VALUE* || "$value" == *change-me* ]]; then
@@ -155,6 +155,56 @@ if [[ "$expected_environment" == "production" ]]; then
       failed=1
     fi
   done
+
+  field_key_id="$(value_for FIELD_ENCRYPTION_KEY_ID)"
+  field_key_id="${field_key_id:-primary}"
+  field_write_version="$(value_for FIELD_ENCRYPTION_WRITE_VERSION)"
+  field_write_version="${field_write_version:-v1}"
+  field_old_keys="$(value_for FIELD_ENCRYPTION_OLD_KEYS)"
+  if [[ -z "$field_old_keys" ]]; then
+    field_old_keys='{}'
+  fi
+  if ! {
+    printf '%s\n' "$field_key_id"
+    printf '%s\n' "$field_write_version"
+    printf '%s' "$field_old_keys"
+  } | python3 -c '
+import json
+import re
+import sys
+
+key_id = sys.stdin.readline().rstrip("\n")
+write_version = sys.stdin.readline().rstrip("\n")
+try:
+    old_keys = json.loads(sys.stdin.read())
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+valid_id = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$").fullmatch
+if write_version not in {"v1", "v2"}:
+    raise SystemExit(1)
+if not valid_id(key_id) or not isinstance(old_keys, dict) or len(old_keys) > 16:
+    raise SystemExit(1)
+if key_id in old_keys:
+    raise SystemExit(1)
+for old_id, secret in old_keys.items():
+    if (
+        not isinstance(old_id, str)
+        or not valid_id(old_id)
+        or not isinstance(secret, str)
+        or len(secret) < 24
+        or secret.startswith("local-only")
+        or "ADD_VALUE" in secret
+        or "change-me" in secret
+    ):
+        raise SystemExit(1)
+'; then
+    echo "FIELD_ENCRYPTION_KEY_ID, FIELD_ENCRYPTION_WRITE_VERSION, or FIELD_ENCRYPTION_OLD_KEYS is invalid" >&2
+    failed=1
+  fi
+  if [[ "$field_write_version" != "v1" ]]; then
+    echo "FIELD_ENCRYPTION_WRITE_VERSION must remain v1 during the first dual-reader production soak" >&2
+    failed=1
+  fi
 
   if [[ "$(value_for SESSION_COOKIE_SECURE)" != "true" ]]; then
     echo "SESSION_COOKIE_SECURE must be true in production" >&2

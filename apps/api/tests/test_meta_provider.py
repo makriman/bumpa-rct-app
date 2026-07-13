@@ -157,6 +157,8 @@ def test_production_meta_secrets_can_be_loaded_from_absolute_files(tmp_path: Pat
         jwt_secret="j" * 40,
         otp_secret="o" * 40,
         field_encryption_key="f" * 40,
+        research_pseudonym_key="p" * 40,
+        onboarding_integrity_key="i" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="meta",

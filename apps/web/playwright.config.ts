@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
+  snapshotPathTemplate:
+    "{testDir}/__screenshots__/{testFilePath}/{arg}-{projectName}-{platform}{ext}",
   fullyParallel: false,
   workers: 2,
   retries: 0,
@@ -17,10 +19,11 @@ export default defineConfig({
     { name: "mobile-chromium", use: { ...devices["Pixel 7"] } },
   ],
   webServer: {
-    command: "next dev -p 3010",
+    command:
+      "npm run build && mkdir -p .next/standalone/public .next/standalone/.next/static && cp -R public/. .next/standalone/public/ && cp -R .next/static/. .next/standalone/.next/static/ && PORT=3010 HOSTNAME=127.0.0.1 node .next/standalone/server.js",
     url: "http://localhost:3010/api/health",
     env: { NEXT_PUBLIC_DEMO_MODE: "false" },
     reuseExistingServer: false,
-    timeout: 120_000,
+    timeout: 180_000,
   },
 });

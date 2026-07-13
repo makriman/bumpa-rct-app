@@ -62,6 +62,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     JWT_SECRET) value=contract-jwt-secret-000000000000000000 ;;
     OTP_SECRET) value=contract-otp-secret-000000000000000000 ;;
     FIELD_ENCRYPTION_KEY) value=contract-field-key-000000000000000000 ;;
+    RESEARCH_PSEUDONYM_KEY) value=contract-research-pseudonym-key-000000000 ;;
+    ONBOARDING_INTEGRITY_KEY) value=contract-onboarding-integrity-key-0000000 ;;
     INTERNAL_SERVICE_TOKEN) value=contract-internal-token-0000000000000 ;;
     COOKIE_SECRET) value=contract-cookie-secret-000000000000000 ;;
     SESSION_COOKIE_SECURE) value=true ;;
@@ -274,6 +276,29 @@ if ! jq --exit-status '
   .services.api.environment.WHATSAPP_BACKEND == "disabled" and
   .services.api.environment.AGENT_BACKEND == "disabled" and
   .services.api.environment.BUMPA_BACKEND == "disabled" and
+  .services.api.environment.FIELD_ENCRYPTION_KEY_ID == "primary" and
+  .services.api.environment.FIELD_ENCRYPTION_WRITE_VERSION == "v1" and
+  .services.api.environment.FIELD_ENCRYPTION_OLD_KEYS == "{}" and
+  .services.api.environment.RESEARCH_PSEUDONYM_KEY == "contract-research-pseudonym-key-000000000" and
+  .services.api.environment.ONBOARDING_INTEGRITY_KEY == "contract-onboarding-integrity-key-0000000" and
+  .services.api.environment.AUDIT_LOG_RETENTION_DAYS == "365" and
+  .services.api.environment.SYSTEM_ERROR_RETENTION_DAYS == "90" and
+  .services.api.environment.OPERATIONAL_RETENTION_BATCH_SIZE == "500" and
+  .services.worker.environment.FIELD_ENCRYPTION_KEY_ID == "primary" and
+  .services.worker.environment.FIELD_ENCRYPTION_WRITE_VERSION == "v1" and
+  .services.worker.environment.FIELD_ENCRYPTION_OLD_KEYS == "{}" and
+  .services.worker.environment.RESEARCH_PSEUDONYM_KEY == "contract-research-pseudonym-key-000000000" and
+  .services.worker.environment.ONBOARDING_INTEGRITY_KEY == "contract-onboarding-integrity-key-0000000" and
+  .services.scheduler.environment.FIELD_ENCRYPTION_KEY_ID == "primary" and
+  .services.scheduler.environment.FIELD_ENCRYPTION_WRITE_VERSION == "v1" and
+  .services.scheduler.environment.FIELD_ENCRYPTION_OLD_KEYS == "{}" and
+  .services.scheduler.environment.RESEARCH_PSEUDONYM_KEY == "contract-research-pseudonym-key-000000000" and
+  .services.scheduler.environment.ONBOARDING_INTEGRITY_KEY == "contract-onboarding-integrity-key-0000000" and
+  .services.migrate.environment.FIELD_ENCRYPTION_KEY_ID == "primary" and
+  .services.migrate.environment.FIELD_ENCRYPTION_WRITE_VERSION == "v1" and
+  .services.migrate.environment.FIELD_ENCRYPTION_OLD_KEYS == "{}" and
+  .services.migrate.environment.RESEARCH_PSEUDONYM_KEY == "contract-research-pseudonym-key-000000000" and
+  .services.migrate.environment.ONBOARDING_INTEGRITY_KEY == "contract-onboarding-integrity-key-0000000" and
   (.services.api.command | index("--no-access-log") != null) and
   .services.worker.environment.ASYNC_RUNTIME_ENABLED == "true" and
   .services.scheduler.environment.ASYNC_RUNTIME_ENABLED == "true" and
@@ -687,6 +712,54 @@ awk '
 chmod 0600 "$invalid_env"
 if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   echo "Production validation accepted a disabled async runtime" >&2
+  exit 1
+fi
+
+awk '
+  /^FIELD_ENCRYPTION_OLD_KEYS=/ {
+    print "FIELD_ENCRYPTION_OLD_KEYS={\"primary\":\"old-field-key-material-000000000000\"}"; next
+  }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted the current key ID in the old-key ring" >&2
+  exit 1
+fi
+
+awk '
+  /^FIELD_ENCRYPTION_OLD_KEYS=/ {
+    print "FIELD_ENCRYPTION_OLD_KEYS={\"old-2025\":\"too-short\"}"; next
+  }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted weak old field-encryption key material" >&2
+  exit 1
+fi
+
+awk '
+  /^FIELD_ENCRYPTION_WRITE_VERSION=/ {
+    print "FIELD_ENCRYPTION_WRITE_VERSION=v2"; next
+  }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "First dual-reader production validation accepted v2 field-encryption writes" >&2
+  exit 1
+fi
+
+awk '
+  /^FIELD_ENCRYPTION_WRITE_VERSION=/ {
+    print "FIELD_ENCRYPTION_WRITE_VERSION=v3"; next
+  }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted an unsupported field-encryption write version" >&2
   exit 1
 fi
 

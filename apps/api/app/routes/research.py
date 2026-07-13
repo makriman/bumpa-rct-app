@@ -1,5 +1,4 @@
 import hashlib
-import ipaddress
 import re
 import secrets
 from collections import Counter, defaultdict
@@ -8,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from math import ceil
 from typing import cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -175,9 +174,9 @@ def _research_event_view(event: ResearchEvent, settings: Settings) -> ResearchCo
     """Serialize an event through the research-safe disclosure boundary."""
 
     return ResearchConversationEventView(
-        id=pseudonymize(event.id, settings.field_encryption_key, namespace="event"),
+        id=pseudonymize(event.id, settings.research_pseudonym_key, namespace="event"),
         user_pseudonym=(
-            pseudonymize(event.user_id, settings.field_encryption_key, namespace="user")
+            pseudonymize(event.user_id, settings.research_pseudonym_key, namespace="user")
             if event.user_id
             else None
         ),
@@ -204,14 +203,14 @@ def _conversation_view(
     user_ids = sorted({event.user_id for event in ordered if event.user_id})
     intent_counts = Counter(event.primary_intent or "unclassified" for event in ordered)
     return ResearchConversationSummaryView(
-        id=pseudonymize(conversation_id, settings.field_encryption_key, namespace="conversation"),
+        id=pseudonymize(conversation_id, settings.research_pseudonym_key, namespace="conversation"),
         tenant_pseudonym=(
-            pseudonymize(tenant_id, settings.field_encryption_key, namespace="tenant")
+            pseudonymize(tenant_id, settings.research_pseudonym_key, namespace="tenant")
             if tenant_id
             else None
         ),
         participant_pseudonyms=[
-            pseudonymize(user_id, settings.field_encryption_key, namespace="user")
+            pseudonymize(user_id, settings.research_pseudonym_key, namespace="user")
             for user_id in user_ids
         ],
         channel=latest.channel,
@@ -324,7 +323,7 @@ def overview(
             {
                 "tenant_pseudonym": pseudonymize(
                     tenant_id,
-                    settings.field_encryption_key,
+                    settings.research_pseudonym_key,
                     namespace="tenant",
                 ),
                 "event_count": len(ordered),
@@ -462,12 +461,12 @@ def events(
     rows = db.scalars(statement).all()
     return [
         {
-            "id": pseudonymize(row.id, settings.field_encryption_key, namespace="event"),
+            "id": pseudonymize(row.id, settings.research_pseudonym_key, namespace="event"),
             "tenant_pseudonym": pseudonymize(
-                row.tenant_id, settings.field_encryption_key, namespace="tenant"
+                row.tenant_id, settings.research_pseudonym_key, namespace="tenant"
             ),
             "user_pseudonym": pseudonymize(
-                row.user_id, settings.field_encryption_key, namespace="user"
+                row.user_id, settings.research_pseudonym_key, namespace="user"
             ),
             "channel": row.channel,
             "event_type": row.event_type,
@@ -568,7 +567,7 @@ def conversation_detail(
             for candidate in candidate_ids
             if candidate
             and secrets.compare_digest(
-                pseudonymize(candidate, settings.field_encryption_key, namespace="conversation"),
+                pseudonymize(candidate, settings.research_pseudonym_key, namespace="conversation"),
                 conversation_pseudonym,
             )
         ),
@@ -663,7 +662,6 @@ def taxonomy(_principal: Principal = Depends(require_researcher)) -> dict:
 @router.get("/events/{event_id}/raw")
 def raw_event(
     event_id: str,
-    request: Request,
     access_reason: str = Header(
         alias="X-Access-Reason",
         min_length=12,
@@ -694,7 +692,7 @@ def raw_event(
     if not message or message.tenant_id != event.tenant_id:
         raise HTTPException(status_code=404, detail="Raw question is unavailable")
 
-    record = audit(
+    audit(
         db,
         actor_user_id=principal.user.id,
         tenant_id=event.tenant_id,
@@ -703,12 +701,6 @@ def raw_event(
         resource_id=event.id,
         after={"reason": reason, "fields": ["raw_question"], "request_scoped": True},
     )
-    if request.client:
-        try:
-            record.ip_address = ipaddress.ip_address(request.client.host).compressed
-        except ValueError:
-            record.ip_address = None
-    record.user_agent = (request.headers.get("user-agent") or "")[:500] or None
     db.commit()
     return JSONResponse(
         {
@@ -816,7 +808,7 @@ def _create_artifact(
     if tenant_id := audit_filters.pop("tenant_id", None):
         audit_filters["tenant_pseudonym"] = pseudonymize(
             tenant_id,
-            settings.field_encryption_key,
+            settings.research_pseudonym_key,
             namespace="tenant",
         )
     audit(
@@ -843,7 +835,7 @@ def _create_artifact(
         LocalArtifactStore(settings.artifact_root),
         report,
         payload.formats,
-        pseudonym_secret=settings.field_encryption_key,
+        pseudonym_secret=settings.research_pseudonym_key,
     )
 
 

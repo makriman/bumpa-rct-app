@@ -176,7 +176,7 @@ def handle_chat(
         latency_ms = int((monotonic() - started) * 1000)
     elif profile.provider == "hermes" and effective_settings.agent_backend == "hermes":
         try:
-            api_key = FieldCipher(effective_settings.field_encryption_key).decrypt(
+            api_key = FieldCipher.from_settings(effective_settings).decrypt(
                 profile.encrypted_api_key
             )
             result: HermesResult = HermesClient(effective_settings).respond(

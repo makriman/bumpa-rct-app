@@ -1,8 +1,9 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e integration load-failure \
+.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e e2e-linux integration load-failure \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
-	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract clean
+	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract \
+	api-contract api-contract-check clean
 
 COMPOSE := docker compose
 PROD_COMPOSE := docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml
@@ -44,13 +45,28 @@ test-ops: ## Run host operational-control unit tests
 e2e: ## Run the current desktop/mobile Playwright browser checks
 	npm --prefix apps/web run test:e2e
 
+e2e-linux: ## Run production-build browser checks in the pinned Linux Playwright image
+	docker run --rm --init --platform linux/amd64 \
+		-v "$(CURDIR)/apps/web:/work" \
+		-v bumpabestie-playwright-node-modules:/work/node_modules \
+		-w /work mcr.microsoft.com/playwright:v1.61.1-noble \
+		bash -lc 'npm ci && npm run test:e2e'
+
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
 	./scripts/local_e2e.sh
 
 load-failure: ## Run sealed chat/sync pressure, disk alert, webhook load, and restart drills
 	python3 tests/load_failure/run.py
 
-quality: format-check lint typecheck test compose-config production-contract ## Run the local merge gate
+quality: format-check lint typecheck test api-contract-check compose-config production-contract ## Run the local merge gate
+
+api-contract: ## Regenerate the redacted OpenAPI and TypeScript API contracts
+	cd apps/api && uv run python -m app.openapi_contract generate
+	cd apps/web && npm run api-contract:generate
+
+api-contract-check: ## Fail when FastAPI or generated TypeScript contracts have drifted
+	cd apps/api && uv run python -m app.openapi_contract check
+	./scripts/check_api_contract.sh
 
 dev: ## Build and start the credential-free local stack
 	$(COMPOSE) up -d --build postgres redis

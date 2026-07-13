@@ -60,11 +60,15 @@ def test_onboarding_model_is_explicit_secret_free_and_constrained() -> None:
     }
 
 
-def test_onboarding_migration_is_head_and_has_forced_tenant_rls(
+def test_onboarding_migration_is_in_head_lineage_and_has_forced_tenant_rls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config("sqlite://", monkeypatch)
-    assert ScriptDirectory.from_config(config).get_current_head() == "0011_tenant_onboarding"
+    scripts = ScriptDirectory.from_config(config)
+    assert scripts.get_current_head() == "0012_operational_retention"
+    assert scripts.get_revision("0012_operational_retention").down_revision == (
+        "0011_tenant_onboarding"
+    )
     source = MIGRATION_PATH.read_text(encoding="utf-8")
     assert 'ALTER TABLE "tenant_onboardings" ENABLE ROW LEVEL SECURITY' in source
     assert 'ALTER TABLE "tenant_onboardings" FORCE ROW LEVEL SECURITY' in source

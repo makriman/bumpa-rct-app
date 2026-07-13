@@ -218,7 +218,7 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
         assert any(row["retained_30d"] >= 1 for row in payload["retention_by_cohort"])
         expected_pseudonym = pseudonymize(
             consented_id,
-            get_settings().field_encryption_key,
+            get_settings().research_pseudonym_key,
             namespace="tenant",
         )
         repeat = payload["repeat_usage"]

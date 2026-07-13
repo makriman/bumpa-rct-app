@@ -72,6 +72,9 @@ jobs:
       - name: Typecheck
         working-directory: apps/api
         run: uv run mypy app scripts/verify_postgres_rls.py
+      - name: Verify checked-in OpenAPI contract
+        working-directory: apps/api
+        run: uv run python -m app.openapi_contract check
       - name: Migrate compatibility baseline
         working-directory: apps/api
         run: |
@@ -128,6 +131,8 @@ jobs:
           cache-dependency-path: apps/web/package-lock.json
       - name: Install locked dependencies
         run: npm --prefix apps/web ci
+      - name: Verify generated TypeScript API contract
+        run: ./scripts/check_api_contract.sh
       - name: Lint, format and typecheck
         run: |
           npm --prefix apps/web run lint
@@ -331,5 +336,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
-      - name: Audit production web dependencies
-        run: npm --prefix apps/web audit --omit=dev --audit-level=high
+      - name: Audit production and test web dependencies
+        run: |
+          npm --prefix apps/web audit --omit=dev --audit-level=high
+          npm --prefix apps/web audit --audit-level=high

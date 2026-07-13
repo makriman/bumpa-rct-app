@@ -87,6 +87,7 @@ def run_sync(
     date_from: date,
     date_to: date,
     field_encryption_key: str | None = None,
+    field_cipher: FieldCipher | None = None,
     runtime_backend: str | None = None,
 ) -> BumpaSyncRun:
     selected_connection_boundary = (
@@ -143,6 +144,7 @@ def run_sync(
                 date_from=date_from,
                 date_to=date_to,
                 field_encryption_key=field_encryption_key,
+                field_cipher=field_cipher,
                 runtime_backend=runtime_backend,
             )
             db.flush()
@@ -273,6 +275,7 @@ def _stage_sync_publication(
     date_from: date,
     date_to: date,
     field_encryption_key: str | None,
+    field_cipher: FieldCipher | None,
     runtime_backend: str | None,
 ) -> StagedSync:
     """Pull and stage one publication inside the caller's nested transaction."""
@@ -284,11 +287,12 @@ def _stage_sync_publication(
     elif connection.provider == "bumpa":
         if runtime_backend != "bumpa":
             raise HTTPException(status_code=503, detail="Bumpa integration is not enabled")
-        if not field_encryption_key:
+        if field_cipher is None and not field_encryption_key:
             raise HTTPException(
                 status_code=503, detail="Bumpa credential decryption is unavailable"
             )
-        api_key = FieldCipher(field_encryption_key).decrypt(connection.encrypted_api_key)
+        cipher = field_cipher or FieldCipher(field_encryption_key or "")
+        api_key = cipher.decrypt(connection.encrypted_api_key)
         with BumpaClient(api_key, connection.scope_type, connection.scope_id) as provider:
             live_result = provider.sync(date_from, date_to)
         snapshot = live_result

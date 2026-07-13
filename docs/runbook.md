@@ -82,17 +82,70 @@ application-role audit exercised 115 tenant/table contexts across 516 scoped row
 and found zero rows without context and zero cross-tenant rows. The onboarding audit records
 five stores and exactly one approved operator/owner dual role. All five Hermes
 profiles passed health and each completed an explicitly authorized live Claude
-request through its mapped Hermes gateway. Bumpa remains partial: stores 1–4 return
-8/10 analytics datasets; degraded store 5 returns 7/10 because
+request through its mapped Hermes gateway. Forty foreign-profile gateway/control
+attempts were rejected, and audited restart plus post-restart completion passed.
+Bumpa remains partial: stores 1–4 return 8/10 analytics datasets; degraded store 5
+returns 7/10 because
 `products.overview` hit an upstream timeout/HTTP 504. Missing values remain
 unavailable, not zero.
 
-The configured Meta test WABA is subscribed to the app and its sender phone-number
-ID is validated, but the WABA has zero authentication templates. Both template-create
-endpoints were denied with Graph code `10`/subcode `2388185`; no outbound was sent.
-The lane remains reply-only with `supports_otp=false`, and proactive outbound is
-disabled. These facts do not prove Meta delivery, complete Bumpa sync, Hermes
-cross-profile isolation or recovery readiness.
+Read-only Graph checks confirm that the configured Meta test WABA and phone-number
+ID pair with `+15550772716`; the sender reports `PENDING` and has five approved
+non-authentication templates but zero authentication templates. Both authentication-
+template create endpoints were denied with Graph code `10`/subcode `2388185`; no
+outbound was sent. The lane remains reply-only with `supports_otp=false`, and
+proactive outbound is disabled. These facts do not prove Meta delivery or complete
+Bumpa sync.
+
+## Field-encryption key rotation
+
+Provider credentials and MCP OAuth state use the same versioned field-cipher
+boundary. The rotation CLI enumerates durable Bumpa, Hermes and MCP credential
+rows; it cannot enumerate short-lived OAuth `state` values already issued to a
+browser. Never remove an old key immediately after the durable-row count reaches
+zero.
+
+Use this staged sequence. Every environment-file mutation is host-local, mode
+`0600`, reviewed without printing values, and followed by the normal validation,
+backup, guarded promotion and health checks.
+
+1. **Deploy the dual reader without changing cryptographic identity.** Set
+   `FIELD_ENCRYPTION_KEY_ID=primary`, `FIELD_ENCRYPTION_WRITE_VERSION=v1` and
+   `FIELD_ENCRYPTION_OLD_KEYS={}`. For this first decoupling release only, initialize
+   `RESEARCH_PSEUDONYM_KEY` and `ONBOARDING_INTEGRITY_KEY` from the existing
+   `FIELD_ENCRYPTION_KEY` value to preserve established pseudonyms and onboarding
+   idempotency hashes. Do not print or copy the value into evidence.
+2. **Soak the dual-read release.** Prove credential reads, OAuth start/callback,
+   Hermes and Bumpa canaries, backup and rollback. The previous v1-only release
+   remains a valid rollback target because every writer still emits v1.
+3. **Retire the v1-only rollback floor in a later release.** This first dual-reader
+   artifact mechanically rejects `FIELD_ENCRYPTION_WRITE_VERSION=v2` in production;
+   do not patch around that interlock or mutate the environment to bypass it. Ship a
+   later reviewed rollback-capability release, initially with v1 writes, that proves
+   the recorded previous application boundary can read both v1 and v2 before it
+   permits a v2 writer to start. Only that later release may enable v2 and verify new
+   credential/OAuth-state writes.
+4. **Rewrap the existing key without changing its material.** Create and verify a
+   production backup. Run the CLI without flags and record only its sanitized
+   counts. When the dry run authenticates every row, run it with
+   `--apply --confirm 'ROTATE FIELD ENCRYPTION KEYS'`. A second dry run must report
+   zero `would_rotate`; do not remove any key or downgrade to a v1-only runtime.
+5. **Rotate key material in a later boundary.** Move the prior material into
+   `FIELD_ENCRYPTION_OLD_KEYS` under its former unique ID, generate new independent
+   material for `FIELD_ENCRYPTION_KEY`, assign a new current ID, keep v2 writes,
+   validate, back up and promote. Run dry-run, apply, then dry-run again exactly as
+   above. Any unknown key ID or authentication failure is a hard stop.
+6. **Honor the non-enumerable OAuth grace.** After the last process capable of
+   issuing state under the old key has stopped, retain the old key for at least
+   `MCP_OAUTH_STATE_TTL_SECONDS` plus a 300-second deployment/clock-skew margin.
+   Exercise an OAuth callback created before rotation while the old ring is present.
+   Only after the grace, zero-old durable verification and a fresh backup may the
+   old key be removed in a new guarded promotion.
+
+The CLI output intentionally contains counts and key IDs only. Never capture the
+environment, decrypted credentials or OAuth state in a transcript. A rollback
+after phase 3 targets a dual-reader release with the matching old-key ring; the
+original v1-only release is no longer valid.
 
 ## Historical provider-disabled baseline verification
 
@@ -356,8 +409,9 @@ If readiness reports `WHATSAPP_BACKEND=disabled`, callback verification, inbound
 processing and OTP delivery must be unavailable; do not point Meta at that state or
 tell users an OTP was sent. When the selector is `meta`, use the procedure below.
 
-For the test lane, the configured WABA is subscribed to the app and its sender
-phone-number ID is validated, but zero authentication templates exist and both
+For the test lane, read-only Graph checks confirm the configured WABA/phone-number
+pair and a non-empty subscription list. The sender reports `PENDING`, five approved
+non-authentication templates and zero authentication templates; both auth-template
 create endpoints return code
 `10`/subcode `2388185`. This is a provider permission
 block: do not retry in a loop, claim OTP support, switch on proactive sends or use
@@ -391,9 +445,9 @@ service/container restart only when the profile-scoped control plane itself is
 unhealthy.
 
 All five mapped profiles have completed one live Claude request through Hermes. A
-failure to complete now is a regression from that baseline, but 5/5 completion does
-not replace cross-profile attack, restart, backup/recovery or WhatsApp-routing
-canaries.
+failure to complete now is a regression from that baseline. Forty foreign-profile
+gateway/control attempts were rejected, and audited restart plus post-restart
+completion passed; these do not replace backup/restore or WhatsApp-routing canaries.
 
 1. Circuit-break only the affected profile and return a clear unavailable response.
 2. Verify tenant/profile mapping, private endpoint, authentication, process health,

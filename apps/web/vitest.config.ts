@@ -9,5 +9,14 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
     exclude: ["e2e/**", "node_modules/**", ".next/**"],
+    coverage: {
+      provider: "v8",
+      thresholds: {
+        statements: 62,
+        branches: 55,
+        functions: 52,
+        lines: 64,
+      },
+    },
   },
 });

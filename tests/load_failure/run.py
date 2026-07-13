@@ -78,6 +78,7 @@ SYNTHETIC_COMPOSE_ENV = {
         "@postgres:5432/bumpabestie"
     ),
     "FIELD_ENCRYPTION_KEY": "load-failure-field-key-at-least-32-characters",
+    "FIELD_ENCRYPTION_OLD_KEYS": "{}",
     "GOOGLE_OAUTH_CLIENT_ID": "",
     "GOOGLE_OAUTH_CLIENT_SECRET": "",
     "GOOGLE_OAUTH_CLIENT_SECRET_FILE": "",

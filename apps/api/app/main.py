@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, correlation_id_var
+from app.core.request_context import audit_request_context_var, build_audit_request_context
 from app.db.session import SessionLocal, create_schema, set_security_context
 from app.jobs.runtime import AsyncRuntimeConfig, RedisHealthProbe
 from app.routes import (
@@ -77,9 +78,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-def create_app() -> FastAPI:
+def create_app(*, settings_config: Settings | None = None) -> FastAPI:
     configure_logging()
-    config = get_settings()
+    config = settings_config or get_settings()
     application = FastAPI(
         title=config.app_name,
         version="0.1.0",
@@ -109,7 +110,13 @@ def create_app() -> FastAPI:
         # service-hop UUIDv4, but replace all other caller-controlled values so a
         # phone, OTP, token, or noncanonical identifier cannot enter logs.
         correlation_id = _request_correlation_id(request.headers.get("x-correlation-id"))
-        token = correlation_id_var.set(correlation_id)
+        correlation_token = correlation_id_var.set(correlation_id)
+        audit_context_token = audit_request_context_var.set(
+            build_audit_request_context(
+                client_host=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+            )
+        )
         started = monotonic()
         try:
             response = await call_next(request)
@@ -142,7 +149,8 @@ def create_app() -> FastAPI:
             )
             raise
         finally:
-            correlation_id_var.reset(token)
+            audit_request_context_var.reset(audit_context_token)
+            correlation_id_var.reset(correlation_token)
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:

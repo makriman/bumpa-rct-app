@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { AppIcon } from "@/components/app-icon";
 import { AppShell } from "@/components/app-shell";
 import { Badge } from "@/components/ui";
 import { apiRequest, isDemoMode } from "@/lib/api";
@@ -371,7 +372,9 @@ export default function ChatPage() {
             ) : messages.length === 0 ? (
               <div className="empty-state" style={{ margin: "auto" }}>
                 <div className="empty-inner">
-                  <div className="empty-icon">✦</div>
+                  <div className="empty-icon">
+                    <AppIcon name="sparkles" size={22} />
+                  </div>
                   <h2>Start a conversation</h2>
                   <p>
                     Ask about sales, stock, products, customers, orders, or the
@@ -391,7 +394,9 @@ export default function ChatPage() {
                     >
                       {message.text}
                       {message.source && (
-                        <div className="source-card">↻ {message.source}</div>
+                        <div className="source-card">
+                          <AppIcon name="refresh" size={13} /> {message.source}
+                        </div>
                       )}
                     </div>
                     <div className="message-meta">

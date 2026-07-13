@@ -662,7 +662,7 @@ def complete_mcp_oauth(
         )
         db.commit()
         return _mcp_redirect(settings, "error")
-    connection.encrypted_credentials = FieldCipher(settings.field_encryption_key).encrypt(
+    connection.encrypted_credentials = FieldCipher.from_settings(settings).encrypt(
         json.dumps(token_bundle, separators=(",", ":"), sort_keys=True)
     )
     connection.scopes = connection_scopes(

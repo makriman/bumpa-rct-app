@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.ids import new_id
 from app.core.logging import correlation_id_var
+from app.core.request_context import audit_request_context_var
 from app.db.models import AuditLog
 from app.services.research_events import (
     record_admin_action_event,
@@ -35,6 +36,7 @@ def audit(
     before: dict[str, Any] | None = None,
     after: dict[str, Any] | None = None,
 ) -> AuditLog:
+    request_context = audit_request_context_var.get()
     record = AuditLog(
         id=new_id(),
         tenant_id=tenant_id,
@@ -44,6 +46,8 @@ def audit(
         resource_id=resource_id,
         before=before,
         after=after,
+        ip_address=request_context.client_ip if request_context else None,
+        user_agent=request_context.user_agent if request_context else None,
         correlation_id=correlation_id_var.get(),
     )
     db.add(record)

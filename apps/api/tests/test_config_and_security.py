@@ -61,6 +61,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
         jwt_secret="j" * 40,
         otp_secret="o" * 40,
         field_encryption_key="f" * 40,
+        research_pseudonym_key="p" * 40,
+        onboarding_integrity_key="i" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="disabled",
@@ -94,6 +96,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
             jwt_secret="j" * 40,
             otp_secret="o" * 40,
             field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             dev_fixed_otp="246810",
@@ -108,6 +112,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
             jwt_secret="j" * 40,
             otp_secret="o" * 40,
             field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="meta",
@@ -119,6 +125,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
         jwt_secret="j" * 40,
         otp_secret="o" * 40,
         field_encryption_key="f" * 40,
+        research_pseudonym_key="p" * 40,
+        onboarding_integrity_key="i" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="meta",
@@ -145,6 +153,8 @@ def test_root_environment_aliases_and_production_guards() -> None:
             jwt_secret="j" * 40,
             otp_secret="o" * 40,
             field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="mock",
@@ -301,7 +311,7 @@ def test_security_invalid_inputs_lockout_token_revocation_and_helpers() -> None:
         == "12345678-1234-5678-1234-567812345678"
     )
     with pytest.raises(ValueError, match="Unsupported ciphertext version"):
-        FieldCipher("key").decrypt("v2.invalid")
+        FieldCipher("key").decrypt("v3.invalid")
     record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
     assert '"message": "hello"' in JsonFormatter().format(record)
 

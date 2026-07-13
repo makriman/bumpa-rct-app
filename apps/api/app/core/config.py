@@ -16,6 +16,7 @@ class Settings(BaseSettings):
         env_prefix="",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     app_name: str = "Bumpa Bestie API"
@@ -26,6 +27,17 @@ class Settings(BaseSettings):
     jwt_secret: str = "local-only-change-me-jwt-secret-32bytes"
     otp_secret: str = "local-only-change-me-otp-secret"
     field_encryption_key: str = "local-only-change-me-field-key"
+    field_encryption_key_id: str = Field(
+        default="primary", pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    )
+    # The first dual-read release deliberately writes v1 so its v1-only
+    # predecessor remains a valid rollback target. Production validation below
+    # hard-locks this artifact to v1; local/test retain v2 coverage for the later
+    # rollback-capability release that will own the v2 transition.
+    field_encryption_write_version: Literal["v1", "v2"] = "v1"
+    field_encryption_old_keys: dict[str, str] = Field(default_factory=dict)
+    research_pseudonym_key: str = "local-only-change-me-research-pseudonym-key"
+    onboarding_integrity_key: str = "local-only-change-me-onboarding-integrity-key"
     access_token_minutes: int = 60
     otp_ttl_minutes: int = 10
     otp_max_attempts: int = 5
@@ -99,6 +111,9 @@ class Settings(BaseSettings):
     ops_alert_scan_lookback_hours: int = Field(default=168, ge=1, le=2160)
     ops_alert_scan_limit: int = Field(default=100, ge=1, le=500)
     hermes_health_alert_interval_minutes: int = Field(default=15, ge=5, le=1440)
+    audit_log_retention_days: int = Field(default=365, ge=30, le=3650)
+    system_error_retention_days: int = Field(default=90, ge=7, le=3650)
+    operational_retention_batch_size: int = Field(default=500, ge=1, le=1000)
     public_origin: str = "http://bumpabestie.localhost:8080"
     api_origin: str = "http://api.bumpabestie.localhost:8080"
     mcp_google_oauth_enabled: bool = False
@@ -152,6 +167,15 @@ class Settings(BaseSettings):
 
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("field_encryption_old_keys", mode="before")
+    @classmethod
+    def blank_field_encryption_old_keys(cls, value: object) -> object:
+        """Let Compose omit the optional JSON key ring without changing local defaults."""
+
+        if value == "":
+            return {}
         return value
 
     @property
@@ -292,14 +316,28 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self) -> Settings:
         self._validate_meta_test_sender_verification()
+        if self.app_env != "production":
+            self._validate_field_encryption_keys()
+        if self.system_error_retention_days * 24 < self.ops_alert_scan_lookback_hours:
+            raise ValueError("SYSTEM_ERROR_RETENTION_DAYS must cover OPS_ALERT_SCAN_LOOKBACK_HOURS")
         if self.app_env == "production":
             insecure = (
                 self.jwt_secret.startswith("local-only"),
                 self.otp_secret.startswith("local-only"),
                 self.field_encryption_key.startswith("local-only"),
+                self.research_pseudonym_key.startswith("local-only"),
+                self.onboarding_integrity_key.startswith("local-only"),
             )
             if any(insecure):
                 raise ValueError("Production secrets must be explicitly configured")
+            if len(self.research_pseudonym_key) < 24 or len(self.onboarding_integrity_key) < 24:
+                raise ValueError("Application integrity keys must contain at least 24 characters")
+            self._validate_field_encryption_keys()
+            if self.field_encryption_write_version != "v1":
+                raise ValueError(
+                    "Production FIELD_ENCRYPTION_WRITE_VERSION must remain v1 "
+                    "during the first dual-reader soak"
+                )
             if not self.effective_auth_rate_limit_enabled:
                 raise ValueError("Production authentication rate limiting cannot be disabled")
             if not self.effective_operation_rate_limit_enabled:
@@ -415,6 +453,35 @@ class Settings(BaseSettings):
             self._validate_ops_alerts()
             self._validate_mcp_oauth_configuration()
         return self
+
+    def _validate_field_encryption_keys(self) -> None:
+        if len(self.field_encryption_old_keys) > 16:
+            raise ValueError("At most 16 old field-encryption keys may be configured")
+        if self.field_encryption_key_id in self.field_encryption_old_keys:
+            raise ValueError("Current field-encryption key ID must not appear in the old-key ring")
+        invalid_ids = [
+            key_id
+            for key_id in self.field_encryption_old_keys
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", key_id)
+        ]
+        if invalid_ids:
+            raise ValueError("Old field-encryption key IDs are invalid")
+        if any(not secret for secret in self.field_encryption_old_keys.values()):
+            raise ValueError("Old field-encryption keys must not be empty")
+        if self.app_env != "production":
+            return
+        configured_keys = {
+            self.field_encryption_key_id: self.field_encryption_key,
+            **self.field_encryption_old_keys,
+        }
+        if any(
+            len(secret) < 24
+            or secret.startswith("local-only")
+            or "ADD_VALUE" in secret
+            or "change-me" in secret
+            for secret in configured_keys.values()
+        ):
+            raise ValueError("Field-encryption keys are too short or use placeholders")
 
     def _validate_meta_test_sender_verification(self) -> None:
         if self.meta_test_sender_verification_mode == "disabled":

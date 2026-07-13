@@ -753,7 +753,10 @@ class McpToolPermission(IdMixin, TimestampMixin, Base):
 
 class AuditLog(IdMixin, Base):
     __tablename__ = "audit_logs"
-    __table_args__ = (Index("ix_audit_logs_tenant_created", "tenant_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_logs_tenant_created", "tenant_id", "created_at"),
+        Index("ix_audit_logs_created_at", "created_at"),
+    )
 
     tenant_id: Mapped[str | None] = mapped_column(
         ForeignKey("tenants.id", ondelete="SET NULL"), index=True
@@ -774,6 +777,7 @@ class SystemError(IdMixin, Base):
     __tablename__ = "system_errors"
     __table_args__ = (
         Index("ix_system_errors_service_severity_created", "service", "severity", "created_at"),
+        Index("ix_system_errors_created_at", "created_at"),
     )
 
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))

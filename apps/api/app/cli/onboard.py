@@ -160,7 +160,11 @@ def parse_stdin_bundle(stream: BinaryIO) -> OnboardingBundle:
 
 
 def onboard(
-    db: Session, bundle: OnboardingBundle, *, field_encryption_key: str
+    db: Session,
+    bundle: OnboardingBundle,
+    *,
+    field_encryption_key: str,
+    field_cipher: FieldCipher | None = None,
 ) -> OnboardingResult:
     if len(field_encryption_key) < 24 or field_encryption_key.startswith("local-only"):
         raise OnboardingError("field_encryption_key_invalid")
@@ -180,7 +184,7 @@ def onboard(
             tenant,
             bundle.bumpa,
             actor.id,
-            FieldCipher(field_encryption_key),
+            field_cipher or FieldCipher(field_encryption_key),
             result,
         )
         audit(
@@ -544,7 +548,12 @@ def main(
         bundle = parse_stdin_bundle(input_stream)
         settings = get_settings()
         with SessionLocal() as db:
-            result = onboard(db, bundle, field_encryption_key=settings.field_encryption_key)
+            result = onboard(
+                db,
+                bundle,
+                field_encryption_key=settings.field_encryption_key,
+                field_cipher=FieldCipher.from_settings(settings),
+            )
     except OnboardingError as exc:
         error_stream.write(json.dumps(_safe_error(exc), sort_keys=True) + "\n")
         return (

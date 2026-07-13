@@ -85,13 +85,15 @@ messages and OTPs continue to use the primary production sender. The test lane h
 code was sent, or substitute for an approved production authentication template.
 Keep the mode `disabled` when any identifier or subscription is uncertain.
 
-The current Meta test lane has a validated sender phone-number ID, and its test WABA
-app subscription is verified. The WABA has zero approved
-authentication templates. Both attempted template-create endpoints were denied
-with Graph code `10` and subcode `2388185`, so this is an external account/permission
-gate rather than application delivery evidence. No outbound message was sent. The
-lane remains reply-only with `supports_otp=false` and cannot satisfy OTP, proactive
-insight, operational-template or delivery-receipt gates.
+Read-only Graph checks confirm that the current test WABA and phone-number ID pair
+with the configured display number, and its app subscription list is non-empty.
+The sender reports `PENDING` and has five approved non-authentication templates but
+zero authentication templates. Both attempted authentication-template create
+endpoints were denied with Graph code `10` and subcode `2388185`, so this is an
+external account/permission gate rather than application delivery evidence. No
+outbound message was sent. The lane remains reply-only with `supports_otp=false`
+and cannot satisfy OTP, proactive insight, authentication-template or delivery-
+receipt gates.
 
 ## Agent contract
 
@@ -101,9 +103,9 @@ an authenticated private gateway per profile, staged profile directories, and a
 Hermes-only Anthropic secret. Contract tests cover authentication, lifecycle,
 redacted context, and profile isolation. All five production profiles pass
 authenticated health and each completed an explicitly authorized live Claude
-request through its own Hermes gateway. This proves 5/5 mapped profile completions,
-not cross-profile isolation under attack, restart/recovery behavior, WhatsApp
-routing or unrestricted launch readiness; those separate canaries remain open.
+request through its own Hermes gateway. Forty foreign-profile gateway/control
+attempts were rejected, and an audited restart plus post-restart completion passed.
+WhatsApp routing and unrestricted launch readiness remain separate gates.
 
 Claude is the model provider through Hermes. The Anthropic key belongs only to the
 Hermes runtime secret boundary; FastAPI passes tenant-scoped,

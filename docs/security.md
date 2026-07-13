@@ -10,10 +10,12 @@ non-mutating structured/text redaction, explicit Postgres RLS policy DDL, and
 non-root application images. A local non-owner/non-bypass Postgres probe,
 production-off demo build default and local image vulnerability scans have also been
 verified. Cookie-origin CSRF enforcement, Redis-backed phone/IP rate limits,
-raw-access reason gates, audit logging, and export expiry/cleanup are implemented
-and tested. Credential key-version rotation remains pending. Exact-registry scan evidence
-for all six deployed hardened images is complete. Consult the verification ledger
-before relying on a control.
+raw-access reason gates, privacy-bounded audit request context, draining operational
+retention, export expiry/cleanup and dry-run-first credential key rotation are
+implemented and tested. The first dual-reader release deliberately retains v1
+writes for rollback; production v2 rewrapping remains a staged operational gate.
+Exact-registry scan evidence for all six deployed hardened images is complete.
+Consult the verification ledger before relying on a control.
 
 Production may use explicit `disabled` provider modes while an external account gate
 is incomplete; worker and scheduler still run the durable internal runtime. A
@@ -79,8 +81,14 @@ key rotation can decrypt with the old key and re-encrypt with the new key. Logs 
 redact authorization headers, cookie values, phone numbers, addresses and raw
 provider payloads.
 
-The versioned rotation workflow in the previous paragraph is a required target; the
-current field cipher does not yet supply complete key-version migration evidence.
+The cipher authenticates v2 key IDs as associated data, fails closed on unknown or
+malformed envelopes, bounds the old-key ring, and preserves legacy v1 reads. The
+rotation command authenticates every durable credential before mutation, locks the
+selected rows, rolls back on any failure, defaults to a sanitized dry run and
+requires explicit confirmation to apply. Production follows the two-phase
+rollback-safe sequence in `docs/runbook.md`; no live v2 rewrite or key-material
+rotation is claimed until its backup, dry-run/apply, OAuth TTL grace and post-run
+evidence exist.
 The Anthropic key is owned by the Hermes runtime boundary only. It must not
 be passed through the shared Compose application environment or stored per tenant.
 
@@ -108,8 +116,11 @@ consent version/timestamp/policy version, stops new classification after withdra
 and initiates retention/deletion without silently corrupting operational records.
 The current flow gates research events and reads, stores consent history,
 invalidates artifacts after withdrawal, expires generated artifacts after 24 hours,
-reauthorizes every download, and enqueues production retention cleanup. Formal
-retention-policy and privacy signoff remain release governance steps.
+reauthorizes every download, and enqueues production retention cleanup. Audit logs
+default to 365 days and sanitized system errors to 90 days; bounded continuations
+drain an expired backlog with locked/skipped rows. The reviewable policy draft is
+`docs/privacy-retention-policy.md`; named privacy/security approval and the open
+durable product-data windows remain release governance steps.
 
 ## Verification
 
@@ -125,11 +136,16 @@ cross-tenant rows. All eight services are running, all seven configured
 healthchecks are healthy, and every service has zero restarts and zero OOM kills.
 
 Live-provider evidence does not broaden authorization. Five Hermes profiles have
-completed one live Claude request each, but cross-profile attack and recovery
-canaries remain open. Bumpa is partial at 8/10 analytics datasets for stores 1–4
-and 7/10 for degraded store 5; `products.overview` timed out/returned HTTP 504.
-The subscribed Meta test lane has zero authentication templates, remains reply-only
-with `supports_otp=false`, and sent no outbound message after both template-create
-paths were denied with Graph code `10`/subcode `2388185`. Off-host durability, an
+completed one live Claude request each. Forty cross-profile gateway/lifecycle
+attempts were rejected, an audited demo-profile restart recovered, a post-restart
+Claude completion succeeded, and all profiles returned healthy with no Hermes
+system errors; WhatsApp channel routing remains unproven. Bumpa is partial at 8/10
+analytics datasets for stores 1–4 and 7/10 for degraded store 5;
+`products.overview` timed out/returned HTTP 504. Redacted raw/metric/canonical
+counts reconcile for all five runs, but the provider still does not supply 10/10.
+The subscribed Meta test lane reports `PENDING`, has five approved
+non-authentication templates but zero authentication templates, remains reply-only
+with `supports_otp=false`, and sent no outbound message after both auth-template
+create paths were denied with Graph code `10`/subcode `2388185`. Off-host durability, an
 external alert receipt, and formal privacy/retention approval remain open security
 and governance gates.

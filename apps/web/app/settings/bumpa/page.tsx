@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AppIcon } from "@/components/app-icon";
 import { AppShell } from "@/components/app-shell";
 import { LiveDataBanner } from "@/components/live-data-banner";
 import { Badge, Card, PageHeader, StatePanel, Toast } from "@/components/ui";
@@ -332,7 +333,13 @@ export default function BumpaPage() {
             }
             onClick={() => void refresh()}
           >
-            {busy ? "Refreshing…" : "↻ Request refresh"}
+            {busy ? (
+              "Refreshing…"
+            ) : (
+              <>
+                <AppIcon name="refresh" size={16} /> Request refresh
+              </>
+            )}
           </button>
         }
       />

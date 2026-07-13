@@ -26,7 +26,7 @@ DEMO_USERS = {
 def seed_demo(db: Session, settings: Settings) -> None:
     if db.scalar(select(Tenant.id).limit(1)):
         return
-    cipher = FieldCipher(settings.field_encryption_key)
+    cipher = FieldCipher.from_settings(settings)
     demo = Tenant(
         slug="demo-store",
         name="Ada's Demo Store",

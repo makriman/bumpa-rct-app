@@ -172,7 +172,7 @@ describe("operator tenant operations", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Bumpa" }));
     expect(screen.getByText("••••1042")).toBeInTheDocument();
     expect(screen.queryByText(/api[_ -]?key=/i)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "↻ Trigger sync" }));
+    fireEvent.click(screen.getByRole("button", { name: "Trigger sync" }));
     await waitFor(() =>
       expect(apiRequest).toHaveBeenCalledWith(
         `/admin/tenants/${tenant.id}/bumpa/sync`,
