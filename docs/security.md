@@ -12,7 +12,7 @@ production-off demo build default and local image vulnerability scans have also 
 verified. Cookie-origin CSRF enforcement, Redis-backed phone/IP rate limits,
 raw-access reason gates, audit logging, and export expiry/cleanup are implemented
 and tested. Credential key-version rotation remains pending. Exact-registry scan evidence
-for all five deployed hardened images is complete. Consult the verification ledger
+for all six deployed hardened images is complete. Consult the verification ledger
 before relying on a control.
 
 Production may use explicit `disabled` provider modes while an external account gate
@@ -93,10 +93,13 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Publish run 29270378518 completed
-that gate for all six application/infrastructure images deployed at release
-`12f76f92bcae8a329eec345545682c06b460a31d`; Redis remains pinned to its
-reviewed upstream digest.
+and SBOM, then scans each exact registry digest. Publish run 29274700347 completed
+7/7 jobs and that gate for all six application/infrastructure images deployed at
+release `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`; protected-main CI run
+29274276654 passed 13/13 jobs for the same revision. The boundary includes evidence
+[PR 36](https://github.com/makriman/bumpa-rct-app/pull/36) and accessibility
+correction [PR 37](https://github.com/makriman/bumpa-rct-app/pull/37). Redis remains
+pinned to its reviewed upstream digest.
 
 ## Research governance
 
@@ -114,3 +117,19 @@ Security is evidenced by executable negative tests, not configuration screenshot
 Critical branches—authorization, RLS, signature verification, dedupe, encryption,
 redaction and export permissions—target complete branch coverage. See
 `docs/verification.md` for claim status and evidence locations.
+
+The current production audit confirms ENABLE+FORCE RLS and one policy on all 23
+tenant tables. Its non-bypass application role exercised 115 tenant/table contexts
+across 516 scoped rows and returned zero rows without tenant context and zero
+cross-tenant rows. All eight services are running, all seven configured
+healthchecks are healthy, and every service has zero restarts and zero OOM kills.
+
+Live-provider evidence does not broaden authorization. Five Hermes profiles have
+completed one live Claude request each, but cross-profile attack and recovery
+canaries remain open. Bumpa is partial at 8/10 analytics datasets for stores 1–4
+and 7/10 for degraded store 5; `products.overview` timed out/returned HTTP 504.
+The subscribed Meta test lane has zero authentication templates, remains reply-only
+with `supports_otp=false`, and sent no outbound message after both template-create
+paths were denied with Graph code `10`/subcode `2388185`. Off-host durability, an
+external alert receipt, and formal privacy/retention approval remain open security
+and governance gates.

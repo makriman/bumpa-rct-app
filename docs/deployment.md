@@ -7,39 +7,53 @@ backup and the pinned Hermes runtime. Redis remains an upstream digest-pinned
 service. Worker and scheduler run from the API image and use Postgres jobs/outbox as
 the source of truth with Redis wake-ups and heartbeats. Production always requires
 `ASYNC_RUNTIME_ENABLED=true`; provider selectors may be disabled for containment or
-set to `meta`, `bumpa` and `hermes` only after their activation gates pass.
+set to `meta`, `bumpa` and `hermes` after scoped configuration readiness is
+evidenced. A selected adapter is not unrestricted-traffic approval: every
+unsupported or externally blocked capability remains fail-closed until its full
+activation gate passes.
 
 As of 2026-07-13, release
-`12f76f92bcae8a329eec345545682c06b460a31d` is live on the five branded
+`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is live on the five branded
 `bumpabestie.com` hosts with valid TLS. Core
 [PR 27](https://github.com/makriman/bumpa-rct-app/pull/27), corrective
 [PR 35](https://github.com/makriman/bumpa-rct-app/pull/35),
-[main CI 29269923594](https://github.com/makriman/bumpa-rct-app/actions/runs/29269923594)
+evidence [PR 36](https://github.com/makriman/bumpa-rct-app/pull/36), accessibility
+[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37),
+[main CI 29274276654](https://github.com/makriman/bumpa-rct-app/actions/runs/29274276654)
 (13/13 jobs) and
-[publish run 29270378518](https://github.com/makriman/bumpa-rct-app/actions/runs/29270378518)
+[publish run 29274700347](https://github.com/makriman/bumpa-rct-app/actions/runs/29274700347)
 (7/7 jobs) are its exact-revision release gates. Deployed image index references are
 recorded in `docs/verification.md`.
 
 Production verification found all eight services running, all seven healthchecked
 services healthy, Caddy running, and zero restarts or OOM kills at schema
 `0011_tenant_onboarding`. All 23 tenant tables have ENABLE+FORCE RLS
-and one policy each; a non-bypass application-role probe found zero cross-tenant
-leakage. The onboarding audit found five stores, five owners/memberships/phone
+and one policy each; a non-bypass application-role audit exercised 115 tenant/table
+contexts across 516 scoped rows and found zero no-context or cross-tenant leakage.
+The onboarding audit found five stores, five owners/memberships/phone
 identities/Bumpa connections and exactly one approved operator/owner dual role.
-All five Hermes profiles passed authenticated GET-only health; no Claude completion
-was sent. The Meta test sender is inbound/reply-only, reports `supports_otp=false`,
-and proactive outbound remains disabled. No real WhatsApp, Bumpa sync or Claude
-send canary is claimed.
 
-The guarded promotion caused the expected edge interruption: the last all-200
-sample was 17:31:35 UTC, all hosts first returned 521 at 17:32:12, the last 521 was
-17:35:05, and all hosts plus API readiness recovered by 17:35:39. The post-release
-backup's planned quiesce ran from 17:36:55 to 17:38:26; API readiness recovered by
-17:38:39 and remained stable in all-host samples through 17:40:08. Backup
-`20260713T173758Z` passed its format-3 manifest, all five checksums, PostgreSQL dump
-parser and archive checks at schema `0011_tenant_onboarding`. Backup and disk-usage
-timers are active. Provider selectors and valid credentials do not by themselves
-authorize real tenant traffic, and off-host durability remains unconfigured.
+Five mapped durable Bumpa jobs reached correlated terminal runs with orders
+available. Stores 1–4 returned accepted-partial 8/10 analytics datasets; degraded
+store 5 returned 7/10 because `products.overview` timed out/returned HTTP 504.
+All five mapped Hermes profiles passed health and completed an explicitly authorized
+live Claude request, but cross-profile attack and recovery canaries remain open.
+The configured Meta test WABA is subscribed to the app and its sender phone-number
+ID is validated, but the WABA has zero authentication templates. Both
+template-create paths were denied with Graph code
+`10`/subcode `2388185`; the lane remains reply-only with
+`supports_otp=false`, and no outbound message was sent.
+
+Post-release backup `20260713T184042Z` records the exact deployed revision and
+backup image digest, passed its format-3 manifest and all five checksums, and
+completed its planned quiesce at 18:41:11 UTC. All eight services and API 200
+recovered by 18:41:17; a 10m35s stability audit through 18:49:27 found no unhealthy
+service, restart, OOM kill or severe-log match. Backup and disk-usage timers are
+active. Provider selectors and valid credentials do not by themselves authorize
+real tenant traffic. Complete Bumpa coverage/reconciliation, Meta authentication
+template and outbound-delivery evidence, Hermes cross-profile/recovery canaries,
+off-host durability, a real alert destination and privacy/retention approval remain
+open gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -336,14 +350,17 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-Post-release backup `20260713T173758Z` records application revision
-`12f76f92bcae8a329eec345545682c06b460a31d`, schema
+Post-release backup `20260713T184042Z` records application revision
+`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`, schema
 `0011_tenant_onboarding`, PostgreSQL 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:d870dc1204c4aeb294970184de3b9dc9f662576761e58310213573dd7729ea22`.
+`ghcr.io/makriman/bumpabestie-backup@sha256:9ef16f2273b422f603483f1d88c3d6195267cd04aa4fbadd3288104c543c70c1`.
 Its format-3 manifest, all five SHA-256 entries, PostgreSQL dump parser and exports,
-Hermes-runtime and Hermes-staging archive checks passed. The backup and disk-usage
-timers are active. Historical pre-promotion recovery points remain available for
-rollback investigation, but are not the current-release backup evidence. This
+Hermes-runtime and Hermes-staging archive checks passed. Systemd completed at
+18:41:11 UTC; all eight services resumed, all seven healthchecks passed, and
+restart/OOM-kill counts remained zero. A 10m35s stability audit through 18:49:27
+found no unhealthy service, restart, OOM kill or severe-log match. The backup and
+disk-usage timers are active. Historical pre-promotion recovery points remain
+available for rollback investigation, but are not the current-release backup evidence. This
 proves the local recovery point only; off-host copy and remote restore evidence
 remain open.
 

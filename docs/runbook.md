@@ -4,7 +4,7 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Release
-`12f76f92bcae8a329eec345545682c06b460a31d` is deployed on the branded
+`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is deployed on the branded
 `bumpabestie.com` hosts with all eight services and selectors `meta`, `bumpa` and
 `hermes` at schema `0011_tenant_onboarding`. Always confirm the actual boundary
 from `.deployed-release.json`, Compose state and
@@ -77,18 +77,22 @@ Caddy is 2.11.4 built with Go 1.26.5 and runs as UID 10001 with restricted
 capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The public, `www`, API, admin
 and research branded hosts have valid TLS and route correctly. Readiness reports
 database/Redis/worker/scheduler `ok` and the intended provider selectors. All 23
-tenant tables have ENABLE+FORCE RLS with one policy each and the non-bypass
-application-role probe found zero cross-tenant leakage. The onboarding audit records
+tenant tables have ENABLE+FORCE RLS with one policy each. The non-bypass
+application-role audit exercised 115 tenant/table contexts across 516 scoped rows
+and found zero rows without context and zero cross-tenant rows. The onboarding audit records
 five stores and exactly one approved operator/owner dual role. All five Hermes
-profiles passed authenticated GET-only health; the Meta test lane is reply-only,
-reports `supports_otp=false`, and proactive outbound is disabled. Do not describe
-these checks as a WhatsApp, Bumpa or Claude send canary.
+profiles passed health and each completed an explicitly authorized live Claude
+request through its mapped Hermes gateway. Bumpa remains partial: stores 1–4 return
+8/10 analytics datasets; degraded store 5 returns 7/10 because
+`products.overview` hit an upstream timeout/HTTP 504. Missing values remain
+unavailable, not zero.
 
-For release `12f76f92bcae8a329eec345545682c06b460a31d`, the last baseline all-200
-sample was 17:31:35 UTC, the planned edge interruption returned 521 from 17:32:12
-through 17:35:05, and all five hosts plus API readiness recovered by 17:35:39. The
-post-release backup quiesce ran 17:36:55–17:38:26; API readiness recovered by
-17:38:39 and remained all-host stable through 17:40:08.
+The configured Meta test WABA is subscribed to the app and its sender phone-number
+ID is validated, but the WABA has zero authentication templates. Both template-create
+endpoints were denied with Graph code `10`/subcode `2388185`; no outbound was sent.
+The lane remains reply-only with `supports_otp=false`, and proactive outbound is
+disabled. These facts do not prove Meta delivery, complete Bumpa sync, Hermes
+cross-profile isolation or recovery readiness.
 
 ## Historical provider-disabled baseline verification
 
@@ -199,15 +203,16 @@ and resumes exactly the recorded service set even when backup creation fails. Al
 if no verified backup ID appears within the expected window or any service fails to
 resume.
 
-Post-release backup `20260713T173758Z` passed its format-3 manifest, all five
-SHA-256 entries, the PostgreSQL dump parser and every exports/Hermes archive check.
-Its manifest records application revision
-`12f76f92bcae8a329eec345545682c06b460a31d`, schema
-`0011_tenant_onboarding`, PostgreSQL 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:d870dc1204c4aeb294970184de3b9dc9f662576761e58310213573dd7729ea22`.
-The backup and disk-usage timers are active. Historical pre-promotion recovery
-points remain useful for investigation but are not current-release backup evidence.
-Off-host durability remains unconfigured.
+Post-release backup `20260713T184042Z` was created at 18:40:52 UTC and passed its
+format-3 manifest and all five SHA-256 entries. Its manifest records application
+revision `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`, schema
+`0011_tenant_onboarding`, PostgreSQL dump/server 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:9ef16f2273b422f603483f1d88c3d6195267cd04aa4fbadd3288104c543c70c1`.
+Systemd completed successfully at 18:41:11 UTC; all eight services resumed, all
+seven configured healthchecks passed, restarts/OOM kills remained zero, readiness
+passed and all five public routes were correct. Backup and disk-usage timers are
+active. A 10m35s stability audit through 18:49:27 found no unhealthy service,
+restart, OOM kill or severe-log match. Off-host durability remains unconfigured.
 
 ## Restore drill
 
@@ -325,6 +330,12 @@ If readiness reports `BUMPA_BACKEND=disabled`, sync must be unavailable; treat a
 fabricated success as a critical configuration defect. When the selector is
 `bumpa`, use the procedure below.
 
+The current provider baseline is partial, not recovered: stores 1–4 return 8/10
+analytics datasets and degraded store 5 returns 7/10, with `products.overview`
+failing at the upstream boundary by timeout/HTTP 504. Do not close a Bumpa incident
+or enable freshness-dependent behavior until the expected 10/10 dataset surface is
+restored and a redacted canonical/raw count reconciliation succeeds.
+
 1. Establish affected tenant, date range, sync run and correlation ID.
 2. Inspect HTTP status, body-level error, pagination checkpoint and rate-limit
    metadata without exposing the key or raw PII.
@@ -344,6 +355,13 @@ fabricated success as a critical configuration defect. When the selector is
 If readiness reports `WHATSAPP_BACKEND=disabled`, callback verification, inbound
 processing and OTP delivery must be unavailable; do not point Meta at that state or
 tell users an OTP was sent. When the selector is `meta`, use the procedure below.
+
+For the test lane, the configured WABA is subscribed to the app and its sender
+phone-number ID is validated, but zero authentication templates exist and both
+create endpoints return code
+`10`/subcode `2388185`. This is a provider permission
+block: do not retry in a loop, claim OTP support, switch on proactive sends or use
+the reply-only sender as a production authentication substitute.
 
 1. Determine whether failure is callback verification, signature rejection, queue
    lag, sender/template error or delivery failure.
@@ -371,6 +389,11 @@ control listener is not host-published, cannot accept an arbitrary profile path 
 command, and has no Docker socket, host mount or root identity. Use a full
 service/container restart only when the profile-scoped control plane itself is
 unhealthy.
+
+All five mapped profiles have completed one live Claude request through Hermes. A
+failure to complete now is a regression from that baseline, but 5/5 completion does
+not replace cross-profile attack, restart, backup/recovery or WhatsApp-routing
+canaries.
 
 1. Circuit-break only the affected profile and return a clear unavailable response.
 2. Verify tenant/profile mapping, private endpoint, authentication, process health,
