@@ -29,7 +29,7 @@ verify_document_csp() {
   local path="$2"
   local url="$scheme://$host$port_suffix$path"
   local previous_nonce=""
-  local run status remaining request_timeout csp_count csp script_source nonce
+  local status remaining request_timeout csp_count csp script_source nonce
   local cache_control script_tags
   local -a curl_args=(
     --silent
@@ -42,7 +42,7 @@ verify_document_csp() {
     curl_args+=(--noproxy '*' --resolve "$host:$port:$origin_address")
   fi
 
-  for run in 1 2; do
+  for _ in 1 2; do
     remaining=$((deadline - SECONDS))
     if ((remaining <= 0)); then
       echo "FAIL document CSP: shared smoke deadline elapsed" >&2
