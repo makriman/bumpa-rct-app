@@ -103,8 +103,9 @@ renderer.
 
 This substitution is deliberate, not an unimplemented fallback. The acceptance
 contract is deterministic parser tests for required sections and metadata, privacy
-and integrity tests for every artifact format, and a production visual review after
-the candidate image is deployed. The optional DOCX format remains out of scope.
+and integrity tests for every artifact format, and a production visual review that
+remains required for the deployed release. The optional DOCX format remains out of
+scope.
 
 ## Local development boundary
 

@@ -4,10 +4,10 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Release
-`8f290509668de15eaf3621e3213f4276f85a0a83` is deployed on the branded
+`12f76f92bcae8a329eec345545682c06b460a31d` is deployed on the branded
 `bumpabestie.com` hosts with all eight services and selectors `meta`, `bumpa` and
-`hermes`. Always confirm
-the actual boundary from `.deployed-release.json`, Compose state and
+`hermes` at schema `0011_tenant_onboarding`. Always confirm the actual boundary
+from `.deployed-release.json`, Compose state and
 `/health/ready` before applying an incident procedure; selector state is not a
 provider canary.
 
@@ -70,14 +70,25 @@ environment file. A coordinator journal, maintenance interlock or
 release-record/live-container mismatch is an intentional hard stop and must be
 reconciled before another deployment or backup.
 
-The verified production snapshot is Caddy, web, API, worker, scheduler, Hermes,
-PostgreSQL and Redis with zero restarts and zero OOM kills. Caddy is 2.11.4 built
-with Go 1.26.5 and runs as UID 10001 with restricted capabilities; PostgreSQL is
-16.14 and Redis is 7.4.9. The public, `www`, API, admin and research branded hosts
-have valid TLS and route correctly. Readiness reports database/Redis/worker/scheduler
-`ok` and the intended
-provider selectors. Meta callback verification and signed ingress pass, while OTP
-remains unavailable until Meta approves the authentication template.
+The verified production snapshot has Caddy, web, API, worker, scheduler, Hermes,
+PostgreSQL and Redis running; all seven services with configured healthchecks are
+healthy, Caddy is running, and every service has zero restarts and zero OOM kills.
+Caddy is 2.11.4 built with Go 1.26.5 and runs as UID 10001 with restricted
+capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The public, `www`, API, admin
+and research branded hosts have valid TLS and route correctly. Readiness reports
+database/Redis/worker/scheduler `ok` and the intended provider selectors. All 23
+tenant tables have ENABLE+FORCE RLS with one policy each and the non-bypass
+application-role probe found zero cross-tenant leakage. The onboarding audit records
+five stores and exactly one approved operator/owner dual role. All five Hermes
+profiles passed authenticated GET-only health; the Meta test lane is reply-only,
+reports `supports_otp=false`, and proactive outbound is disabled. Do not describe
+these checks as a WhatsApp, Bumpa or Claude send canary.
+
+For release `12f76f92bcae8a329eec345545682c06b460a31d`, the last baseline all-200
+sample was 17:31:35 UTC, the planned edge interruption returned 521 from 17:32:12
+through 17:35:05, and all five hosts plus API readiness recovered by 17:35:39. The
+post-release backup quiesce ran 17:36:55–17:38:26; API readiness recovered by
+17:38:39 and remained all-host stable through 17:40:08.
 
 ## Historical provider-disabled baseline verification
 
@@ -183,17 +194,20 @@ journalctl -u bumpabestie-backup.service --since '2 days ago' --no-pager
 
 The timer runs at 02:30 UTC with up to 15 minutes randomized delay and is persistent
 across downtime. The scheduled wrapper records the running application services,
-quiesces Caddy/API/worker/scheduler/Hermes, creates the backup, and resumes exactly
-the recorded service set even when backup creation fails. Alert if no verified
-backup ID appears within the expected window or any service fails to resume.
+keeps Caddy/web serving, quiesces API/worker/scheduler/Hermes, creates the backup,
+and resumes exactly the recorded service set even when backup creation fails. Alert
+if no verified backup ID appears within the expected window or any service fails to
+resume.
 
-Pre-promotion recovery point `20260713T121212Z` passed its format-3 manifest, all
-five SHA-256 entries and every archive/dump parser. Its manifest records application
-revision `f400cfe67628da787f7ee2a3a3f42c78cb6fae3f`, schema
-`0008_bumpa_dataset_failures`, PostgreSQL 16.14 and the backup image used by the
-current deployment. Release `8f290509668de15eaf3621e3213f4276f85a0a83` started
-after this recovery point; do not mislabel the backup as a post-release snapshot.
-The timer is enabled. Off-host durability remains unconfigured.
+Post-release backup `20260713T173758Z` passed its format-3 manifest, all five
+SHA-256 entries, the PostgreSQL dump parser and every exports/Hermes archive check.
+Its manifest records application revision
+`12f76f92bcae8a329eec345545682c06b460a31d`, schema
+`0011_tenant_onboarding`, PostgreSQL 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:d870dc1204c4aeb294970184de3b9dc9f662576761e58310213573dd7729ea22`.
+The backup and disk-usage timers are active. Historical pre-promotion recovery
+points remain useful for investigation but are not current-release backup evidence.
+Off-host durability remains unconfigured.
 
 ## Restore drill
 

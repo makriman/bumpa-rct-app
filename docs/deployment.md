@@ -10,22 +10,36 @@ the source of truth with Redis wake-ups and heartbeats. Production always requir
 set to `meta`, `bumpa` and `hermes` only after their activation gates pass.
 
 As of 2026-07-13, release
-`8f290509668de15eaf3621e3213f4276f85a0a83` is live on the five branded
-`bumpabestie.com` hosts with valid TLS. [PR 26](https://github.com/makriman/bumpa-rct-app/pull/26),
-[main CI 29246406311](https://github.com/makriman/bumpa-rct-app/actions/runs/29246406311)
-and [publish run 29247014725](https://github.com/makriman/bumpa-rct-app/actions/runs/29247014725)
-are its exact-revision release gates. Deployed image index references are recorded
-in `docs/verification.md`.
+`12f76f92bcae8a329eec345545682c06b460a31d` is live on the five branded
+`bumpabestie.com` hosts with valid TLS. Core
+[PR 27](https://github.com/makriman/bumpa-rct-app/pull/27), corrective
+[PR 35](https://github.com/makriman/bumpa-rct-app/pull/35),
+[main CI 29269923594](https://github.com/makriman/bumpa-rct-app/actions/runs/29269923594)
+(13/13 jobs) and
+[publish run 29270378518](https://github.com/makriman/bumpa-rct-app/actions/runs/29270378518)
+(7/7 jobs) are its exact-revision release gates. Deployed image index references are
+recorded in `docs/verification.md`.
 
-Production verification found all eight services healthy with zero restarts or OOM
-kills. Readiness requires PostgreSQL, Redis and fresh worker/scheduler heartbeats
-and reports provider selectors `meta`, `bumpa` and `hermes`. Meta's callback
-challenge and signed-ingress processing are live, but business verification and
-approved production templates still block OTP/outbound traffic. Recovery-point
-backup `20260713T121212Z` passed its format-3 manifest, five checksums and all
-archive/dump parsers at schema `0008_bumpa_dataset_failures`; the nightly timer is
-enabled. Provider selectors and valid credentials do not by themselves authorize
-real tenant traffic.
+Production verification found all eight services running, all seven healthchecked
+services healthy, Caddy running, and zero restarts or OOM kills at schema
+`0011_tenant_onboarding`. All 23 tenant tables have ENABLE+FORCE RLS
+and one policy each; a non-bypass application-role probe found zero cross-tenant
+leakage. The onboarding audit found five stores, five owners/memberships/phone
+identities/Bumpa connections and exactly one approved operator/owner dual role.
+All five Hermes profiles passed authenticated GET-only health; no Claude completion
+was sent. The Meta test sender is inbound/reply-only, reports `supports_otp=false`,
+and proactive outbound remains disabled. No real WhatsApp, Bumpa sync or Claude
+send canary is claimed.
+
+The guarded promotion caused the expected edge interruption: the last all-200
+sample was 17:31:35 UTC, all hosts first returned 521 at 17:32:12, the last 521 was
+17:35:05, and all hosts plus API readiness recovered by 17:35:39. The post-release
+backup's planned quiesce ran from 17:36:55 to 17:38:26; API readiness recovered by
+17:38:39 and remained stable in all-host samples through 17:40:08. Backup
+`20260713T173758Z` passed its format-3 manifest, all five checksums, PostgreSQL dump
+parser and archive checks at schema `0011_tenant_onboarding`. Backup and disk-usage
+timers are active. Provider selectors and valid credentials do not by themselves
+authorize real tenant traffic, and off-host durability remains unconfigured.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -322,14 +336,15 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-Recovery-point backup `20260713T121212Z` was created immediately before the current
-promotion. Its manifest records application revision
-`f400cfe67628da787f7ee2a3a3f42c78cb6fae3f`, schema
-`0008_bumpa_dataset_failures`, PostgreSQL 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:7608a1557d31d4d6f985807f05ed50a6001dc33a7c9c704938fc7fab0221cc58`.
-All five checksums and every archive/dump parser check passed before release
-`8f290509668de15eaf3621e3213f4276f85a0a83` was started. The timer is enabled.
-This proves the local recovery point only; off-host copy and remote restore evidence
+Post-release backup `20260713T173758Z` records application revision
+`12f76f92bcae8a329eec345545682c06b460a31d`, schema
+`0011_tenant_onboarding`, PostgreSQL 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:d870dc1204c4aeb294970184de3b9dc9f662576761e58310213573dd7729ea22`.
+Its format-3 manifest, all five SHA-256 entries, PostgreSQL dump parser and exports,
+Hermes-runtime and Hermes-staging archive checks passed. The backup and disk-usage
+timers are active. Historical pre-promotion recovery points remain available for
+rollback investigation, but are not the current-release backup evidence. This
+proves the local recovery point only; off-host copy and remote restore evidence
 remain open.
 
 ## Five-store production onboarding

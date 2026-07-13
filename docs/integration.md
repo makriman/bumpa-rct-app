@@ -86,8 +86,9 @@ The fake agent returns deterministic, tenant-tagged responses and captures only 
 redacted context envelope. The Hermes runtime uses a pinned upstream-derived image,
 an authenticated private gateway per profile, staged profile directories, and a
 Hermes-only Anthropic secret. Contract tests cover authentication, lifecycle,
-redacted context, and profile isolation; a production profile and Claude canary are
-still required before claiming the production path live.
+redacted context, and profile isolation. All five production profiles pass
+authenticated GET-only health, but an explicitly authorized Claude completion and
+cross-profile canary are still required before claiming the provider path live.
 
 Claude is the model provider through Hermes. The Anthropic key belongs only to the
 Hermes runtime secret boundary; FastAPI passes tenant-scoped,
@@ -102,8 +103,8 @@ artifact, generated TypeScript client, drift comparison and MSW handlers have no
 yet been added. Eighteen Playwright project checks exercise desktop/mobile public
 navigation, OTP-to-chat, fail-closed role boundaries, resumable operator onboarding,
 team mutation, Bumpa evidence, research filtering/report queueing and responsive
-navigation. The candidate web gate also passes 120 unit/component tests across 21
-files and a production build.
+navigation. The exact-release web gate also passes 120 unit/component tests across
+21 files and a production build.
 The separate `make integration` gate exercises the real FastAPI/Postgres path
 through the web proxy.
 
