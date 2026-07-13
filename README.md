@@ -72,10 +72,10 @@ secrets retain local defaults.
 
 ## Status
 
-The hardened candidate gates pass: backend lint/typing plus 353 local tests at
-85.07% branch-aware coverage and a separately proven PostgreSQL concurrency test;
-frontend lint/typing/build plus 121 unit/component tests across 22 files with
-enforced coverage floors; 24 desktop/mobile Playwright checks on both Darwin and
+The hardened release gates pass: backend lint/typing plus 353 tests at 85.07%
+branch-aware coverage and a separately proven PostgreSQL concurrency test;
+frontend lint/typing/build plus 128 unit/component tests with enforced coverage
+floors; 26 desktop/mobile Playwright checks on
 the pinned Linux image, including Axe, keyboard and visual-regression coverage;
 37 host/operations tests; full Docker image and Compose startup; a non-bypass
 Postgres RLS probe; and a checksum-verified Postgres/exports/reserved-Hermes backup
@@ -90,17 +90,23 @@ budgets, idempotent chat replay, tenant isolation, near-full disk alert
 sanitization/signing, 50-event webhook replay, and Redis/Postgres recovery using
 synthetic credentials and isolated volumes only.
 
-Release `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is live on the five branded
+Release `b35762ab2a9d5c1a4956530cae63040354805510` is live on the five branded
 hosts. Core/corrective [PR 27](https://github.com/makriman/bumpa-rct-app/pull/27),
 [PR 35](https://github.com/makriman/bumpa-rct-app/pull/35), evidence
 [PR 36](https://github.com/makriman/bumpa-rct-app/pull/36), and accessibility
-[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37) are included in the
-boundary. Exact-revision [main CI 29274276654](https://github.com/makriman/bumpa-rct-app/actions/runs/29274276654)
-passed 13/13 jobs and [publish run 29274700347](https://github.com/makriman/bumpa-rct-app/actions/runs/29274700347)
+[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37) and delivery-hardening
+[PR 41](https://github.com/makriman/bumpa-rct-app/pull/41) are included in the
+boundary. Pre-merge PR CI
+[29290441375](https://github.com/makriman/bumpa-rct-app/actions/runs/29290441375)
+passed 13/13 jobs on release-equivalent tree `5644fd596c1292e3f8c0505fbb80109c4f556bae`;
+exact-revision [main CI 29290795169](https://github.com/makriman/bumpa-rct-app/actions/runs/29290795169)
+passed 13/13 jobs and [publish run 29291129708](https://github.com/makriman/bumpa-rct-app/actions/runs/29291129708)
 passed 7/7 jobs. All eight services are running, all seven configured healthchecks
 are healthy, and restart/OOM-kill counts are zero. The production RLS audit passed
-23/23 tenant tables and exercised 115 tenant/table contexts across 516 scoped rows
-with zero no-context or cross-tenant leakage.
+23/23 tenant tables at schema `0012_operational_retention` and exercised 115
+tenant/table contexts across 670 scoped rows with zero no-context or cross-tenant
+leakage. All five branded records are Cloudflare-proxied with Full (strict), HTTPS
+enforcement, minimum TLS 1.2 and request-nonce CSP on dynamic documents.
 
 Provider readiness remains deliberately partial. Five mapped durable Bumpa jobs
 completed with orders available: stores 1–4 returned accepted-partial 8/10 analytics
@@ -112,9 +118,10 @@ that the configured Meta test WABA, phone-number ID and `+15550772716` display
 number match. The sender reports `PENDING` and has five approved non-authentication
 templates but no authentication template; template creation was denied with Graph
 code `10`/subcode `2388185`. The lane remains reply-only with `supports_otp=false`,
-and no outbound message was sent. Off-host backup durability, a real alert
-destination, provider-complete Bumpa coverage, and privacy/retention approval remain
-launch gates.
+and no outbound message was sent. `OFFSITE_BACKUP_SCRIPT` is unset and external
+alert delivery is absent. Off-host backup durability, a real alert destination,
+provider-complete Bumpa coverage, Meta sender/OTP approval, and privacy/retention
+approval remain launch gates.
 
 The live adapters, durable worker/scheduler runtime, transactional outbox, Redis
 rate limits, tenant profile lifecycle, and scoped secret mounts are implemented and

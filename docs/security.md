@@ -101,13 +101,12 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Publish run 29274700347 completed
-7/7 jobs and that gate for all six application/infrastructure images deployed at
-release `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`; protected-main CI run
-29274276654 passed 13/13 jobs for the same revision. The boundary includes evidence
-[PR 36](https://github.com/makriman/bumpa-rct-app/pull/36) and accessibility
-correction [PR 37](https://github.com/makriman/bumpa-rct-app/pull/37). Redis remains
-pinned to its reviewed upstream digest.
+and SBOM, then scans each exact registry digest. Delivery-hardening
+[PR 41](https://github.com/makriman/bumpa-rct-app/pull/41) and its CI run
+29290441375 passed 13/13 jobs. Protected-main CI 29290795169 passed 13/13 jobs and
+publish run 29291129708 passed 7/7 jobs for all six images deployed at release
+`b35762ab2a9d5c1a4956530cae63040354805510`. Redis remains pinned to its reviewed
+upstream digest.
 
 ## Research governance
 
@@ -131,9 +130,15 @@ redaction and export permissions—target complete branch coverage. See
 
 The current production audit confirms ENABLE+FORCE RLS and one policy on all 23
 tenant tables. Its non-bypass application role exercised 115 tenant/table contexts
-across 516 scoped rows and returned zero rows without tenant context and zero
+across 670 scoped rows and returned zero rows without tenant context and zero
 cross-tenant rows. All eight services are running, all seven configured
 healthchecks are healthy, and every service has zero restarts and zero OOM kills.
+
+All five branded records are Cloudflare-proxied with Full (strict), Always Use
+HTTPS, minimum TLS 1.2 and TLS 1.3 enabled. External probes reject TLS 1.0/1.1 on
+every host. The edge strips spoofed nonce/CSP inputs; request-rendered documents use
+unique nonce-bearing CSP without script `unsafe-inline` or `unsafe-eval`, suppress
+the internal nonce header, and are marked `private, no-store`.
 
 Live-provider evidence does not broaden authorization. Five Hermes profiles have
 completed one live Claude request each. Forty cross-profile gateway/lifecycle
@@ -146,6 +151,7 @@ counts reconcile for all five runs, but the provider still does not supply 10/10
 The subscribed Meta test lane reports `PENDING`, has five approved
 non-authentication templates but zero authentication templates, remains reply-only
 with `supports_otp=false`, and sent no outbound message after both auth-template
-create paths were denied with Graph code `10`/subcode `2388185`. Off-host durability, an
-external alert receipt, and formal privacy/retention approval remain open security
-and governance gates.
+create paths were denied with Graph code `10`/subcode `2388185`. The Meta sender is
+not OTP- or launch-ready. `OFFSITE_BACKUP_SCRIPT` is unset, external alert delivery
+is absent, and formal privacy/retention approval remains an open security and
+governance gate.

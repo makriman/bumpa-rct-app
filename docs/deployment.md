@@ -12,24 +12,31 @@ evidenced. A selected adapter is not unrestricted-traffic approval: every
 unsupported or externally blocked capability remains fail-closed until its full
 activation gate passes.
 
-As of 2026-07-13, release
-`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is live on the five branded
-`bumpabestie.com` hosts with valid TLS. Core
+As of 2026-07-13 UTC, release
+`b35762ab2a9d5c1a4956530cae63040354805510` is live on the five branded
+`bumpabestie.com` hosts through Cloudflare. Core
 [PR 27](https://github.com/makriman/bumpa-rct-app/pull/27), corrective
 [PR 35](https://github.com/makriman/bumpa-rct-app/pull/35),
 evidence [PR 36](https://github.com/makriman/bumpa-rct-app/pull/36), accessibility
-[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37),
-[main CI 29274276654](https://github.com/makriman/bumpa-rct-app/actions/runs/29274276654)
+[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37), delivery-hardening
+[PR 41](https://github.com/makriman/bumpa-rct-app/pull/41),
+[PR CI 29290441375](https://github.com/makriman/bumpa-rct-app/actions/runs/29290441375)
+(13/13 jobs on pre-merge commit `5644fd596c1292e3f8c0505fbb80109c4f556bae`,
+whose tree matches the merge commit),
+[main CI 29290795169](https://github.com/makriman/bumpa-rct-app/actions/runs/29290795169)
 (13/13 jobs) and
-[publish run 29274700347](https://github.com/makriman/bumpa-rct-app/actions/runs/29274700347)
-(7/7 jobs) are its exact-revision release gates. Deployed image index references are
-recorded in `docs/verification.md`.
+[publish run 29291129708](https://github.com/makriman/bumpa-rct-app/actions/runs/29291129708)
+(7/7 jobs) complete the release gates; the main/publish runs are bound to the exact
+deployed revision. Deployed image index references
+are recorded in `docs/verification.md`.
+The redacted production transcript is
+[`docs/release-evidence-b35762a.md`](release-evidence-b35762a.md).
 
 Production verification found all eight services running, all seven healthchecked
 services healthy, Caddy running, and zero restarts or OOM kills at schema
-`0011_tenant_onboarding`. All 23 tenant tables have ENABLE+FORCE RLS
+`0012_operational_retention`. All 23 tenant tables have ENABLE+FORCE RLS
 and one policy each; a non-bypass application-role audit exercised 115 tenant/table
-contexts across 516 scoped rows and found zero no-context or cross-tenant leakage.
+contexts across 670 scoped rows and found zero no-context or cross-tenant leakage.
 The onboarding audit found five stores, five owners/memberships/phone
 identities/Bumpa connections and exactly one approved operator/owner dual role.
 
@@ -46,15 +53,23 @@ authentication-template create paths were denied with Graph code
 `10`/subcode `2388185`; the lane remains reply-only with
 `supports_otp=false`, and no outbound message was sent.
 
-Post-release backup `20260713T184042Z` records the exact deployed revision and
-backup image digest, passed its format-3 manifest and all five checksums, and
-completed its planned quiesce at 18:41:11 UTC. All eight services and API 200
-recovered by 18:41:17; a 10m35s stability audit through 18:49:27 found no unhealthy
-service, restart, OOM kill or severe-log match. Backup and disk-usage timers are
-active. Provider selectors and valid credentials do not by themselves authorize
-real tenant traffic. Complete Bumpa provider coverage, Meta authentication template
-and outbound-delivery evidence, off-host durability, a real alert destination and
-privacy/retention approval remain open gates.
+Guarded promotion verified pre-release backup `20260713T225544Z`. Post-release
+backup `20260713T230602Z` records the exact deployed revision and backup image
+digest and passed its format-3 manifest and all five checksums. All eight services
+remain running, all seven configured healthchecks are healthy, and restart/OOM-kill
+counts are zero. The recorded
+[10m39s observation](release-evidence-b35762a.md#stability-observation) from
+23:08:07Z through 23:18:46Z found no
+health/readiness deviation and no severe or exit-signal log match across all eight
+services. Backup and disk-usage timers are active. All five DNS records are
+Cloudflare-proxied; Full (strict), Always Use HTTPS, TLS 1.2 minimum and TLS 1.3 are
+enabled. TLS 1.0/1.1 are rejected on every host, `www` canonically redirects to the
+apex with path/query intact, and dynamic documents have unique nonce-based CSP.
+Provider selectors and valid credentials do not by themselves authorize real
+tenant traffic. Complete Bumpa provider coverage, a launch-ready Meta sender with
+approved authentication templates and outbound-delivery evidence, off-host
+durability, a real alert destination and privacy/retention approval remain open
+gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -351,19 +366,20 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-Post-release backup `20260713T184042Z` records application revision
-`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`, schema
-`0011_tenant_onboarding`, PostgreSQL 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:9ef16f2273b422f603483f1d88c3d6195267cd04aa4fbadd3288104c543c70c1`.
-Its format-3 manifest, all five SHA-256 entries, PostgreSQL dump parser and exports,
-Hermes-runtime and Hermes-staging archive checks passed. Systemd completed at
-18:41:11 UTC; all eight services resumed, all seven healthchecks passed, and
-restart/OOM-kill counts remained zero. A 10m35s stability audit through 18:49:27
-found no unhealthy service, restart, OOM kill or severe-log match. The backup and
-disk-usage timers are active. Historical pre-promotion recovery points remain
-available for rollback investigation, but are not the current-release backup evidence. This
-proves the local recovery point only; off-host copy and remote restore evidence
-remain open.
+Pre-promotion backup `20260713T225544Z` provided the guarded rollback recovery
+point. Post-release backup `20260713T230602Z` records application revision
+`b35762ab2a9d5c1a4956530cae63040354805510`, schema
+`0012_operational_retention`, PostgreSQL 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:5333c066e1680e8db6a0748ec6e6bc9bb9cb16d907c1540bdaf48dbcd3cf0158`.
+Its format-3 manifest and all five SHA-256 entries passed. All eight services are
+running, all seven healthchecks pass, restart/OOM-kill counts are zero, and the
+backup/disk-usage timers are active. The recorded
+[10m39s post-release observation](release-evidence-b35762a.md#stability-observation)
+found no
+health/readiness deviation and no severe or exit-signal match in any service log.
+`OFFSITE_BACKUP_SCRIPT` remains unset, so this
+proves a local recovery point only; off-host copy, external backup alert delivery
+and remote restore evidence remain open.
 
 ## Five-store production onboarding
 

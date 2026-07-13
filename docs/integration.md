@@ -115,13 +115,15 @@ live-profile evidence.
 
 ## API contract
 
-FastAPI OpenAPI is intended to be the source of truth. A checked-in OpenAPI
-artifact, generated TypeScript client, drift comparison and MSW handlers have not
-yet been added. Eighteen Playwright project checks exercise desktop/mobile public
-navigation, OTP-to-chat, fail-closed role boundaries, resumable operator onboarding,
-team mutation, Bumpa evidence, research filtering/report queueing and responsive
-navigation. The exact-release web gate also passes 121 unit/component tests across
-22 files and a production build.
+FastAPI OpenAPI is the source of truth. The repository contains a redacted,
+deterministic `contracts/openapi.json` artifact and generated
+`apps/web/lib/generated/api-contract.ts`; CI rejects drift in the backend artifact
+and generated client. MSW handlers are not implemented. Twenty-six Playwright
+project checks exercise desktop/mobile public navigation, OTP-to-chat, fail-closed
+role boundaries, resumable operator onboarding, team mutation, Bumpa evidence,
+research filtering/report queueing, responsive navigation, accessibility, visual
+baselines and production nonce CSP. The exact-release web gate also passes 128
+unit/component tests across 23 files and a production build.
 The separate `make integration` gate exercises the real FastAPI/Postgres path
 through the web proxy.
 
