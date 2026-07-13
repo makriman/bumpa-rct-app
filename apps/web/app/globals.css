@@ -10,6 +10,7 @@
   --mint: #d8eee5;
   --lime: #dbea74;
   --coral: #e46f51;
+  --coral-ink: #b54c34;
   --amber: #eaa72e;
   --danger: #b9423b;
   --info: #3974a4;
@@ -404,7 +405,7 @@ a {
 .step::before {
   content: "0" counter(steps);
   display: block;
-  color: var(--coral);
+  color: var(--coral-ink);
   font-weight: 850;
   margin-bottom: 42px;
 }
