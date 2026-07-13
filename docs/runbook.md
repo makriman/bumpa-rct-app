@@ -4,9 +4,9 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Release
-`6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is deployed on the branded
+`b35762ab2a9d5c1a4956530cae63040354805510` is deployed on the branded
 `bumpabestie.com` hosts with all eight services and selectors `meta`, `bumpa` and
-`hermes` at schema `0011_tenant_onboarding`. Always confirm the actual boundary
+`hermes` at schema `0012_operational_retention`. Always confirm the actual boundary
 from `.deployed-release.json`, Compose state and
 `/health/ready` before applying an incident procedure; selector state is not a
 provider canary.
@@ -75,10 +75,13 @@ PostgreSQL and Redis running; all seven services with configured healthchecks ar
 healthy, Caddy is running, and every service has zero restarts and zero OOM kills.
 Caddy is 2.11.4 built with Go 1.26.5 and runs as UID 10001 with restricted
 capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The public, `www`, API, admin
-and research branded hosts have valid TLS and route correctly. Readiness reports
+and research branded hosts are Cloudflare-proxied with Full (strict), Always Use
+HTTPS, minimum TLS 1.2 and TLS 1.3 enabled; TLS 1.0/1.1 are rejected and `www`
+canonically redirects to the apex while preserving path/query. Dynamic web
+documents carry a unique nonce-based CSP. Readiness reports
 database/Redis/worker/scheduler `ok` and the intended provider selectors. All 23
 tenant tables have ENABLE+FORCE RLS with one policy each. The non-bypass
-application-role audit exercised 115 tenant/table contexts across 516 scoped rows
+application-role audit exercised 115 tenant/table contexts across 670 scoped rows
 and found zero rows without context and zero cross-tenant rows. The onboarding audit records
 five stores and exactly one approved operator/owner dual role. All five Hermes
 profiles passed health and each completed an explicitly authorized live Claude
@@ -256,16 +259,21 @@ and resumes exactly the recorded service set even when backup creation fails. Al
 if no verified backup ID appears within the expected window or any service fails to
 resume.
 
-Post-release backup `20260713T184042Z` was created at 18:40:52 UTC and passed its
-format-3 manifest and all five SHA-256 entries. Its manifest records application
-revision `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b`, schema
-`0011_tenant_onboarding`, PostgreSQL dump/server 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:9ef16f2273b422f603483f1d88c3d6195267cd04aa4fbadd3288104c543c70c1`.
-Systemd completed successfully at 18:41:11 UTC; all eight services resumed, all
-seven configured healthchecks passed, restarts/OOM kills remained zero, readiness
-passed and all five public routes were correct. Backup and disk-usage timers are
-active. A 10m35s stability audit through 18:49:27 found no unhealthy service,
-restart, OOM kill or severe-log match. Off-host durability remains unconfigured.
+Pre-promotion backup `20260713T225544Z` passed as the guarded rollback recovery
+point. Post-release backup `20260713T230602Z` passed its format-3 manifest and all
+five SHA-256 entries. Its manifest records application revision
+`b35762ab2a9d5c1a4956530cae63040354805510`, schema
+`0012_operational_retention`, PostgreSQL dump/server 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:5333c066e1680e8db6a0748ec6e6bc9bb9cb16d907c1540bdaf48dbcd3cf0158`.
+All eight services are running, all seven configured healthchecks pass,
+restart/OOM-kill counts are zero, readiness passes and all five public routes are
+correct. The recorded
+[10m39s observation](release-evidence-b35762a.md#stability-observation) from
+23:08:07Z through 23:18:46Z found no
+health/readiness deviation and no severe or exit-signal log match across all eight
+services. Backup and disk-usage timers are active. `OFFSITE_BACKUP_SCRIPT` is unset,
+and no external alert destination/receipt exists; off-host durability and alert
+delivery therefore remain unconfigured.
 
 ## Restore drill
 
