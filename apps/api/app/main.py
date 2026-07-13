@@ -11,14 +11,26 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from redis.exceptions import RedisError
-from sqlalchemy import text
 
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging, correlation_id_var
 from app.db.session import SessionLocal, create_schema, set_security_context
 from app.jobs.runtime import AsyncRuntimeConfig, RedisHealthProbe
-from app.routes import admin, auth, bumpa, chat, hermes, mcp, research, settings, tenants, whatsapp
+from app.routes import (
+    admin,
+    auth,
+    bumpa,
+    chat,
+    hermes,
+    mcp,
+    mcp_admin,
+    onboarding,
+    research,
+    settings,
+    tenants,
+    whatsapp,
+)
+from app.services.production_readiness import check_production_readiness
 from app.services.seed import seed_demo
 
 request_logger = logging.getLogger("bumpabestie.http")
@@ -74,13 +86,21 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
         docs_url="/docs" if config.is_local else None,
         redoc_url=None,
+        openapi_url="/openapi.json" if config.is_local else None,
     )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=config.effective_cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Tenant-ID", "X-Correlation-ID"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "If-Match",
+            "Idempotency-Key",
+            "X-Tenant-ID",
+            "X-Correlation-ID",
+        ],
     )
 
     @application.middleware("http")
@@ -105,7 +125,7 @@ def create_app() -> FastAPI:
             )
             response.headers["X-Correlation-ID"] = correlation_id
             response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
             response.headers["X-Frame-Options"] = "DENY"
             response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
             response.headers["Server-Timing"] = f"app;dur={duration_ms:.1f}"
@@ -151,35 +171,12 @@ def create_app() -> FastAPI:
 
     @application.get("/health/ready", tags=["health"])
     def health_ready(response: Response, settings_config: Settings = Depends(get_settings)) -> dict:
-        with SessionLocal() as db:
-            db.execute(text("SELECT 1"))
-        async_config = AsyncRuntimeConfig.from_env()
-        async_health: dict[str, object] = {"enabled": async_config.enabled}
-        is_ready = True
-        if async_config.enabled:
-            try:
-                snapshot = _redis_health_probe(async_config).health_snapshot()
-            except (RedisError, OSError):
-                snapshot = {
-                    "redis": "unavailable",
-                    "worker": "unknown",
-                    "scheduler": "unknown",
-                    "queued_wakeups": None,
-                }
-            async_health.update(snapshot)
-            if any(snapshot.get(service) != "ok" for service in ("redis", "worker", "scheduler")):
-                is_ready = False
-                response.status_code = 503
-        return {
-            "status": "ready" if is_ready else "not_ready",
-            "database": "ok",
-            "async_runtime": async_health,
-            "providers": {
-                "whatsapp": settings_config.whatsapp_backend,
-                "bumpa": settings_config.bumpa_backend,
-                "agent": settings_config.agent_backend,
-            },
-        }
+        readiness = check_production_readiness(
+            settings_config,
+            redis_probe_factory=_redis_health_probe,
+        )
+        response.status_code = readiness.http_status
+        return readiness.payload()
 
     @application.get("/health", include_in_schema=False)
     def health_compatibility() -> dict:
@@ -193,7 +190,19 @@ def create_app() -> FastAPI:
             "docs": "/docs" if config.is_local else None,
         }
 
-    for module in (auth, tenants, settings, chat, bumpa, hermes, mcp, admin, research):
+    for module in (
+        auth,
+        tenants,
+        settings,
+        chat,
+        bumpa,
+        hermes,
+        mcp,
+        admin,
+        mcp_admin,
+        onboarding,
+        research,
+    ):
         application.include_router(module.router, prefix=config.api_prefix)
     application.include_router(whatsapp.router)
     return application

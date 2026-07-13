@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load_helper():
@@ -19,6 +20,11 @@ def _load_helper():
 
 helper = _load_helper()
 RUN_ID = "11111111-1111-4111-8111-111111111111"
+
+
+class ProductionBoundaryDefaultsTest(unittest.TestCase):
+    def test_api_base_uses_the_branded_production_boundary(self) -> None:
+        self.assertEqual(helper.DEFAULT_API_BASE, "https://api.bumpabestie.com/v1")
 
 
 def _run(
@@ -46,7 +52,7 @@ class SyncCanaryValidationTest(unittest.TestCase):
     def test_accepts_complete_success(self) -> None:
         self.assertEqual(
             helper._validate_completed_sync_run(_run()),
-            (RUN_ID, "success", 10, 0),
+            (RUN_ID, "success", 10, 0, 0),
         )
 
     def test_accepts_only_provider_unavailable_profit_metrics_as_partial(self) -> None:
@@ -61,7 +67,7 @@ class SyncCanaryValidationTest(unittest.TestCase):
                 },
             )
         )
-        self.assertEqual(result, (RUN_ID, "partial", 8, 2))
+        self.assertEqual(result, (RUN_ID, "partial", 8, 2, 0))
 
     def test_accepts_each_single_provider_approved_profit_limitation(self) -> None:
         for dataset in helper.OPTIONAL_UNAVAILABLE_SYNC_DATASETS:
@@ -74,7 +80,7 @@ class SyncCanaryValidationTest(unittest.TestCase):
                         overrides={dataset: "unavailable"},
                     )
                 )
-                self.assertEqual(result, (RUN_ID, "partial", 9, 1))
+                self.assertEqual(result, (RUN_ID, "partial", 9, 1, 0))
 
     def test_rejects_unavailable_required_metric(self) -> None:
         with self.assertRaisesRegex(helper.OpsError, "required_dataset_unavailable"):
@@ -87,15 +93,27 @@ class SyncCanaryValidationTest(unittest.TestCase):
                 )
             )
 
-    def test_rejects_error_status_even_for_optional_metric(self) -> None:
-        with self.assertRaisesRegex(helper.OpsError, "dataset_status_invalid"):
+    def test_accepts_typed_dataset_error_as_degraded_without_false_freshness(
+        self,
+    ) -> None:
+        result = helper._validate_completed_sync_run(
+            _run(
+                status="partial",
+                completion_quality="degraded",
+                partial_reason="dataset_error",
+                overrides={
+                    "products.overview": "error",
+                    "sales.gross_profit": "unavailable",
+                    "sales.net_profit": "unavailable",
+                },
+            )
+        )
+        self.assertEqual(result, (RUN_ID, "partial", 7, 2, 1))
+
+    def test_rejects_untyped_dataset_error_completion_evidence(self) -> None:
+        with self.assertRaisesRegex(helper.OpsError, "completion_evidence_invalid"):
             helper._validate_completed_sync_run(
-                _run(
-                    status="partial",
-                    completion_quality="degraded",
-                    partial_reason="dataset_error",
-                    overrides={"sales.gross_profit": "error"},
-                )
+                _run(status="partial", overrides={"products.overview": "error"})
             )
 
     def test_rejects_missing_or_unexpected_dataset(self) -> None:
@@ -172,9 +190,56 @@ class SyncCanaryValidationTest(unittest.TestCase):
 
     def test_rejects_legacy_run_as_unverified(self) -> None:
         with self.assertRaisesRegex(helper.OpsError, "completion_evidence_invalid"):
-            helper._validate_completed_sync_run(
-                _run(completion_quality="legacy")
+            helper._validate_completed_sync_run(_run(completion_quality="legacy"))
+
+
+class ApiRequestTest(unittest.TestCase):
+    def test_pins_explicit_ops_user_agent_on_every_request(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return b"{}"
+
+        class FakeOpener:
+            def __init__(self) -> None:
+                self.requests = []
+
+            def open(self, request, *, timeout):
+                self.requests.append((request, timeout))
+                return FakeResponse()
+
+        opener = FakeOpener()
+        with mock.patch.object(
+            helper.urllib.request, "build_opener", return_value=opener
+        ):
+            helper._api_request(
+                "https://api.example.test/v1",
+                "GET",
+                "/admin/tenants",
+                "session-token",
             )
+            helper._api_request(
+                "https://api.example.test/v1",
+                "POST",
+                "/bumpa/sync/latest",
+                "session-token",
+                payload={"canary": True},
+                headers={
+                    "Idempotency-Key": "production-canary",
+                    "User-Agent": "caller-supplied-signature",
+                },
+            )
+
+        self.assertEqual(len(opener.requests), 2)
+        for request, timeout in opener.requests:
+            headers = {name.lower(): value for name, value in request.header_items()}
+            self.assertEqual(headers["user-agent"], helper.OPS_USER_AGENT)
+            self.assertEqual(timeout, 45)
 
 
 if __name__ == "__main__":

@@ -4,18 +4,20 @@ import fcntl
 import os
 import re
 import shutil
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_urlsafe
 from time import monotonic
+from typing import Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -88,6 +90,10 @@ class HermesCircuitOpen(HermesUnavailable):
 
 class HermesProfileError(HermesError):
     code = "hermes_profile_error"
+
+
+class HermesLifecycleControl(Protocol):
+    def activate(self, *, profile_name: str, api_key: str) -> object: ...
 
 
 class _Message(BaseModel):
@@ -390,8 +396,13 @@ def endpoint_for(profile: HermesProfile, settings: Settings) -> HermesEndpoint:
     )
 
 
-def provision_profile(db: Session, tenant: Tenant, settings: Settings) -> HermesProfile:
-    """Create an idempotent, least-privilege profile filesystem and database record."""
+def reserve_profile(db: Session, tenant: Tenant, settings: Settings) -> HermesProfile:
+    """Reserve unique profile coordinates in the database without touching its bundle.
+
+    The caller must commit this record before calling :func:`materialize_profile`.
+    PostgreSQL serializes port allocation until that commit, preventing concurrent
+    tenants from selecting the same port without relying on a host filesystem lock.
+    """
 
     existing = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant.id))
     if existing:
@@ -399,56 +410,124 @@ def provision_profile(db: Session, tenant: Tenant, settings: Settings) -> Hermes
             raise HermesProfileError("Tenant already has a non-Hermes profile")
         return existing
 
-    root = settings.hermes_profile_root.resolve()
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(root, 0o700)
-    lock_path = root / ".allocation.lock"
-    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    lock_fd = os.open(lock_path, lock_flags, 0o600)
-    with os.fdopen(lock_fd, "r+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    root = _profile_root(settings)
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SELECT pg_advisory_xact_lock(426867813609841)"))
         existing = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant.id))
         if existing:
             if existing.provider != "hermes":
                 raise HermesProfileError("Tenant already has a non-Hermes profile")
             return existing
-        used = set(db.scalars(select(HermesProfile.api_port)).all())
-        port = next(
-            (
-                candidate
-                for candidate in range(
-                    settings.hermes_profile_port_start,
-                    settings.hermes_profile_port_end + 1,
-                )
-                if candidate not in used
-            ),
-            None,
-        )
-        if port is None:
-            raise HermesProfileError("No Hermes profile ports are available")
-        profile_name = _profile_name(tenant)
-        target = root / profile_name
-        if target.exists():
-            raise HermesProfileError("Hermes profile path already exists without a record")
-        api_key = token_urlsafe(48)
-        _write_profile_directory(target, profile_name, port, api_key, settings)
-        profile = HermesProfile(
-            tenant_id=tenant.id,
-            profile_name=profile_name,
-            profile_path=str(target),
-            provider="hermes",
-            api_internal_url=(f"{settings.hermes_base_internal_host.rstrip('/')}:{port}/v1"),
-            api_port=port,
-            encrypted_api_key=FieldCipher(settings.field_encryption_key).encrypt(api_key),
-            status="provisioning",
-        )
-        db.add(profile)
-        try:
-            db.flush()
-        except Exception:
-            shutil.rmtree(target, ignore_errors=True)
-            raise
-        return profile
+    used = set(db.scalars(select(HermesProfile.api_port)).all())
+    port = next(
+        (
+            candidate
+            for candidate in range(
+                settings.hermes_profile_port_start,
+                settings.hermes_profile_port_end + 1,
+            )
+            if candidate not in used
+        ),
+        None,
+    )
+    if port is None:
+        raise HermesProfileError("No Hermes profile ports are available")
+    profile_name = _profile_name(tenant)
+    api_key = token_urlsafe(48)
+    profile = HermesProfile(
+        tenant_id=tenant.id,
+        profile_name=profile_name,
+        profile_path=str(root / profile_name),
+        provider="hermes",
+        api_internal_url=(f"{settings.hermes_base_internal_host.rstrip('/')}:{port}/v1"),
+        api_port=port,
+        encrypted_api_key=FieldCipher(settings.field_encryption_key).encrypt(api_key),
+        status="provisioning",
+    )
+    db.add(profile)
+    db.flush()
+    return profile
+
+
+def materialize_profile(
+    profile: HermesProfile,
+    tenant: Tenant,
+    settings: Settings,
+) -> Path:
+    """Create or exact-validate the derivable API-to-Hermes staging bundle."""
+
+    if profile.tenant_id != tenant.id or profile.provider != "hermes" or profile.api_port is None:
+        raise HermesProfileError("Hermes profile coordinates are incomplete")
+    expected_name = _profile_name(tenant)
+    root = _profile_root(settings)
+    target = root / expected_name
+    if (
+        profile.profile_name != expected_name
+        or profile.profile_path != str(target)
+        or Path(profile.profile_path or "").is_symlink()
+    ):
+        raise HermesProfileError("Hermes profile path is outside the staging boundary")
+    endpoint = endpoint_for(profile, settings)
+    expected_files = _profile_files(
+        profile.api_port,
+        endpoint.api_key,
+        settings,
+    )
+    # Production grants only the unprivileged Hermes runtime group read access.
+    root.mkdir(mode=0o2750, parents=True, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise HermesProfileError("Hermes profile root is invalid")
+    os.chmod(root, 0o2750)  # noqa: S103 - shared only with the Hermes runtime group
+    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_fd = os.open(root / ".materialize.lock", lock_flags, 0o600)
+        with os.fdopen(lock_fd, "r+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if target.exists() or target.is_symlink():
+                _validate_profile_directory(target, root, expected_files)
+                return target
+            _write_profile_directory(target, profile.profile_name, expected_files)
+    except HermesProfileError:
+        raise
+    except OSError as exc:
+        raise HermesProfileError("Hermes profile staging failed") from exc
+    return target
+
+
+def activate_reserved_profile(
+    profile: HermesProfile,
+    tenant: Tenant,
+    settings: Settings,
+    *,
+    control: HermesLifecycleControl | None = None,
+) -> HermesProfile:
+    """Reconcile staging and activate one committed profile through private control."""
+
+    materialize_profile(profile, tenant, settings)
+    endpoint = endpoint_for(profile, settings)
+    if control is None:
+        # Local import avoids a module cycle: the control client maps its failures
+        # back into the HermesError hierarchy defined in this module.
+        from app.providers.hermes_control import HermesControlClient
+
+        control = HermesControlClient(settings)
+    control.activate(profile_name=profile.profile_name, api_key=endpoint.api_key)
+    profile.status = "active"
+    return profile
+
+
+def provision_profile(db: Session, tenant: Tenant, settings: Settings) -> HermesProfile:
+    """Local/test compatibility wrapper for one-transaction fixtures.
+
+    Production callers must use reserve/commit/materialize explicitly so a failed
+    database commit can never leave a filesystem-only profile behind.
+    """
+
+    if not settings.is_local:
+        raise HermesProfileError("Production Hermes profiles require DB-first provisioning")
+    profile = reserve_profile(db, tenant, settings)
+    materialize_profile(profile, tenant, settings)
+    return profile
 
 
 def refresh_profile_status(
@@ -470,35 +549,52 @@ def _profile_name(tenant: Tenant) -> str:
     return f"tenant_{slug}_{tenant.id[:8]}"
 
 
+def _profile_root(settings: Settings) -> Path:
+    configured = settings.hermes_profile_root
+    if configured.is_symlink():
+        raise HermesProfileError("Hermes profile root must not be a symlink")
+    return configured.resolve()
+
+
 def _write_profile_directory(
     target: Path,
     profile_name: str,
+    files: dict[str, str],
+) -> None:
+    temporary = target.parent / f".{profile_name}.tmp-{uuid4().hex}"
+    temporary.mkdir(mode=0o2750)
+    os.chmod(temporary, 0o2750)  # noqa: S103 - shared only with Hermes
+    try:
+        for child in ("skills", "memories", "sessions", "cron"):
+            child_path = temporary / child
+            child_path.mkdir(mode=0o750)
+            os.chmod(child_path, 0o750)  # noqa: S103 - shared only with Hermes
+        for name, content in files.items():
+            _write_private_file(temporary / name, content)
+        os.replace(temporary, target)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def _profile_files(
     port: int,
     api_key: str,
     settings: Settings,
-) -> None:
-    temporary = target.parent / f".{profile_name}.tmp-{uuid4().hex}"
-    temporary.mkdir(mode=0o700)
-    try:
-        for child in ("skills", "memories", "sessions", "cron"):
-            (temporary / child).mkdir(mode=0o700)
-        _write_private_file(temporary / ".no-skills", "")
-        _write_private_file(
-            temporary / ".env",
-            "\n".join(
-                (
-                    "API_SERVER_ENABLED=true",
-                    "API_SERVER_HOST=0.0.0.0",
-                    f"API_SERVER_PORT={port}",
-                    f"API_SERVER_KEY={api_key}",
-                    "",
-                )
-            ),
-        )
-        disabled = "\n".join(f"    - {toolset}" for toolset in DISABLED_SME_TOOLSETS)
-        _write_private_file(
-            temporary / "config.yaml",
-            f"""model:
+) -> dict[str, str]:
+    disabled = "\n".join(f"    - {toolset}" for toolset in DISABLED_SME_TOOLSETS)
+    return {
+        ".no-skills": "",
+        ".env": "\n".join(
+            (
+                "API_SERVER_ENABLED=true",
+                "API_SERVER_HOST=0.0.0.0",
+                f"API_SERVER_PORT={port}",
+                f"API_SERVER_KEY={api_key}",
+                "",
+            )
+        ),
+        "config.yaml": f"""model:
   provider: anthropic
   default: {settings.hermes_default_model}
 agent:
@@ -512,18 +608,72 @@ tool_loop_guardrails:
 security:
   allow_private_urls: false
 """,
-        )
-        _write_private_file(temporary / "SOUL.md", SME_SOUL)
-        os.replace(temporary, target)
-    except Exception:
-        shutil.rmtree(temporary, ignore_errors=True)
-        raise
+        "SOUL.md": SME_SOUL,
+    }
+
+
+def _validate_profile_directory(
+    target: Path,
+    root: Path,
+    expected_files: dict[str, str],
+) -> None:
+    required_directories = {"skills", "memories", "sessions", "cron"}
+    try:
+        target_info = target.lstat()
+        if (
+            stat.S_ISLNK(target_info.st_mode)
+            or not stat.S_ISDIR(target_info.st_mode)
+            or target.resolve(strict=True).parent != root.resolve(strict=True)
+            or target_info.st_mode & 0o027
+        ):
+            raise OSError("unsafe profile directory")
+        if {entry.name for entry in target.iterdir()} != required_directories | set(expected_files):
+            raise OSError("unexpected profile entry")
+        for name in required_directories:
+            path = target / name
+            info = path.lstat()
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o027
+                or any(path.iterdir())
+            ):
+                raise OSError("unsafe profile directory")
+        for name, expected in expected_files.items():
+            path = target / name
+            info = path.lstat()
+            expected_bytes = expected.encode("utf-8")
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_mode & 0o137
+                or info.st_size != len(expected_bytes)
+            ):
+                raise OSError("unsafe or conflicting profile file")
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    opened.st_dev != info.st_dev
+                    or opened.st_ino != info.st_ino
+                    or os.read(descriptor, len(expected_bytes) + 1) != expected_bytes
+                ):
+                    raise OSError("profile file changed while validating")
+            finally:
+                os.close(descriptor)
+    except (OSError, UnicodeError) as exc:
+        raise HermesProfileError("Hermes profile staging conflicts with its reservation") from exc
 
 
 def _write_private_file(path: Path, content: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = os.open(path, flags, 0o640)
     with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+        os.fchmod(file.fileno(), 0o640)
         file.write(content)
         file.flush()
         os.fsync(file.fileno())

@@ -71,9 +71,9 @@ secrets retain local defaults.
 
 ## Status
 
-The local gates pass: backend lint/typing plus 111 tests at 86%+ branch-aware
-coverage, frontend lint/typing/build plus 78 unit/component tests, ten
-desktop/mobile Playwright checks, full Docker image and Compose startup, a
+The local gates pass: backend lint/typing plus 324 tests at 85.02% branch-aware
+coverage, frontend lint/typing/build plus 120 unit/component tests, eighteen
+desktop/mobile Playwright checks, 37 host/operations tests, full Docker image and Compose startup, a
 non-bypass Postgres RLS probe, and a checksum-verified
 Postgres/exports/reserved-Hermes backup and restore drill. `make compose-smoke`
 also verifies Postgres-backed OTP login, Bumpa mock sync, chat, research logging
@@ -81,6 +81,10 @@ and PDF report download through the same-origin web proxy, then removes every
 container and network it created. Production UI data comes from the authenticated
 APIs; synthetic fixtures require an explicit demo build and remain visibly
 labelled. Treat `docs/verification.md` as the evidence source of truth.
+The sealed resilience runner additionally proves exact authenticated chat/sync
+budgets, idempotent chat replay, tenant isolation, near-full disk alert
+sanitization/signing, 50-event webhook replay, and Redis/Postgres recovery using
+synthetic credentials and isolated volumes only.
 
 The live adapters, durable worker/scheduler runtime, transactional outbox, Redis
 rate limits, tenant profile lifecycle, and scoped secret mounts are implemented and

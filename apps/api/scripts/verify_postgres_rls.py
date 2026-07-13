@@ -14,17 +14,24 @@ import threading
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from fastapi import HTTPException
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from fastapi import HTTPException, Request, Response
 from sqlalchemy import Engine, Table, create_engine, event, inspect, text
 from sqlalchemy.engine import URL, Connection, RowMapping, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
 
+from app.core.config import Settings
+from app.core.security import find_login_eligible_user
 from app.db import models
 from app.db.base import Base
 from app.providers.contracts import BumpaSnapshot, ProviderDataset, ProviderOrder
+from app.routes.auth import request_otp, verify_code
+from app.schemas import OtpRequest, OtpVerify
 from app.services import bumpa as bumpa_service
 
 FixtureRow = TypeVar("FixtureRow")
@@ -38,6 +45,21 @@ SYNC_COMPAT_RUNS = {
 RAW_COMPAT_RUN_ID = "sync-compat-success"
 RAW_COMPAT_OLD_ID = "sync-compat-old-http"
 RAW_COMPAT_STATUSLESS_IDS = frozenset({"sync-compat-timeout", "sync-compat-transport"})
+LOGIN_GLOBAL_READ_TABLES = ("platform_roles", "tenants", "users")
+LOGIN_GLOBAL_WRITE_TABLES = ("auth_sessions", "otp_sessions")
+
+
+def _revision_in_lineage(current_revision: str, required_revision: str) -> bool:
+    """Return whether a migration exists in the current revision's ancestry."""
+
+    api_root = Path(__file__).resolve().parents[1]
+    config = Config(str(api_root / "alembic.ini"))
+    config.set_main_option("script_location", str(api_root / "alembic"))
+    revisions = ScriptDirectory.from_config(config).iterate_revisions(
+        current_revision,
+        "base",
+    )
+    return any(revision.revision == required_revision for revision in revisions)
 
 
 def _require_postgres_url() -> URL:
@@ -232,8 +254,14 @@ def _assert_bumpa_raw_failure_schema(admin_engine: Engine) -> None:
     )
     with admin_engine.begin() as connection:
         revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
-        if revision != "0008_bumpa_dataset_failures":
-            raise AssertionError(f"Expected migration 0008, found {revision}")
+        if not isinstance(revision, str) or not _revision_in_lineage(
+            revision,
+            "0008_bumpa_dataset_failures",
+        ):
+            raise AssertionError(
+                "Expected migration 0008_bumpa_dataset_failures in the current ancestry, "
+                f"found {revision}"
+            )
         columns = {
             row.column_name: row.is_nullable
             for row in connection.execute(
@@ -1192,6 +1220,7 @@ def _fixture_pair(
         tenant_id = tenant_ids[index]
         user_id = user_ids[index]
         suffix = f"{side}-{run_tag}"
+        phone = f"+1555{index}{int(run_tag, 16) % 10_000_000:07d}"
         add(
             models.Tenant(
                 id=tenant_id,
@@ -1209,7 +1238,7 @@ def _fixture_pair(
             models.User(
                 id=user_id,
                 name=f"RLS user {side.upper()}",
-                primary_phone_e164=f"+1555000{index}{run_tag[:6]}",
+                primary_phone_e164=phone,
                 status="active",
                 created_at=now,
                 updated_at=now,
@@ -1231,7 +1260,7 @@ def _fixture_pair(
                 id=f"phone-{suffix}",
                 tenant_id=tenant_id,
                 user_id=user_id,
-                phone_e164=f"+1555100{index}{run_tag[:6]}",
+                phone_e164=phone,
                 status="approved",
                 opt_out=False,
                 created_at=now,
@@ -1483,6 +1512,22 @@ def _fixture_pair(
             )
         )
         add(
+            models.TenantOnboarding(
+                id=f"onboarding-{suffix}",
+                tenant_id=tenant_id,
+                status="in_progress",
+                current_step="owner",
+                revision=0,
+                sync_attempt=0,
+                start_idempotency_key_hash=("a" if side == "a" else "b") * 64,
+                start_fingerprint=("c" if side == "a" else "d") * 64,
+                created_by=user_id,
+                updated_by=user_id,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
             models.UsageEvent(
                 id=f"usage-{suffix}",
                 tenant_id=tenant_id,
@@ -1529,6 +1574,19 @@ def _create_role(admin_engine: Engine, role: str, password: str, tables: list[st
         connection.exec_driver_sql(
             f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {quoted_tables} TO {quoted_role}"
         )
+        quoted_global_read_tables = ", ".join(
+            f"public.{_quote(connection, table)}" for table in LOGIN_GLOBAL_READ_TABLES
+        )
+        connection.exec_driver_sql(
+            f"GRANT SELECT ON TABLE {quoted_global_read_tables} TO {quoted_role}"
+        )
+        quoted_global_write_tables = ", ".join(
+            f"public.{_quote(connection, table)}" for table in LOGIN_GLOBAL_WRITE_TABLES
+        )
+        connection.exec_driver_sql(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+            f"{quoted_global_write_tables} TO {quoted_role}"
+        )
 
 
 def _set_context(connection: Connection, tenant_id: str = "", *, privileged: bool = False) -> None:
@@ -1560,6 +1618,7 @@ def _exercise_role(
     role: str,
     tables: list[str],
     tenant_ids: tuple[str, str],
+    user_ids: tuple[str, str],
 ) -> None:
     tenant_a, tenant_b = tenant_ids
     with admin_engine.connect() as admin_connection:
@@ -1663,6 +1722,72 @@ def _exercise_role(
         finally:
             transaction.rollback()
 
+    with admin_engine.connect() as connection:
+        mapped_phone = connection.scalar(
+            text("SELECT primary_phone_e164 FROM users WHERE id = :user_id"),
+            {"user_id": user_ids[0]},
+        )
+    if not isinstance(mapped_phone, str):
+        raise AssertionError("RLS login fixture user does not have a primary phone")
+
+    session_factory = sessionmaker(bind=app_engine, expire_on_commit=False, autoflush=False)
+    with session_factory() as session:
+        if find_login_eligible_user(session, mapped_phone) is not None:
+            raise AssertionError(
+                "No-context application session resolved a tenant-mapped login identity"
+            )
+
+    auth_settings = Settings(
+        app_env="test",
+        whatsapp_backend="mock",
+        auth_rate_limit_enabled=False,
+        expose_local_otp=True,
+        seed_demo_data=False,
+        dev_fixed_otp=None,
+        local_otp_code="654321",
+    )
+    request_scope: dict[str, Any] = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/auth/request-otp",
+        "raw_path": b"/v1/auth/request-otp",
+        "query_string": b"",
+        "headers": [],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    with session_factory() as session:
+        requested = request_otp(
+            OtpRequest(phone_e164=mapped_phone),
+            Request(request_scope),
+            session,
+            auth_settings,
+        )
+        if requested.dev_code != auth_settings.effective_local_otp_code:
+            raise AssertionError(
+                "The auth request route did not issue an OTP for the active tenant mapping"
+            )
+
+    request_scope["path"] = "/v1/auth/verify-otp"
+    request_scope["raw_path"] = b"/v1/auth/verify-otp"
+    with session_factory() as session:
+        authenticated = verify_code(
+            OtpVerify(
+                phone_e164=mapped_phone,
+                code=auth_settings.effective_local_otp_code,
+            ),
+            Request(request_scope),
+            Response(),
+            session,
+            auth_settings,
+        )
+        if not authenticated.access_token or authenticated.user.get("id") != user_ids[0]:
+            raise AssertionError(
+                "The auth verify route did not resolve the active tenant-mapped login identity"
+            )
+
 
 def _cleanup(
     admin_engine: Engine,
@@ -1675,6 +1800,13 @@ def _cleanup(
     if app_engine is not None:
         app_engine.dispose()
     with admin_engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM otp_sessions WHERE phone_e164 IN "
+                "(SELECT primary_phone_e164 FROM users WHERE id = ANY(:ids))"
+            ),
+            {"ids": list(user_ids)},
+        )
         for table in reversed(Base.metadata.sorted_tables):
             row_ids = ids_by_table.get(table.name)
             if row_ids:
@@ -1778,11 +1910,11 @@ def main() -> None:
         _create_role(admin_engine, role, password, tenant_tables)
         app_url = admin_url.set(username=role, password=password)
         app_engine = create_engine(app_url, pool_pre_ping=True)
-        _exercise_role(app_engine, admin_engine, role, tenant_tables, tenant_ids)
+        _exercise_role(app_engine, admin_engine, role, tenant_tables, tenant_ids, user_ids)
         print(
             "PostgreSQL RLS integration gate passed: "
             f"{len(tenant_tables)} tenant tables; no-context, tenant isolation, "
-            "cross-tenant read/write denial, and privileged context verified."
+            "cross-tenant read/write denial, privileged context, and login eligibility verified."
         )
         print("Covered tables: " + ", ".join(tenant_tables))
     finally:

@@ -14,7 +14,7 @@ const reloadAdmins = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 const resource = vi.hoisted(() => ({
   status: "ready" as "loading" | "ready" | "error",
   error: null as string | null,
-  source: "live" as "live" | null,
+  source: "live" as "live" | "demo" | null,
   data: [] as Array<{
     user_id: string;
     name: string | null;
@@ -109,6 +109,21 @@ describe("platform administrator management", () => {
     expect(
       screen.queryByRole("button", {
         name: "Revoke Maks Admin's platform access",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps administrator mutations inert for deterministic demo rows", () => {
+    resource.source = "demo";
+    render(<UserList />);
+
+    expect(
+      screen.getByRole("button", { name: "＋ Add administrator" }),
+    ).toBeDisabled();
+    expect(screen.getByText("Demo preview")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Revoke Ada Operator's platform access",
       }),
     ).not.toBeInTheDocument();
   });

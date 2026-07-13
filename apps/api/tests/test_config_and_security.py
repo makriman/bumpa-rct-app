@@ -26,7 +26,7 @@ from app.core.security import (
     verify_otp,
 )
 from app.core.time import utcnow
-from app.db.models import AuthSession, OtpSession, User
+from app.db.models import AuthSession, OtpSession, PlatformRole, User
 from app.db.session import SessionLocal
 from app.main import app
 
@@ -67,8 +67,26 @@ def test_root_environment_aliases_and_production_guards() -> None:
         bumpa_backend="disabled",
         agent_backend="disabled",
         session_cookie_secure=False,
+        meta_test_sender_waba_id="",
+        meta_test_sender_phone_number_id="",
+        meta_test_sender_display_phone_e164="",
+        meta_webhook_verify_token_file="",
+        meta_app_secret_file="",
+        meta_system_user_access_token_file="",
+        ops_alert_hmac_secret_file="",
+        google_oauth_client_secret_file="",
+        meta_ads_oauth_client_secret_file="",
     )
     assert production.cookie_secure is True
+    assert production.meta_test_sender_waba_id is None
+    assert production.meta_test_sender_phone_number_id is None
+    assert production.meta_test_sender_display_phone_e164 is None
+    assert production.meta_webhook_verify_token_file is None
+    assert production.meta_app_secret_file is None
+    assert production.meta_system_user_access_token_file is None
+    assert production.ops_alert_hmac_secret_file is None
+    assert production.google_oauth_client_secret_file is None
+    assert production.meta_ads_oauth_client_secret_file is None
 
     with pytest.raises(ValidationError, match="Local OTP controls"):
         Settings(
@@ -109,11 +127,17 @@ def test_root_environment_aliases_and_production_guards() -> None:
         meta_app_id="1234567890",
         meta_waba_id="2234567890",
         meta_webhook_verify_token="v" * 32,
+        meta_webhook_verify_token_file="",
         meta_app_secret="s" * 32,
+        meta_app_secret_file="",
         meta_phone_number_id="3234567890",
         meta_system_user_access_token="t" * 40,
+        meta_system_user_access_token_file="",
     )
     assert configured_meta.whatsapp_backend == "meta"
+    assert configured_meta.effective_meta_webhook_verify_token == "v" * 32
+    assert configured_meta.effective_meta_app_secret == "s" * 32
+    assert configured_meta.effective_meta_system_user_access_token == "t" * 40
 
     with pytest.raises(ValidationError, match="Production cannot use mock providers"):
         Settings(
@@ -126,6 +150,65 @@ def test_root_environment_aliases_and_production_guards() -> None:
             whatsapp_backend="mock",
             bumpa_backend="disabled",
             agent_backend="disabled",
+        )
+
+
+def test_meta_test_sender_is_typed_scoped_and_disabled_by_default() -> None:
+    identifiers = {
+        "meta_waba_id": "2234567890",
+        "meta_phone_number_id": "3234567890",
+        "meta_test_sender_waba_id": "423456789012345",
+        "meta_test_sender_phone_number_id": "523456789012345",
+        "meta_test_sender_display_phone_e164": "+15550102030",
+    }
+    disabled = Settings(app_env="test", whatsapp_backend="meta", **identifiers)
+    assert disabled.meta_test_sender_verification_mode == "disabled"
+    assert disabled.allowed_meta_inbound_reply_senders == frozenset({("2234567890", "3234567890")})
+
+    enabled = Settings(
+        app_env="test",
+        whatsapp_backend="meta",
+        meta_test_sender_verification_mode="inbound_replies_only",
+        **identifiers,
+    )
+    assert enabled.allowed_meta_inbound_reply_senders == frozenset(
+        {
+            ("2234567890", "3234567890"),
+            ("423456789012345", "523456789012345"),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="Meta test-sender verification is incomplete"):
+        Settings(
+            app_env="test",
+            whatsapp_backend="meta",
+            meta_waba_id="2234567890",
+            meta_phone_number_id="3234567890",
+            meta_test_sender_verification_mode="inbound_replies_only",
+            meta_test_sender_waba_id=None,
+            meta_test_sender_phone_number_id=None,
+            meta_test_sender_display_phone_e164=None,
+        )
+    with pytest.raises(ValidationError, match="requires the Meta WhatsApp backend"):
+        Settings(
+            app_env="test",
+            whatsapp_backend="mock",
+            meta_test_sender_verification_mode="inbound_replies_only",
+            **identifiers,
+        )
+    with pytest.raises(ValidationError, match="must differ"):
+        Settings(
+            app_env="test",
+            whatsapp_backend="meta",
+            meta_test_sender_verification_mode="inbound_replies_only",
+            **{**identifiers, "meta_test_sender_phone_number_id": "3234567890"},
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            whatsapp_backend="meta",
+            meta_test_sender_verification_mode="send_everything",
+            **identifiers,
         )
 
 
@@ -176,6 +259,8 @@ def test_security_invalid_inputs_lockout_token_revocation_and_helpers() -> None:
         phone = "+2348222222222"
         user = User(name="Security Test", primary_phone_e164=phone)
         db.add(user)
+        db.flush()
+        db.add(PlatformRole(user_id=user.id, role="operator"))
         db.commit()
         otp, code = issue_otp(db, phone, settings)
         with pytest.raises(HTTPException) as cooldown:

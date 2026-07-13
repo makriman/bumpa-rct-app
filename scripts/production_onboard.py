@@ -29,8 +29,9 @@ from uuid import uuid4
 
 DEFAULT_SECRET_FILE = Path.cwd() / "bumpa bestie secrets.md"
 DEFAULT_HOST = "root@165.227.228.20"
-DEFAULT_API_BASE = "https://api.bumpabestie.165-227-228-20.sslip.io/v1"
+DEFAULT_API_BASE = "https://api.bumpabestie.com/v1"
 REMOTE_ROOT = "/opt/bumpabestie"
+OPS_USER_AGENT = "BumpaBestieProductionOps/1.0"
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 BUSINESS_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 UUID_RE = re.compile(
@@ -605,6 +606,10 @@ def _api_request(
         request_headers["X-Tenant-ID"] = tenant_id
     if headers:
         request_headers.update(headers)
+    # Cloudflare Browser Integrity rejects urllib's implicit Python signature.
+    # Pin a stable, non-secret operations identity for every request, including
+    # calls that supply additional headers such as Idempotency-Key.
+    request_headers["User-Agent"] = OPS_USER_AGENT
     request = urllib.request.Request(  # noqa: S310 - API base is HTTPS-validated
         base.rstrip("/") + path, data=body, headers=request_headers, method=method
     )
@@ -653,7 +658,7 @@ def _validate_api_base(value: str) -> None:
 
 def _validate_completed_sync_run(
     completed_run: dict[str, Any],
-) -> tuple[str, str, int, int]:
+) -> tuple[str, str, int, int, int]:
     run_id = completed_run.get("id")
     status = completed_run.get("status")
     completion_quality = completed_run.get("completion_quality")
@@ -675,22 +680,38 @@ def _validate_completed_sync_run(
         raise OpsError("bumpa_sync_orders_count_invalid")
     if not isinstance(datasets, dict) or set(datasets) != EXPECTED_SYNC_DATASETS:
         raise OpsError("bumpa_sync_dataset_set_invalid")
-    if any(value not in {"available", "unavailable"} for value in datasets.values()):
+    if any(
+        value not in {"available", "unavailable", "error"}
+        for value in datasets.values()
+    ):
         raise OpsError("bumpa_sync_dataset_status_invalid")
     unavailable = {key for key, value in datasets.items() if value == "unavailable"}
+    errors = {key for key, value in datasets.items() if value == "error"}
     if unavailable - OPTIONAL_UNAVAILABLE_SYNC_DATASETS:
         raise OpsError("bumpa_sync_required_dataset_unavailable")
-    expected_status = "partial" if unavailable else "success"
+    expected_status = "partial" if unavailable or errors else "success"
     if status != expected_status:
         raise OpsError("bumpa_sync_run_status_mismatch")
-    expected_quality = "accepted_partial" if unavailable else "complete"
-    expected_reason = "profit_not_calculable" if unavailable else None
+    if errors:
+        expected_quality = "degraded"
+        expected_reason = "dataset_error"
+    elif unavailable:
+        expected_quality = "accepted_partial"
+        expected_reason = "profit_not_calculable"
+    else:
+        expected_quality = "complete"
+        expected_reason = None
     if completion_quality != expected_quality or partial_reason != expected_reason:
-        # The API assigns accepted_partial only after it has checked the exact
-        # provider diagnostic for each unavailable profit metric and proved the
-        # orders read completed without an error.
+        # The API assigns these typed completion states only after checking each
+        # provider diagnostic and proving the orders read completed safely.
         raise OpsError("bumpa_sync_completion_evidence_invalid")
-    return run_id, expected_status, len(datasets) - len(unavailable), len(unavailable)
+    return (
+        run_id,
+        expected_status,
+        len(datasets) - len(unavailable) - len(errors),
+        len(unavailable),
+        len(errors),
+    )
 
 
 def _tenant_ids(inputs: Inputs, host: str, api_base: str) -> dict[str, str]:
@@ -908,12 +929,13 @@ def bumpa_sync_canaries(inputs: Inputs, host: str, api_base: str) -> None:
                 or completed_run.get("requested_to") != requested_to
             ):
                 raise OpsError("bumpa_sync_run_range_mismatch")
-            run_id, status, available, unavailable = _validate_completed_sync_run(
-                completed_run
+            run_id, status, available, unavailable, errors = (
+                _validate_completed_sync_run(completed_run)
             )
             print(
                 f"bumpa_sync_{store.index}={status};tenant_id={tenant_id};run_id={run_id};"
                 f"datasets_available={available};datasets_unavailable={unavailable};"
+                f"datasets_error={errors};"
                 f"datasets_total={len(EXPECTED_SYNC_DATASETS)}"
             )
         finally:

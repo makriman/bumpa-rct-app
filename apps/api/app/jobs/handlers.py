@@ -17,6 +17,11 @@ from app.jobs.runtime import JobResult, PermanentJobError, register_handler
 from app.providers.bumpa import BumpaProviderError
 from app.providers.local import LocalArtifactStore
 from app.services.bumpa import run_sync
+from app.services.operational_alerts import (
+    check_hermes_profile_health,
+    deliver_operational_alert,
+)
+from app.services.proactive_insights import deliver_proactive_insight
 from app.services.reports import (
     cleanup_expired_report_artifacts,
     generate_report,
@@ -34,6 +39,39 @@ def noop_handler(_session: Session, job: AsyncJob) -> JobResult:
 def whatsapp_webhook_handler(session: Session, job: AsyncJob) -> JobResult:
     event_id = _required_string(job.payload, "event_id")
     return process_inbox_event(session, event_id, get_settings())
+
+
+@register_handler("whatsapp.proactive_insight")
+def proactive_insight_handler(session: Session, job: AsyncJob) -> JobResult:
+    tenant_id = _required_string(job.payload, "tenant_id")
+    if job.tenant_id != tenant_id:
+        raise PermanentJobError("Proactive insight tenant boundary is invalid")
+    cadence = _required_string(job.payload, "cadence")
+    if cadence not in {"daily", "weekly"}:
+        raise PermanentJobError("Proactive insight cadence is invalid")
+    slot = _required_string(job.payload, "slot")
+    return deliver_proactive_insight(
+        session,
+        tenant_id=tenant_id,
+        cadence=cadence,  # type: ignore[arg-type]
+        slot=slot,
+        settings=get_settings(),
+    )
+
+
+@register_handler("ops.deliver_alert")
+def operational_alert_handler(_session: Session, job: AsyncJob) -> JobResult:
+    return deliver_operational_alert(job.payload, get_settings())
+
+
+@register_handler("ops.hermes_health")
+def hermes_health_handler(session: Session, job: AsyncJob) -> JobResult:
+    profile_id = _required_string(job.payload, "profile_id")
+    return check_hermes_profile_health(
+        session,
+        profile_id=profile_id,
+        settings=get_settings(),
+    )
 
 
 @register_handler("bumpa.sync")

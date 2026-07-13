@@ -36,7 +36,9 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
     assert updated.json()["city"] == "Ikeja"
     assert updated.json()["status"] == "active"  # SME route cannot suspend itself.
 
-    assert client.get("/v1/settings/profile", headers=owner).status_code == 200
+    original_profile_response = client.get("/v1/settings/profile", headers=owner)
+    assert original_profile_response.status_code == 200
+    original_profile = original_profile_response.json()
     profile = client.patch(
         "/v1/settings/profile",
         headers=owner,
@@ -60,6 +62,7 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
 
     team = client.get("/v1/settings/team", headers=owner)
     assert team.status_code == 200 and team.json()
+    owner_membership = next(row for row in team.json() if row["role"] == "owner")
     member = client.post(
         "/v1/settings/team",
         headers=owner,
@@ -89,10 +92,24 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
     assert phone.status_code == 201
     numbers = client.get("/v1/settings/whatsapp-numbers", headers=owner)
     assert any(row["label"] == "Sales" for row in numbers.json())
+    owner_identity = next(
+        row for row in numbers.json() if row["user_id"] == owner_membership["user_id"]
+    )
+    assert (
+        client.delete(
+            f"/v1/settings/whatsapp-numbers/{owner_identity['id']}", headers=owner
+        ).status_code
+        == 409
+    )
+    assert (
+        client.delete(
+            f"/v1/settings/whatsapp-numbers/{phone.json()['id']}", headers=owner
+        ).status_code
+        == 204
+    )
     removed = client.delete(f"/v1/settings/team/{member.json()['membership_id']}", headers=owner)
     assert removed.status_code == 204
 
-    owner_membership = next(row for row in team.json() if row["role"] == "owner")
     cannot_remove_owner = client.delete(
         f"/v1/settings/team/{owner_membership['membership_id']}", headers=owner
     )
@@ -106,14 +123,53 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
     connection = client.post(
         "/v1/settings/mcp-connections",
         headers=owner,
-        json={"provider": "google_sheets", "scopes": ["spreadsheets.readonly"]},
+        json={"provider": "google_sheets"},
     )
     assert connection.status_code == 201
-    assert any(
-        row["provider"] == "google_sheets"
+    sheet_connection = next(
+        row
         for row in client.get("/v1/settings/mcp-connections", headers=owner).json()
+        if row["provider"] == "google_sheets"
     )
+    assert sheet_connection["scopes"] == ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     assert current.json()["id"] == tenant_id
+    restored_profile = client.patch(
+        "/v1/settings/profile",
+        headers=owner,
+        json={"name": original_profile["name"]},
+    )
+    assert restored_profile.status_code == 200
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        restored_user = db.get(User, original_profile["id"])
+        assert restored_user is not None
+        restored_user.email = original_profile["email"]
+        db.commit()
+
+
+def test_profile_email_can_be_cleared_and_other_sessions_revoked(client: TestClient) -> None:
+    current = auth_headers(client, "+2348012345678")
+    other = auth_headers(client, "+2348012345678")
+    original_email = client.get("/v1/settings/profile", headers=current).json()["email"]
+    try:
+        cleared = client.patch(
+            "/v1/settings/profile",
+            headers=current,
+            json={"email": None},
+        )
+        assert cleared.status_code == 200
+        assert cleared.json()["email"] is None
+        revoked = client.post("/v1/auth/logout-others", headers=current)
+        assert revoked.status_code == 200, revoked.text
+        assert revoked.json()["revoked_sessions"] >= 1
+        assert client.get("/v1/auth/me", headers=current).status_code == 200
+        assert client.get("/v1/auth/me", headers=other).status_code == 401
+    finally:
+        client.patch(
+            "/v1/settings/profile",
+            headers=current,
+            json={"email": original_email},
+        )
 
 
 def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
@@ -230,6 +286,16 @@ def test_member_cannot_mutate_owner_settings(client: TestClient) -> None:
         json={"name": "Restricted Member", "phone_e164": "+2348555555555", "role": "member"},
     )
     assert created.status_code == 201
+    approved = client.post(
+        "/v1/settings/whatsapp-numbers",
+        headers=owner,
+        json={
+            "user_id": created.json()["user_id"],
+            "phone_e164": "+2348555555555",
+            "label": "Restricted member",
+        },
+    )
+    assert approved.status_code == 201
     member = auth_headers(client, "+2348555555555")
     assert (
         client.patch("/v1/tenants/current", headers=member, json={"city": "Abuja"}).status_code
@@ -386,9 +452,9 @@ def test_team_reactivation_phone_approval_and_revocation_are_tenant_safe(
     assert client.get("/v1/settings/profile", headers=member_headers).status_code == 200
     assert client.delete(f"/v1/settings/team/{membership_id}", headers=owner).status_code == 204
 
-    # Membership is resolved on every authenticated request, so a token issued
-    # before revocation loses access immediately.
-    assert client.get("/v1/settings/profile", headers=member_headers).status_code == 403
+    # Login eligibility is resolved on every authenticated request, so a token
+    # issued before membership revocation becomes unauthorized immediately.
+    assert client.get("/v1/settings/profile", headers=member_headers).status_code == 401
 
     # An approved phone is likewise insufficient after its tenant membership is
     # revoked. The message takes the non-authorized path and never reaches chat.

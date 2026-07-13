@@ -133,7 +133,11 @@ def get_principal(
         membership = memberships[0]
     selected_tenant_id = requested_tenant_id or (membership.tenant_id if membership else None)
     tenant = db.get(Tenant, selected_tenant_id) if selected_tenant_id else None
-    if tenant and tenant.status != "active" and "superadmin" not in platform_roles:
+    if (
+        tenant
+        and tenant.status != "active"
+        and not platform_roles.intersection({"operator", "superadmin"})
+    ):
         raise HTTPException(status_code=403, detail="Tenant is not active")
     if not platform_roles.intersection({"operator", "researcher", "superadmin"}):
         set_security_context(db, tenant_id=tenant.id if tenant else None)
@@ -146,6 +150,8 @@ def require_tenant(
 ) -> Principal:
     if not principal.tenant or not principal.membership:
         raise HTTPException(status_code=403, detail="An active tenant membership is required")
+    if principal.tenant.status != "active":
+        raise HTTPException(status_code=403, detail="Tenant is not active")
     # Platform administrators retain privileged context for global admin routes,
     # but dual-role users must be narrowed before any tenant-scoped dependency
     # returns. This prevents their platform role from bypassing tenant RLS.

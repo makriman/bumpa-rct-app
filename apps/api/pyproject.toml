@@ -17,6 +17,7 @@ dependencies = [
   "redis>=5.2,<6",
   "python-multipart>=0.0.12,<1",
   "email-validator>=2.2,<3",
+  "reportlab>=4.2,<5",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,7 @@ dev = [
   "pytest-cov>=5,<7",
   "mypy>=1.11,<2",
   "ruff>=0.7,<1",
+  "pypdf>=5,<7",
 ]
 
 [build-system]

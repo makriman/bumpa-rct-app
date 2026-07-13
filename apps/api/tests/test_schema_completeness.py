@@ -58,6 +58,11 @@ def test_model_metadata_covers_planned_schema() -> None:
     }
     assert "ck_mcp_tool_permissions_permission" in permission_constraints
     assert "uq_mcp_tool_permissions_connection_tool" in permission_constraints
+    connection_constraints = {
+        constraint.name for constraint in tables["mcp_connections"].constraints
+    }
+    assert "ck_mcp_connections_status" in connection_constraints
+    assert "uq_mcp_connections_tenant_provider" in connection_constraints
 
     for table_name in ("bumpa_order_items", "agent_tool_calls", "mcp_tool_permissions"):
         table = tables[table_name]
@@ -120,6 +125,12 @@ def test_schema_migration_round_trip_and_constraints(
             constraint["name"]
             for constraint in inspector.get_unique_constraints("mcp_tool_permissions")
         } >= {"uq_mcp_tool_permissions_connection_tool"}
+        assert {
+            constraint["name"] for constraint in inspector.get_check_constraints("mcp_connections")
+        } >= {"ck_mcp_connections_status"}
+        assert {
+            constraint["name"] for constraint in inspector.get_unique_constraints("mcp_connections")
+        } >= {"uq_mcp_connections_tenant_provider"}
     finally:
         engine.dispose()
 

@@ -24,6 +24,7 @@ from app.db.models import (
     BumpaRawResponse,
     BumpaSyncRun,
     HermesProfile,
+    ResearchEvent,
     Tenant,
     User,
 )
@@ -286,7 +287,11 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
     api_key_marker = "api-key-secret-must-never-reach-logs"
 
     with Session(engine, expire_on_commit=False) as db:
-        tenant = Tenant(slug="degraded-evidence", name="Degraded Evidence")
+        tenant = Tenant(
+            slug="degraded-evidence",
+            name="Degraded Evidence",
+            research_consent_status="granted",
+        )
         db.add(tenant)
         db.flush()
         connection = BumpaConnection(
@@ -398,6 +403,20 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert degraded.status == "partial"
         assert degraded.completion_quality == "degraded"
         assert degraded.partial_reason == "dataset_error"
+        sync_events = list(
+            db.scalars(
+                select(ResearchEvent)
+                .where(ResearchEvent.tenant_id == tenant.id)
+                .order_by(ResearchEvent.created_at)
+            ).all()
+        )
+        assert [event.event_type for event in sync_events] == [
+            "bumpa_sync_completed",
+            "bumpa_sync_completed",
+            "bumpa_sync_degraded",
+        ]
+        assert sync_events[-1].quality_flags == ["dataset_error"]
+        assert sync_events[-1].business_outcome["completion_quality"] == "degraded"
         assert connection.last_successful_sync_at is not None
         assert connection.last_successful_sync_at.replace(tzinfo=None) == (
             original_freshness.replace(tzinfo=None)
@@ -523,7 +542,11 @@ def test_full_bumpa_provider_failure_log_is_typed_and_contains_no_secrets(
 
     monkeypatch.setattr(bumpa_service, "BumpaClient", FailingBumpaClient)
     with Session(engine, expire_on_commit=False) as db:
-        tenant = Tenant(slug="full-provider-failure", name="Full Provider Failure")
+        tenant = Tenant(
+            slug="full-provider-failure",
+            name="Full Provider Failure",
+            research_consent_status="granted",
+        )
         db.add(tenant)
         db.flush()
         connection = BumpaConnection(
@@ -565,6 +588,17 @@ def test_full_bumpa_provider_failure_log_is_typed_and_contains_no_secrets(
         failed_run = db.scalar(select(BumpaSyncRun))
         assert failed_run is not None
         assert failed_run.status == "failed"
+        failed_event = db.scalar(
+            select(ResearchEvent).where(ResearchEvent.event_type == "bumpa_sync_failed")
+        )
+        assert failed_event is not None
+        assert failed_event.business_outcome == {
+            "completion_quality": "failed",
+            "failure_kind": "provider",
+            "retryable": True,
+            "status": "failed",
+        }
+        assert failed_event.quality_flags == ["provider"]
         assert len(capture.lines) == 1
         warning = json.loads(capture.lines[0])
         assert warning == {

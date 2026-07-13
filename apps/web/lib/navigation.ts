@@ -27,6 +27,7 @@ export const adminNav: NavGroup[] = [
       { label: "Overview", href: "/admin", icon: "▦" },
       { label: "Tenants", href: "/admin/tenants", icon: "⌂" },
       { label: "Administrators", href: "/admin/users", icon: "♢" },
+      { label: "Connections", href: "/admin/connections", icon: "⌘" },
       { label: "Sync runs", href: "/admin/sync", icon: "↻" },
     ],
   },
@@ -34,6 +35,7 @@ export const adminNav: NavGroup[] = [
     label: "System",
     items: [
       { label: "Failures", href: "/admin/errors", icon: "△" },
+      { label: "Provider failures", href: "/admin/providers", icon: "◇" },
       { label: "Usage", href: "/admin/usage", icon: "◫" },
     ],
   },

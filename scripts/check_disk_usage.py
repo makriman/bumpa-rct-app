@@ -117,7 +117,8 @@ def inspect_filesystems(
 
 def is_near_full(filesystem: FilesystemUsage, threshold_percent: int) -> bool:
     return filesystem.blocks.used_percent >= threshold_percent or (
-        filesystem.inodes is not None and filesystem.inodes.used_percent >= threshold_percent
+        filesystem.inodes is not None
+        and filesystem.inodes.used_percent >= threshold_percent
     )
 
 
@@ -126,7 +127,9 @@ def build_event(
 ) -> tuple[dict[str, object], int]:
     filesystems, errors = inspect_filesystems(paths)
     near_full = [
-        filesystem for filesystem in filesystems if is_near_full(filesystem, threshold_percent)
+        filesystem
+        for filesystem in filesystems
+        if is_near_full(filesystem, threshold_percent)
     ]
     if errors:
         status = "error"
@@ -156,7 +159,18 @@ def invoke_alert_hook(hook: str, event_json: str) -> bool:
     path = Path(hook)
     hook_environment = {
         key: os.environ[key]
-        for key in ("HOME", "LANG", "LC_ALL", "PATH", "TZ")
+        for key in (
+            "BUMPABESTIE_ALERT_HMAC_SECRET_FILE",
+            "BUMPABESTIE_ALERT_CONFIG_FILE",
+            "BUMPABESTIE_ALERT_MAX_ATTEMPTS",
+            "BUMPABESTIE_ALERT_TIMEOUT_SECONDS",
+            "BUMPABESTIE_ALERT_WEBHOOK_URL",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "PATH",
+            "TZ",
+        )
         if key in os.environ
     }
     hook_environment["BUMPABESTIE_ALERT_EVENT"] = "disk_usage"
@@ -212,7 +226,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--threshold-percent",
         type=int,
         default=int(
-            os.environ.get("BUMPABESTIE_DISK_THRESHOLD_PERCENT", DEFAULT_THRESHOLD_PERCENT)
+            os.environ.get(
+                "BUMPABESTIE_DISK_THRESHOLD_PERCENT", DEFAULT_THRESHOLD_PERCENT
+            )
         ),
     )
     parser.add_argument(

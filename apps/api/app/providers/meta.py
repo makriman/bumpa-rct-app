@@ -60,7 +60,7 @@ class MetaWhatsAppClient:
         graph_version: str,
         phone_number_id: str,
         access_token: str,
-        otp_template_name: str = "bb_otp_login",
+        otp_template_name: str | None = "bb_otp_login",
         template_language_code: str = "en",
         timeout_seconds: float = 20.0,
         max_response_bytes: int = 262_144,
@@ -72,7 +72,7 @@ class MetaWhatsAppClient:
             raise ValueError("Invalid Meta phone number ID")
         if not access_token or len(access_token) < 16:
             raise ValueError("Meta access token is missing or too short")
-        if not TEMPLATE_NAME_RE.fullmatch(otp_template_name):
+        if otp_template_name is not None and not TEMPLATE_NAME_RE.fullmatch(otp_template_name):
             raise ValueError("Invalid Meta OTP template name")
         if not LANGUAGE_CODE_RE.fullmatch(template_language_code):
             raise ValueError("Invalid Meta template language code")
@@ -81,6 +81,7 @@ class MetaWhatsAppClient:
         if not 4096 <= max_response_bytes <= 1_048_576:
             raise ValueError("Meta response limit is outside the supported range")
 
+        self._phone_number_id = phone_number_id
         self._url = f"{GRAPH_BASE_URL}/{graph_version}/{phone_number_id}/messages"
         self._access_token = access_token
         self._otp_template_name = otp_template_name
@@ -103,6 +104,40 @@ class MetaWhatsAppClient:
             timeout_seconds=settings.meta_request_timeout_seconds,
             max_response_bytes=settings.meta_max_response_bytes,
         )
+
+    @classmethod
+    def for_inbound_reply(
+        cls,
+        settings: Settings,
+        *,
+        waba_id: str,
+        phone_number_id: str,
+    ) -> MetaWhatsAppClient:
+        sender = (waba_id, phone_number_id)
+        if sender not in settings.allowed_meta_inbound_reply_senders:
+            raise ValueError("Meta reply sender is not configured")
+        if sender == (settings.meta_waba_id, settings.meta_phone_number_id):
+            return cls.from_settings(settings)
+        return cls(
+            graph_version=settings.meta_graph_version,
+            phone_number_id=phone_number_id,
+            access_token=settings.effective_meta_system_user_access_token,
+            # The verification sender is reply-only until Meta approves an
+            # AUTHENTICATION template for it. OTP requests always construct the
+            # primary sender through ``from_settings``.
+            otp_template_name=None,
+            template_language_code=settings.meta_template_language_code,
+            timeout_seconds=settings.meta_request_timeout_seconds,
+            max_response_bytes=settings.meta_max_response_bytes,
+        )
+
+    @property
+    def phone_number_id(self) -> str:
+        return self._phone_number_id
+
+    @property
+    def supports_otp(self) -> bool:
+        return self._otp_template_name is not None
 
     def send_text(self, phone_e164: str, body: str) -> str:
         if not body or not body.strip():
@@ -150,6 +185,8 @@ class MetaWhatsAppClient:
         return delivery.message_id
 
     def send_otp(self, phone_e164: str, code: str) -> str:
+        if self._otp_template_name is None:
+            raise ValueError("Meta sender has no approved AUTHENTICATION template for OTP delivery")
         if not re.fullmatch(r"\d{6,10}", code):
             raise ValueError("OTP code must contain 6 to 10 digits")
         return self.send_template(

@@ -45,9 +45,10 @@ The defined read surface is ten analytics datasets plus paginated orders. Code a
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
 Decimal money, unknown-value preservation, and deep redaction. All five supplied
-business credentials have been authenticated; four completed every dataset and
-orders canary, while one had a transient timeout on a single overview endpoint.
-That provider observation is not production activation evidence.
+business credentials authenticate. Four completed the bounded live provider probe;
+store 5 returned a bounded degraded timeout while retaining usable prior data. A
+fresh successful store-5 probe and mapped production sync/reconciliation remain
+required.
 
 ## WhatsApp contract
 
@@ -55,9 +56,29 @@ Local webhook tests use canonical raw JSON bytes and compute real HMAC signature
 They cover verification challenge, wrong/missing signature, unknown and known
 senders, duplicates, durable acknowledgement, delivery callbacks, STOP/START, and
 retry after job failure. The live adapter has a versioned sender, service-window
-rules, idempotency, and an ambiguous-send guard. Meta account validation succeeded,
-but phone verification, callback subscription, approved templates, and a live
-delivery receipt remain external activation gates.
+rules, idempotency, and an ambiguous-send guard. The production phone is verified,
+Cloud API is connected, callback subscriptions are active, and signed public ingress
+passes. Meta Business verification, approved OTP/insight templates, and a live
+outbound delivery receipt remain external activation gates.
+
+### Meta test-sender lane
+
+The optional Meta test sender is a separate, deliberately limited ingress/reply
+lane. It is configured with all three of the following identifiers, which are not
+interchangeable:
+
+- `META_TEST_SENDER_WABA_ID`: the test WhatsApp Business Account ID.
+- `META_TEST_SENDER_PHONE_NUMBER_ID`: the numeric Graph API phone-number ID.
+- `META_TEST_SENDER_DISPLAY_PHONE_E164`: the normalized display number.
+
+Set `META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only` only after all three
+values are known and the app is subscribed to that WABA. Webhook events must match
+both the entry WABA ID and `metadata.phone_number_id`; mismatches are durably ignored.
+Replies to an accepted test-lane event use that event's sender, while proactive
+messages and OTPs continue to use the primary production sender. The test lane has
+`supports_otp=false`: it must never initiate an authentication code, claim that a
+code was sent, or substitute for an approved production authentication template.
+Keep the mode `disabled` when any identifier or subscription is uncertain.
 
 ## Agent contract
 
@@ -78,10 +99,26 @@ live-profile evidence.
 
 FastAPI OpenAPI is intended to be the source of truth. A checked-in OpenAPI
 artifact, generated TypeScript client, drift comparison and MSW handlers have not
-yet been added. Eight Playwright project checks exercise desktop/mobile public navigation,
-the labelled demo chat path and privileged-host login reachability. The separate
-`make integration` gate exercises the real FastAPI/Postgres path through the web
-proxy without a browser.
+yet been added. Eighteen Playwright project checks exercise desktop/mobile public
+navigation, OTP-to-chat, fail-closed role boundaries, resumable operator onboarding,
+team mutation, Bumpa evidence, research filtering/report queueing and responsive
+navigation. The candidate web gate also passes 120 unit/component tests across 21
+files and a production build.
+The separate `make integration` gate exercises the real FastAPI/Postgres path
+through the web proxy.
+
+## Sealed resilience contract
+
+`make load-failure` creates a disposable Compose project with synthetic-only
+credentials, explicit Postgres/Redis hosts, mock provider selectors and fresh
+volumes. The runner disables ambient Compose env files, rejects inherited live
+data-plane/provider values, validates the rendered and running environments, and
+removes the project after the run. It produces one JSON artifact covering exact
+authenticated chat/sync rate-limit outcomes, idempotent chat replay, tenant-safe
+negative reads and PostgreSQL invariants; a signed 50-event webhook burst and
+replay; Redis/Postgres outage recovery; and a deterministic near-full disk event
+through the production sanitizer/HMAC boundary. The disk drill intercepts only
+the final transport and performs no external network request.
 
 ## Synthetic seed
 

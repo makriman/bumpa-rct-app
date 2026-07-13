@@ -9,6 +9,8 @@ User=bumpabestie
 WorkingDirectory=/opt/bumpabestie
 StateDirectory=bumpabestie
 StateDirectoryMode=0700
+Environment=BUMPABESTIE_ALERT_HOOK=/opt/bumpabestie/scripts/send_ops_alert.py
+Environment=BUMPABESTIE_ALERT_CONFIG_FILE=/etc/bumpabestie/alerts.json
 ExecStart=/opt/bumpabestie/scripts/scheduled_backup.sh
 ExecStartPost=/opt/bumpabestie/scripts/offsite_backup.sh --env-file /opt/bumpabestie/.env.production
 Nice=10

@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 ReportFormat = Literal["csv", "jsonl", "pdf"]
 PlatformAdminRole = Literal["operator", "superadmin"]
+McpProvider = Literal["google_drive", "google_sheets", "gmail", "calendar", "meta_ads"]
+McpToolPermissionValue = Literal["deny", "read", "write_with_confirmation"]
 AsyncJobStatus = Literal[
     "pending",
     "queued",
@@ -35,6 +37,11 @@ class ORMModel(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class SessionsRevoked(BaseModel):
+    message: str
+    revoked_sessions: int
 
 
 class AsyncJobView(BaseModel):
@@ -187,14 +194,60 @@ class ConsentUpdate(BaseModel):
 
 
 class McpConnectionCreate(BaseModel):
-    provider: Literal["google_drive", "google_sheets", "gmail", "calendar", "meta_ads"]
+    provider: McpProvider
     scopes: list[str] = Field(default_factory=list, max_length=20)
     read_only: bool = True
 
 
+class McpConnectionView(BaseModel):
+    id: str
+    provider: McpProvider
+    status: str
+    scopes: list[str]
+    read_only: bool
+    admin_approved: bool
+    oauth_available: bool
+    permissions: dict[str, McpToolPermissionValue]
+
+
+class McpAdminConnectionView(McpConnectionView):
+    tenant_id: str
+    tenant_name: str
+    created_by: str | None
+    created_at: datetime
+
+
+class McpOAuthStartView(BaseModel):
+    authorization_url: str
+    expires_in_seconds: int
+
+
+class McpToolPermissionUpdate(BaseModel):
+    permission: McpToolPermissionValue
+    acknowledge_write_confirmation: bool = False
+
+    @model_validator(mode="after")
+    def require_write_acknowledgement(self) -> McpToolPermissionUpdate:
+        if self.permission == "write_with_confirmation" and not self.acknowledge_write_confirmation:
+            raise ValueError("Write permission requires confirmation-policy acknowledgement")
+        return self
+
+
+class McpAdminDecision(BaseModel):
+    decision: Literal["approve", "reject"]
+    reason: str = Field(min_length=8, max_length=240)
+
+
 class ReportCreate(BaseModel):
     report_type: Literal[
-        "sme_usage", "cohort_behavior", "question_taxonomy", "weekly_memo", "monthly_memo"
+        "sme_usage",
+        "cohort_behavior",
+        "question_taxonomy",
+        "business_outcome_correlation",
+        "weekly_memo",
+        "monthly_memo",
+        "raw_export_package",
+        "anonymized_export_package",
     ] = "sme_usage"
     filters: dict[str, Any] = Field(default_factory=dict)
     formats: list[ReportFormat] = Field(default_factory=default_report_formats)
@@ -203,6 +256,7 @@ class ReportCreate(BaseModel):
 class ReportView(ORMModel):
     id: str
     report_type: str
+    artifact_kind: Literal["report", "export"]
     status: str
     title: str | None
     summary: str | None
@@ -215,6 +269,7 @@ class ResearchConversationEventView(BaseModel):
     user_pseudonym: str | None
     channel: str
     event_type: str
+    raw_text_present: bool
     redacted_text: str | None
     primary_intent: str | None
     business_function: str | None

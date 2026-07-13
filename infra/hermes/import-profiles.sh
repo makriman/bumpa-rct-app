@@ -4,7 +4,17 @@ set -eu
 staging_root="${HERMES_STAGING_ROOT:-/staged/profiles}"
 runtime_root="${HERMES_RUNTIME_ROOT:-/opt/data/profiles}"
 
+if [ -L "$runtime_root" ]; then
+  echo "Hermes runtime profile root must not be a symlink" >&2
+  exit 1
+fi
 mkdir -p "$runtime_root"
+if [ ! -d "$runtime_root" ] || [ -L "$runtime_root" ]; then
+  echo "Hermes runtime profile root is invalid" >&2
+  exit 1
+fi
+chown hermes:hermes "$runtime_root"
+chmod 0700 "$runtime_root"
 imported=0
 for source in "$staging_root"/tenant_*; do
   [ -d "$source" ] || continue
@@ -27,6 +37,16 @@ for source in "$staging_root"/tenant_*; do
   done
 
   destination="$runtime_root/$name"
+  if [ -L "$destination" ] || {
+    [ -e "$destination" ] && [ ! -d "$destination" ]
+  }; then
+    echo "Hermes runtime profile destination is invalid" >&2
+    exit 1
+  fi
+  if [ -d "$destination" ] && find "$destination" -type l -print -quit | grep -q .; then
+    echo "Hermes runtime profiles must not contain symlinks" >&2
+    exit 1
+  fi
   mkdir -p "$destination" "$destination/skills" "$destination/memories" \
     "$destination/sessions" "$destination/cron"
   install -m 0600 "$source/.no-skills" "$destination/.no-skills"

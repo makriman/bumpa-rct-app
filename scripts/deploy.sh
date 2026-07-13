@@ -141,6 +141,31 @@ for key in \
   export "${key?}"
 done
 
+if [[ "$(value_for OPS_ALERTS_ENABLED)" == "true" ]]; then
+  host_alert_config="/etc/bumpabestie/alerts.json"
+  if [[ ! -f "$host_alert_config" || -L "$host_alert_config" ]]; then
+    echo "Operational alerts are enabled but $host_alert_config is missing or unsafe" >&2
+    exit 2
+  fi
+  alert_config_permissions="$(stat -c '%a' "$host_alert_config" 2>/dev/null || stat -f '%Lp' "$host_alert_config")"
+  if [[ "$alert_config_permissions" != "640" ]]; then
+    echo "Host alert configuration permissions must be 0640; found $alert_config_permissions" >&2
+    exit 2
+  fi
+  if ! jq --exit-status \
+    --arg endpoint "$(value_for OPS_ALERT_WEBHOOK_URL)" \
+    --arg secret_file "$(value_for OPS_ALERT_HMAC_SECRET_FILE_HOST)" \
+    '(keys | sort) == ["hmac_secret_file", "max_attempts", "timeout_seconds", "webhook_url"]
+     and .webhook_url == $endpoint
+     and .hmac_secret_file == $secret_file
+     and (.max_attempts | type == "number" and . >= 1 and . <= 5)
+     and (.timeout_seconds | type == "number" and . >= 1 and . <= 30)' \
+    "$host_alert_config" >/dev/null; then
+    echo "Host alert configuration does not match the enabled production contract" >&2
+    exit 2
+  fi
+fi
+
 target_revision="$DEPLOY_REF"
 target_image_tag="$IMAGE_TAG"
 target_infra_image_tag="$INFRA_IMAGE_TAG"
@@ -220,6 +245,21 @@ for timer_name in bumpabestie-backup.timer bumpabestie-disk-usage.timer; do
 done
 
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
+
+run_production_smoke() {
+  if ! SMOKE_SCHEME=https \
+      SMOKE_PORT=443 \
+      SMOKE_OVERALL_TIMEOUT_SECONDS=180 \
+      SMOKE_ORIGIN_ADDRESS=127.0.0.1 \
+      ./scripts/smoke_test.sh; then
+    return 1
+  fi
+  SMOKE_SCHEME=https \
+    SMOKE_PORT=443 \
+    SMOKE_OVERALL_TIMEOUT_SECONDS=60 \
+    SMOKE_ORIGIN_ADDRESS='' \
+    ./scripts/smoke_test.sh
+}
 
 running_image() {
   local service="$1"
@@ -445,7 +485,7 @@ rollback() {
     fi
     set +e
     docker start "${previous_writer_containers[@]}" >/dev/null
-    SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
+    run_production_smoke
     restart_result=$?
     set -e
     if ((restart_result == 0)); then
@@ -484,7 +524,7 @@ rollback() {
       "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
     fi
     "${compose[@]}" --profile async up -d --no-deps "${rollback_services[@]}"
-    SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
+    run_production_smoke
     rollback_result=$?
     set -e
     if ((rollback_result == 0)); then
@@ -652,7 +692,7 @@ docker exec \
 ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
 "${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \
   api web worker scheduler hermes caddy
-SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
+run_production_smoke
 
 for service in caddy postgres redis api web worker scheduler hermes; do
   container_id="$("${compose[@]}" ps -q "$service")"

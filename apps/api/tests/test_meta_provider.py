@@ -14,11 +14,31 @@ from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
 from app.core.logging import JsonFormatter
-from app.db.models import WebhookEvent, WhatsappMessage
+from app.db.models import PlatformRole, User, WebhookEvent, WhatsappMessage
 from app.db.session import SessionLocal
 from app.jobs.runtime import PermanentJobError
 from app.main import app
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
+
+
+def _ensure_active_user(phone_e164: str) -> None:
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.primary_phone_e164 == phone_e164))
+        if user is None:
+            user = User(name="Meta OTP test user", primary_phone_e164=phone_e164)
+            db.add(user)
+            db.flush()
+        if (
+            db.scalar(
+                select(PlatformRole.id).where(
+                    PlatformRole.user_id == user.id,
+                    PlatformRole.role == "operator",
+                )
+            )
+            is None
+        ):
+            db.add(PlatformRole(user_id=user.id, role="operator"))
+        db.commit()
 
 
 def _success_response(request: httpx.Request) -> httpx.Response:
@@ -213,11 +233,65 @@ def _meta_test_settings() -> Settings:
         artifact_root=base.artifact_root,
         whatsapp_backend="meta",
         meta_app_secret="s" * 32,
+        meta_waba_id="2234567890",
         meta_phone_number_id="3234567890",
         meta_system_user_access_token="t" * 40,
         expose_local_otp=True,
         seed_demo_data=True,
     )
+
+
+def _verification_sender_settings() -> Settings:
+    base = _meta_test_settings()
+    return Settings(
+        app_env="test",
+        database_url=base.database_url,
+        artifact_root=base.artifact_root,
+        whatsapp_backend="meta",
+        meta_app_secret="s" * 32,
+        meta_waba_id="2234567890",
+        meta_phone_number_id="3234567890",
+        meta_test_sender_verification_mode="inbound_replies_only",
+        meta_test_sender_waba_id="423456789012345",
+        meta_test_sender_phone_number_id="523456789012345",
+        meta_test_sender_display_phone_e164="+15550102030",
+        meta_system_user_access_token="t" * 40,
+        expose_local_otp=True,
+        seed_demo_data=True,
+    )
+
+
+def test_meta_verification_sender_is_reply_only_and_primary_remains_default() -> None:
+    settings = _verification_sender_settings()
+
+    primary = MetaWhatsAppClient.from_settings(settings)
+    assert primary.phone_number_id == "3234567890"
+    assert primary.supports_otp is True
+    primary_reply = MetaWhatsAppClient.for_inbound_reply(
+        settings,
+        waba_id="2234567890",
+        phone_number_id="3234567890",
+    )
+    assert primary_reply.phone_number_id == primary.phone_number_id
+    assert primary_reply.supports_otp is True
+
+    verification = MetaWhatsAppClient.for_inbound_reply(
+        settings,
+        waba_id="423456789012345",
+        phone_number_id="523456789012345",
+    )
+    assert verification.phone_number_id == "523456789012345"
+    assert verification.supports_otp is False
+    with pytest.raises(ValueError, match="approved AUTHENTICATION template"):
+        verification.send_otp("+15550123456", "123456")
+
+    disabled = _meta_test_settings()
+    with pytest.raises(ValueError, match="not configured"):
+        MetaWhatsAppClient.for_inbound_reply(
+            disabled,
+            waba_id="423456789012345",
+            phone_number_id="523456789012345",
+        )
 
 
 def test_long_whatsapp_reply_is_bounded_lossless_and_idempotent_across_retry(
@@ -318,15 +392,28 @@ def test_meta_otp_route_uses_live_adapter_without_local_fallback(
     from app.routes import auth
 
     provider = RecordingMessagingProvider()
-    settings = _meta_test_settings()
+    selected_phone_number_ids: list[str | None] = []
+
+    def provider_from_settings(
+        _settings: Settings,
+        *,
+        phone_number_id: str | None = None,
+    ) -> RecordingMessagingProvider:
+        selected_phone_number_ids.append(phone_number_id)
+        return provider
+
+    phone = "+2348666666666"
+    _ensure_active_user(phone)
+    settings = _verification_sender_settings()
     app.dependency_overrides[get_settings] = lambda: settings
-    monkeypatch.setattr(auth.MetaWhatsAppClient, "from_settings", lambda _settings: provider)
+    monkeypatch.setattr(auth.MetaWhatsAppClient, "from_settings", provider_from_settings)
     try:
-        response = client.post("/v1/auth/request-otp", json={"phone_e164": "+2348666666666"})
+        response = client.post("/v1/auth/request-otp", json={"phone_e164": phone})
     finally:
         app.dependency_overrides.pop(get_settings, None)
     assert response.status_code == 202
-    assert provider.otps == [("+2348666666666", response.json()["dev_code"])]
+    assert selected_phone_number_ids == [None]
+    assert provider.otps == [(phone, response.json()["dev_code"])]
 
 
 def test_meta_otp_route_returns_only_sanitized_provider_failure(
@@ -337,11 +424,13 @@ def test_meta_otp_route_returns_only_sanitized_provider_failure(
     provider = RecordingMessagingProvider(
         MetaProviderError("provider", retryable=False, http_status=400, provider_code="100")
     )
+    phone = "+2348777777777"
+    _ensure_active_user(phone)
     settings = _meta_test_settings()
     app.dependency_overrides[get_settings] = lambda: settings
     monkeypatch.setattr(auth.MetaWhatsAppClient, "from_settings", lambda _settings: provider)
     try:
-        response = client.post("/v1/auth/request-otp", json={"phone_e164": "+2348777777777"})
+        response = client.post("/v1/auth/request-otp", json={"phone_e164": phone})
     finally:
         app.dependency_overrides.pop(get_settings, None)
     assert response.status_code == 502
@@ -354,6 +443,7 @@ def test_meta_otp_failure_log_is_typed_and_contains_no_request_secrets(
     from app.routes import auth
 
     phone = "+2348787878787"
+    _ensure_active_user(phone)
     access_token = "meta-access-token-must-never-be-logged"
     raw_body_marker = "raw-meta-response-body-must-never-be-logged"
     caller_correlation = "123456-caller-token-must-never-be-logged"
@@ -493,9 +583,11 @@ def test_meta_webhook_routes_unknown_sender_through_live_adapter(
         {
             "entry": [
                 {
+                    "id": "2234567890",
                     "changes": [
                         {
                             "value": {
+                                "metadata": {"phone_number_id": "3234567890"},
                                 "messages": [
                                     {
                                         "id": "wamid.meta-route-unknown",
@@ -503,10 +595,10 @@ def test_meta_webhook_routes_unknown_sender_through_live_adapter(
                                         "type": "text",
                                         "text": {"body": "Hello"},
                                     }
-                                ]
+                                ],
                             }
                         }
-                    ]
+                    ],
                 }
             ]
         }
@@ -532,6 +624,140 @@ def test_meta_webhook_routes_unknown_sender_through_live_adapter(
     ]
 
 
+def test_meta_verification_webhook_replies_from_actual_allowed_test_sender(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services import whatsapp
+
+    provider = RecordingMessagingProvider()
+    selected_senders: list[tuple[str, str]] = []
+
+    def provider_for_inbound_reply(
+        _settings: Settings,
+        *,
+        waba_id: str,
+        phone_number_id: str,
+    ) -> RecordingMessagingProvider:
+        selected_senders.append((waba_id, phone_number_id))
+        return provider
+
+    body = json.dumps(
+        {
+            "entry": [
+                {
+                    "id": "423456789012345",
+                    "changes": [
+                        {
+                            "value": {
+                                "metadata": {"phone_number_id": "523456789012345"},
+                                "messages": [
+                                    {
+                                        "id": "wamid.meta-verification-sender",
+                                        "from": "15550123456",
+                                        "type": "text",
+                                        "text": {"body": "Verification hello"},
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                }
+            ]
+        }
+    ).encode()
+    signature = "sha256=" + hmac.new(b"s" * 32, body, hashlib.sha256).hexdigest()
+    app.dependency_overrides[get_settings] = _verification_sender_settings
+    monkeypatch.setattr(
+        whatsapp.MetaWhatsAppClient,
+        "for_inbound_reply",
+        provider_for_inbound_reply,
+    )
+    try:
+        response = client.post(
+            "/webhooks/whatsapp",
+            content=body,
+            headers={"x-hub-signature-256": signature},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "rejected_unknown_sender"}
+    assert selected_senders == [("423456789012345", "523456789012345")]
+    assert provider.texts == [
+        (
+            "+15550123456",
+            "This number is not approved for Bumpa Bestie. Ask your store owner to add it.",
+        )
+    ]
+    with SessionLocal() as db:
+        outbound = db.scalar(
+            select(WhatsappMessage).where(
+                WhatsappMessage.meta_message_id == "wamid.recorded-3456-1"
+            )
+        )
+        assert outbound is not None
+        assert outbound.payload["sender_waba_id"] == "423456789012345"
+        assert outbound.payload["sender_phone_number_id"] == "523456789012345"
+
+
+@pytest.mark.parametrize(
+    ("mode", "waba_id", "phone_number_id", "message_id"),
+    [
+        ("disabled", "423456789012345", "523456789012345", "disabled"),
+        (
+            "inbound_replies_only",
+            "000002355278341",
+            "523456789012345",
+            "wrong-waba",
+        ),
+        ("inbound_replies_only", "423456789012345", None, "missing-phone"),
+    ],
+)
+def test_meta_webhook_rejects_disabled_mismatched_or_missing_reply_sender(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    waba_id: str,
+    phone_number_id: str | None,
+    message_id: str,
+) -> None:
+    from app.services import whatsapp
+
+    settings = _meta_test_settings() if mode == "disabled" else _verification_sender_settings()
+    value: dict[str, Any] = {
+        "messages": [
+            {
+                "id": f"wamid.meta-rejected-{message_id}",
+                "from": "15550999999",
+                "type": "text",
+                "text": {"body": "Do not route"},
+            }
+        ]
+    }
+    if phone_number_id is not None:
+        value["metadata"] = {"phone_number_id": phone_number_id}
+    body = json.dumps({"entry": [{"id": waba_id, "changes": [{"value": value}]}]}).encode()
+    signature = "sha256=" + hmac.new(b"s" * 32, body, hashlib.sha256).hexdigest()
+
+    def unexpected_provider(*_args: object, **_kwargs: object) -> RecordingMessagingProvider:
+        raise AssertionError("unconfigured sender must not construct a provider")
+
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(whatsapp.MetaWhatsAppClient, "from_settings", unexpected_provider)
+    try:
+        response = client.post(
+            "/webhooks/whatsapp",
+            content=body,
+            headers={"x-hub-signature-256": signature},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "rejected_unconfigured_sender"}
+
+
 def test_meta_webhook_failure_is_sanitized_and_durable_event_can_retry(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -545,9 +771,11 @@ def test_meta_webhook_failure_is_sanitized_and_durable_event_can_retry(
         {
             "entry": [
                 {
+                    "id": "2234567890",
                     "changes": [
                         {
                             "value": {
+                                "metadata": {"phone_number_id": "3234567890"},
                                 "messages": [
                                     {
                                         "id": "wamid.meta-route-retry",
@@ -555,10 +783,10 @@ def test_meta_webhook_failure_is_sanitized_and_durable_event_can_retry(
                                         "type": "text",
                                         "text": {"body": "Retry me"},
                                     }
-                                ]
+                                ],
                             }
                         }
-                    ]
+                    ],
                 }
             ]
         }
@@ -601,9 +829,11 @@ def test_meta_webhook_does_not_blindly_retry_an_ambiguous_delivery(
         {
             "entry": [
                 {
+                    "id": "2234567890",
                     "changes": [
                         {
                             "value": {
+                                "metadata": {"phone_number_id": "3234567890"},
                                 "messages": [
                                     {
                                         "id": "wamid.meta-route-ambiguous",
@@ -611,10 +841,10 @@ def test_meta_webhook_does_not_blindly_retry_an_ambiguous_delivery(
                                         "type": "text",
                                         "text": {"body": "Do not duplicate"},
                                     }
-                                ]
+                                ],
                             }
                         }
-                    ]
+                    ],
                 }
             ]
         }
