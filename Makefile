@@ -49,7 +49,7 @@ e2e-linux: ## Run production-build browser checks in the pinned Linux Playwright
 	docker run --rm --init --platform linux/amd64 \
 		-v "$(CURDIR)/apps/web:/work" \
 		-v bumpabestie-playwright-node-modules:/work/node_modules \
-		-w /work mcr.microsoft.com/playwright:v1.61.1-noble \
+		-w /work mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48 \
 		bash -lc 'npm ci && npm run test:e2e'
 
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
