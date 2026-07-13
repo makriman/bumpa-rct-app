@@ -27,6 +27,7 @@ export default function WhatsAppPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [removing, setRemoving] = useState<WhatsAppNumber | null>(null);
   const add = async () => {
     setBusy(true);
     setError("");
@@ -50,6 +51,27 @@ export default function WhatsAppPage() {
         reason instanceof Error
           ? reason.message
           : "The phone identity could not be added.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    if (!removing || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await apiRequest(`/settings/whatsapp-numbers/${removing.id}`, {
+        method: "DELETE",
+      });
+      await numbers.reload();
+      setRemoving(null);
+      setToast("WhatsApp access removed for that team identity.");
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "The phone identity could not be removed.",
       );
     } finally {
       setBusy(false);
@@ -130,13 +152,26 @@ export default function WhatsAppPage() {
               <Badge>
                 {number.opt_out ? "Opted out" : titleCase(number.status)}
               </Badge>
-              <button
-                className="button button-ghost button-small"
-                disabled
-                title="The API does not expose a phone removal mutation."
-              >
-                Manage unavailable
-              </button>
+              {team.data?.find((member) => member.user_id === number.user_id)
+                ?.role === "owner" ? (
+                <button
+                  className="button button-ghost button-small"
+                  disabled
+                  title="Owner mappings are controlled by a platform administrator."
+                >
+                  Platform managed
+                </button>
+              ) : (
+                <button
+                  className="button button-ghost button-small"
+                  disabled={
+                    numbers.source !== "live" || team.status !== "ready" || busy
+                  }
+                  onClick={() => setRemoving(number)}
+                >
+                  Remove access
+                </button>
+              )}
             </section>
           ))}
         </div>
@@ -205,6 +240,36 @@ export default function WhatsAppPage() {
             The current endpoint creates an approved identity; it does not send
             a verification message. Delivery remains a separate integration.
           </div>
+        </Modal>
+      )}
+      {removing && (
+        <Modal
+          title="Remove WhatsApp access"
+          onClose={() => !busy && setRemoving(null)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => setRemoving(null)}
+              >
+                Keep access
+              </button>
+              <button
+                className="button button-danger"
+                disabled={busy}
+                onClick={() => void remove()}
+              >
+                {busy ? "Removing…" : "Remove access"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            <strong>{removing.label || "This team number"}</strong> will no
+            longer route WhatsApp messages into this workspace. The team member
+            account itself is unchanged.
+          </p>
         </Modal>
       )}
       {toast && <Toast message={toast} onClose={() => setToast("")} />}

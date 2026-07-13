@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { POST } from "@/app/api/backend/[...path]/route";
+import { GET, POST } from "@/app/api/backend/[...path]/route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -11,6 +11,57 @@ function context(...path: string[]) {
 }
 
 describe("same-origin backend proxy", () => {
+  it("keeps the OAuth callback and final redirect on the cookie-owning origin", async () => {
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, {
+        status: 303,
+        headers: {
+          location: "https://bumpabestie.example/settings/mcp?oauth=success",
+        },
+      }),
+    );
+    const request = new NextRequest(
+      "https://bumpabestie.example/api/backend/settings/mcp-oauth/callback?state=encrypted&code=one-time",
+      { headers: { cookie: "bb_session=signed" } },
+    );
+
+    const response = await GET(
+      request,
+      context("settings", "mcp-oauth", "callback"),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "https://bumpabestie.example/settings/mcp?oauth=success",
+    );
+    const [url, init] = upstream.mock.calls[0];
+    expect(String(url)).toBe(
+      "http://127.0.0.1:8000/v1/settings/mcp-oauth/callback?state=encrypted&code=one-time",
+    );
+    expect(new Headers(init?.headers).get("cookie")).toBe("bb_session=signed");
+  });
+
+  it("rejects a cross-origin redirect returned by the API", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, {
+        status: 303,
+        headers: { location: "https://attacker.example/steal" },
+      }),
+    );
+    const request = new NextRequest(
+      "https://bumpabestie.example/api/backend/settings/mcp-oauth/callback?state=encrypted&code=one-time",
+      { headers: { cookie: "bb_session=signed" } },
+    );
+
+    const response = await GET(
+      request,
+      context("settings", "mcp-oauth", "callback"),
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
   it("preserves the security and observability headers required by the API", async () => {
     const correlationId = "550e8400-e29b-41d4-a716-446655440000";
     const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -36,6 +87,7 @@ describe("same-origin backend proxy", () => {
           "x-forwarded-for": "203.0.113.9",
           "x-real-ip": "203.0.113.9",
           "idempotency-key": "sync-019f",
+          "if-match": "7",
           "x-tenant-id": "tenant-live",
           "x-access-reason": "Investigate approved study anomaly",
           authorization: "Bearer browser-controlled-token",
@@ -64,6 +116,7 @@ describe("same-origin backend proxy", () => {
     expect(headers.get("x-real-ip")).toBe("203.0.113.9");
     expect(headers.get("x-correlation-id")).toBe(correlationId);
     expect(headers.get("idempotency-key")).toBe("sync-019f");
+    expect(headers.get("if-match")).toBe("7");
     expect(headers.get("x-tenant-id")).toBe("tenant-live");
     expect(headers.get("x-access-reason")).toBe(
       "Investigate approved study anomaly",
@@ -111,6 +164,46 @@ describe("same-origin backend proxy", () => {
     expect(forwarded).not.toBe(untrustedCorrelation);
     expect(response.headers.get("x-correlation-id")).toBe(returnedCorrelation);
     expect(response.headers.get("x-correlation-id")).not.toBe(forwarded);
+  });
+
+  it("keeps the OTP bearer token inside the HttpOnly cookie boundary", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          access_token: "browser-readable-token-must-not-cross-bff",
+          token_type: "bearer",
+          user: { id: "user-1", name: "Owner" },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "set-cookie": "bb_session=signed; HttpOnly; Secure; SameSite=Lax",
+          },
+        },
+      ),
+    );
+
+    const response = await POST(
+      new NextRequest(
+        "https://bumpabestie.example/api/backend/auth/verify-otp",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            phone_e164: "+2348012345678",
+            code: "246810",
+          }),
+        },
+      ),
+      context("auth", "verify-otp"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toContain("HttpOnly");
+    await expect(response.json()).resolves.toEqual({
+      token_type: "bearer",
+      user: { id: "user-1", name: "Owner" },
+    });
   });
 
   it("rejects oversized bodies before contacting the API", async () => {

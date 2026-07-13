@@ -116,6 +116,8 @@ docker run --rm \
   --volume "$hermes_data:/opt/data:ro" \
   --entrypoint sh "$hermes_image" -eu -c '
     profile=/opt/data/profiles/tenant_contract
+    test "$(stat -c %a /opt/data/profiles)" = 700
+    test "$(stat -c %u:%g /opt/data/profiles)" = 10000:10000
     test "$(stat -c %a "$profile")" = 700
     test "$(stat -c %a "$profile/.env")" = 600
     test "$(stat -c %U "$profile")" = hermes
@@ -175,8 +177,25 @@ docker run --rm \
   --entrypoint sh "$backup_image" -eu -c '
     mkdir -p /staged/control-plane
     printf "%s" expected-hermes-staging > /staged/control-plane/expected.txt
-    chmod 0700 /staged /staged/control-plane
-    chmod 0600 /staged/control-plane/expected.txt
+    profile=/staged/profiles/tenant_dynamic
+    mkdir -p "$profile/skills" "$profile/memories" "$profile/sessions" "$profile/cron"
+    : > "$profile/.no-skills"
+    printf "%s\n" \
+      "API_SERVER_ENABLED=true" \
+      "API_SERVER_HOST=0.0.0.0" \
+      "API_SERVER_PORT=8800" \
+      "API_SERVER_KEY=dynamic-profile-key-000000000000000000000000" \
+      > "$profile/.env"
+    printf "%s\n" \
+      "model:" \
+      "  provider: anthropic" \
+      "security:" \
+      "  allow_private_urls: false" \
+      > "$profile/config.yaml"
+    printf "%s\n" "Dynamically activated isolated tenant profile." > "$profile/SOUL.md"
+    chown -R 100:10000 /staged
+    find /staged -type d -exec chmod 2750 {} +
+    find /staged -type f -exec chmod 0640 {} +
   '
 
 if docker run --rm "$hermes_image" sleep 0 >"$hermes_secret_dir/missing.out" 2>&1; then
@@ -216,7 +235,9 @@ docker run --detach \
   --security-opt no-new-privileges:true \
   --env ANTHROPIC_API_KEY_FILE=/run/secrets/hermes_anthropic_api_key \
   --env HERMES_DASHBOARD=0 \
+  --env HERMES_STAGING_ROOT=/staged/profiles \
   --volume "$hermes_secret_dir/anthropic:/run/secrets/hermes_anthropic_api_key:ro" \
+  --volume "$hermes_staging:/staged:ro" \
   --volume "$hermes_data:/opt/data" \
   "$hermes_image" sleep infinity >/dev/null
 for _attempt in {1..60}; do
@@ -232,10 +253,114 @@ for _attempt in {1..60}; do
 done
 docker exec "$hermes_runtime" sh -c \
   "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"
+if ! docker exec "$hermes_runtime" sh -eu -c '
+  /command/s6-svstat /run/service/bumpabestie-hermes-control | grep -q "^up"
+  curl --fail --silent --show-error --max-time 3 \
+    http://127.0.0.1:8699/health >/dev/null
+'; then
+  docker exec "$hermes_runtime" \
+    /command/s6-svstat /run/service/bumpabestie-hermes-control >&2 || true
+  docker logs "$hermes_runtime" >&2
+  exit 1
+fi
+control_pid="$(
+  docker exec "$hermes_runtime" sh -eu -c '
+    for command_path in /proc/[0-9]*/cmdline; do
+      process="${command_path%/cmdline}"
+      [ "$(cat "$process/comm")" = python3 ] || continue
+      command="$(tr "\000" " " < "$command_path")"
+      case "$command" in
+        *bumpabestie-hermes-control.py*)
+          printf "%s" "${process##*/}"
+          exit 0
+          ;;
+      esac
+    done
+    exit 1
+  '
+)"
+docker exec --user 10000:10000 "$hermes_runtime" sh -eu -c '
+  uid="$(awk "/^Uid:/ {print \$2}" "/proc/$1/status")"
+  gid="$(awk "/^Gid:/ {print \$2}" "/proc/$1/status")"
+  test "$uid:$gid" = 10000:10000
+  if tr "\000" "\n" < "/proc/$1/environ" | \
+    grep -Eq "^ANTHROPIC_API_KEY(_FILE)?="; then
+    echo "Hermes control process inherited the Anthropic credential" >&2
+    exit 1
+  fi
+' control-identity "$control_pid"
+docker exec "$hermes_runtime" /command/s6-setuidgid hermes sh -eu -c '
+  test -r /staged/profiles/tenant_dynamic/.env
+  test -w /opt/data/profiles
+  test "$(stat -c %u:%g /staged/profiles/tenant_dynamic/.env)" = 100:10000
+  test "$(stat -c %a /staged/profiles/tenant_dynamic/.env)" = 640
+'
+if ! docker exec "$hermes_runtime" sh -eu -c '
+  curl --fail --silent --show-error \
+    --header "Authorization: Bearer dynamic-profile-key-000000000000000000000000" \
+    --header "Content-Type: application/json" \
+    --data "{\"confirmation\":\"activate\"}" \
+    --max-time 30 \
+    http://127.0.0.1:8699/v1/profiles/tenant_dynamic/activate \
+    | grep -Fx "{\"status\":\"activated\"}" >/dev/null
+'; then
+  docker logs "$hermes_runtime" >&2
+  exit 1
+fi
+docker exec "$hermes_runtime" sh -eu -c '
+  test "$(stat -c %u:%g /opt/data/profiles/tenant_dynamic)" = 10000:10000
+  test "$(stat -c %a /opt/data/profiles/tenant_dynamic/.env)" = 600
+  /command/s6-svstat /run/service/gateway-tenant_dynamic | grep -q "^up"
+  curl --fail --silent --show-error \
+    --header "Authorization: Bearer dynamic-profile-key-000000000000000000000000" \
+    --max-time 3 \
+    http://127.0.0.1:8800/health/detailed >/dev/null
+'
 docker exec "$hermes_runtime" sh -eu -c '
   test -d /run/service/gateway-tenant_contract
   hermes -p tenant_contract gateway start >/dev/null
 '
+for _attempt in {1..60}; do
+  if docker exec "$hermes_runtime" sh -eu -c '
+    /command/s6-svstat /run/service/gateway-tenant_contract | grep -q "^up"
+    curl --fail --silent --show-error \
+      --header "Authorization: Bearer contract-profile-key-000000000000000000000000" \
+      --max-time 3 \
+      http://127.0.0.1:8799/health/detailed >/dev/null 2>&1
+  '; then
+    break
+  fi
+  sleep 1
+done
+docker exec "$hermes_runtime" sh -eu -c '
+  /command/s6-svstat /run/service/gateway-tenant_contract | grep -q "^up"
+  curl --fail --silent --show-error \
+    --header "Authorization: Bearer contract-profile-key-000000000000000000000000" \
+    --max-time 3 \
+    http://127.0.0.1:8799/health/detailed >/dev/null
+'
+test "$(
+  docker exec "$hermes_runtime" sh -eu -c '
+    curl --silent --output /dev/null --write-out "%{http_code}" \
+      --header "Authorization: Bearer wrong-profile-key-000000000000000000000000" \
+      --header "Content-Type: application/json" \
+      --data "{\"confirmation\":\"restart\"}" \
+      --max-time 3 \
+      http://127.0.0.1:8699/v1/profiles/tenant_contract/restart
+  '
+)" = 401
+if ! docker exec "$hermes_runtime" sh -eu -c '
+  curl --fail --silent --show-error \
+    --header "Authorization: Bearer contract-profile-key-000000000000000000000000" \
+    --header "Content-Type: application/json" \
+    --data "{\"confirmation\":\"restart\"}" \
+    --max-time 20 \
+    http://127.0.0.1:8699/v1/profiles/tenant_contract/restart \
+    | grep -Fx "{\"status\":\"restarted\"}" >/dev/null
+'; then
+  docker logs "$hermes_runtime" >&2
+  exit 1
+fi
 for _attempt in {1..60}; do
   if docker exec "$hermes_runtime" sh -eu -c '
     /command/s6-svstat /run/service/gateway-tenant_contract | grep -q "^up"

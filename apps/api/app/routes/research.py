@@ -1,7 +1,12 @@
+import hashlib
 import ipaddress
+import re
 import secrets
-from collections import Counter
-from datetime import UTC
+from collections import Counter, defaultdict
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
+from math import ceil
+from typing import cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -12,7 +17,15 @@ from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_researcher
 from app.core.rate_limit import enforce_operation_rate_limit
 from app.core.time import utcnow
-from app.db.models import AgentMessage, Artifact, ResearchEvent, ResearchReport, Tenant
+from app.db.models import (
+    AgentMessage,
+    Artifact,
+    BumpaConnection,
+    HermesProfile,
+    ResearchEvent,
+    ResearchReport,
+    Tenant,
+)
 from app.db.session import get_db
 from app.jobs.runtime import AsyncRuntimeConfig, enqueue_job
 from app.providers.local import LocalArtifactStore
@@ -26,6 +39,7 @@ from app.schemas import (
 )
 from app.services.audit import audit
 from app.services.reports import (
+    RAW_REPORT_TYPE,
     cleanup_expired_report_artifacts,
     delete_report,
     generate_report,
@@ -37,6 +51,124 @@ from app.services.reports import (
 )
 
 router = APIRouter(prefix="/research", tags=["research"])
+SENSITIVE_REASON_RE = re.compile(
+    r"(?i)(?:bearer\s+[a-z0-9._~+/=-]{8,}|sk-(?:ant-)?[a-z0-9_-]{8,}|"
+    r"(?:api[_ -]?key|access[_ -]?token|secret)\s*[:=]\s*\S+)"
+)
+
+
+def _permissioned_access_reason(
+    principal: Principal,
+    access_reason: str | None,
+    *,
+    resource: str,
+) -> str:
+    if not principal.has_platform_role("superadmin"):
+        raise HTTPException(status_code=403, detail=f"Superadmin {resource} access required")
+    reason = (access_reason or "").strip()
+    if len(reason) < 12 or redact_text(reason) != reason or SENSITIVE_REASON_RE.search(reason):
+        raise HTTPException(
+            status_code=422,
+            detail="Access reason must be specific and contain no PII or secrets",
+        )
+    return reason
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _distribution(values: Iterable[str | None], *, empty: str = "unclassified") -> dict[str, int]:
+    return dict(Counter(value or empty for value in values).most_common())
+
+
+def _percentile(values: list[int], percentile: int) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, ceil((percentile / 100) * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _top_labels(counts: Counter[str], *, limit: int = 8) -> list[dict[str, str | int]]:
+    return [
+        {"label": label, "count": count}
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _safe_question(value: str | None) -> str | None:
+    if not value:
+        return None
+    safe = " ".join(redact_text(value).split())
+    if not safe:
+        return None
+    return f"{safe[:157]}..." if len(safe) > 160 else safe
+
+
+def _top_questions(
+    events: Iterable[ResearchEvent],
+    *,
+    matches: Callable[[ResearchEvent], bool],
+    limit: int = 5,
+) -> list[dict[str, str | int]]:
+    labels: dict[str, str] = {}
+    counts: Counter[str] = Counter()
+    for event in events:
+        if not matches(event):
+            continue
+        question = _safe_question(event.redacted_text)
+        if not question:
+            continue
+        key = question.casefold()
+        labels.setdefault(key, question)
+        counts[key] += 1
+    return [
+        {"label": labels[key], "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], labels[item[0]]))[
+            :limit
+        ]
+    ]
+
+
+def _retention_cohorts(
+    tenant_activity: dict[str, list[datetime]], *, now: datetime
+) -> list[dict[str, object]]:
+    cohorts: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+    for timestamps in tenant_activity.values():
+        ordered = sorted(_as_utc(item) for item in timestamps)
+        first, last = ordered[0], ordered[-1]
+        cohorts[first.strftime("%Y-%m")].append((first, last))
+
+    rows: list[dict[str, object]] = []
+    for cohort, activity in sorted(cohorts.items()):
+        eligible_7d = sum(now >= first + timedelta(days=7) for first, _last in activity)
+        retained_7d = sum(
+            now >= first + timedelta(days=7) and last >= first + timedelta(days=7)
+            for first, last in activity
+        )
+        eligible_30d = sum(now >= first + timedelta(days=30) for first, _last in activity)
+        retained_30d = sum(
+            now >= first + timedelta(days=30) and last >= first + timedelta(days=30)
+            for first, last in activity
+        )
+        rows.append(
+            {
+                "cohort": cohort,
+                "smes": len(activity),
+                "eligible_7d": eligible_7d,
+                "retained_7d": retained_7d,
+                "retention_7d_pct": (
+                    round((retained_7d / eligible_7d) * 100, 1) if eligible_7d else None
+                ),
+                "eligible_30d": eligible_30d,
+                "retained_30d": retained_30d,
+                "retention_30d_pct": (
+                    round((retained_30d / eligible_30d) * 100, 1) if eligible_30d else None
+                ),
+            }
+        )
+    return rows[-12:]
 
 
 def _research_event_view(event: ResearchEvent, settings: Settings) -> ResearchConversationEventView:
@@ -51,6 +183,7 @@ def _research_event_view(event: ResearchEvent, settings: Settings) -> ResearchCo
         ),
         channel=event.channel,
         event_type=event.event_type,
+        raw_text_present=event.raw_text_present,
         # Re-redact at read time so legacy rows cannot bypass current rules.
         redacted_text=redact_text(event.redacted_text) if event.redacted_text else None,
         primary_intent=event.primary_intent,
@@ -92,29 +225,211 @@ def _conversation_view(
 
 @router.get("/overview")
 def overview(
-    _principal: Principal = Depends(require_researcher), db: Session = Depends(get_db)
-) -> dict:
+    _principal: Principal = Depends(require_researcher),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    now = utcnow()
     tenant_count = db.scalar(select(func.count()).select_from(Tenant)) or 0
     consent_rows = db.execute(
         select(Tenant.research_consent_status, func.count())
         .group_by(Tenant.research_consent_status)
         .order_by(Tenant.research_consent_status)
     ).all()
-    consented_events = (
-        select(ResearchEvent)
-        .join(Tenant, ResearchEvent.tenant_id == Tenant.id)
-        .where(Tenant.research_consent_status == "granted")
+    consented_events = list(
+        db.scalars(
+            select(ResearchEvent)
+            .join(Tenant, ResearchEvent.tenant_id == Tenant.id)
+            .where(Tenant.research_consent_status == "granted")
+            .order_by(ResearchEvent.created_at)
+        ).all()
     )
-    events = db.scalars(consented_events).all()
+    question_events = [
+        event for event in consented_events if event.event_type == "user_message_received"
+    ]
+
+    tenant_activity: dict[str, list[datetime]] = defaultdict(list)
+    channel_users: dict[str, set[str]] = defaultdict(set)
+    for event in question_events:
+        if event.tenant_id:
+            tenant_activity[event.tenant_id].append(_as_utc(event.created_at))
+        if event.user_id:
+            channel_users[event.channel].add(event.user_id)
+
+    active_smes = {
+        "day": sum(
+            any(timestamp >= now - timedelta(days=1) for timestamp in timestamps)
+            for timestamps in tenant_activity.values()
+        ),
+        "week": sum(
+            any(timestamp >= now - timedelta(days=7) for timestamp in timestamps)
+            for timestamps in tenant_activity.values()
+        ),
+        "month": sum(
+            any(timestamp >= now - timedelta(days=30) for timestamp in timestamps)
+            for timestamps in tenant_activity.values()
+        ),
+    }
+
+    conversation_ids = sorted(
+        {event.conversation_id for event in question_events if event.conversation_id}
+    )
+    latency_values: list[int] = []
+    if conversation_ids:
+        latency_values = [
+            value
+            for value in db.scalars(
+                select(AgentMessage.latency_ms)
+                .join(HermesProfile, AgentMessage.hermes_profile_id == HermesProfile.id)
+                .where(
+                    AgentMessage.conversation_id.in_(conversation_ids),
+                    AgentMessage.direction == "outbound",
+                    AgentMessage.latency_ms.is_not(None),
+                    HermesProfile.provider == "hermes",
+                )
+            ).all()
+            if value is not None
+        ]
+
+    connections = list(
+        db.scalars(
+            select(BumpaConnection)
+            .join(Tenant, BumpaConnection.tenant_id == Tenant.id)
+            .where(Tenant.research_consent_status == "granted")
+        ).all()
+    )
+    sync_times = [
+        _as_utc(connection.last_successful_sync_at)
+        for connection in connections
+        if connection.last_successful_sync_at
+    ]
+    fresh_24h = sum(timestamp >= now - timedelta(hours=24) for timestamp in sync_times)
+    stale_24_to_72h = sum(
+        now - timedelta(hours=72) <= timestamp < now - timedelta(hours=24)
+        for timestamp in sync_times
+    )
+    overdue_72h = sum(timestamp < now - timedelta(hours=72) for timestamp in sync_times)
+
+    reports = list(db.scalars(select(ResearchReport)).all())
+    artifacts = list(db.scalars(select(Artifact)).all())
+
+    repeat_rows: list[dict[str, object]] = []
+    repeat_smes = 0
+    for tenant_id, timestamps in tenant_activity.items():
+        ordered = sorted(timestamps)
+        active_days = len({timestamp.date() for timestamp in ordered})
+        if active_days >= 2:
+            repeat_smes += 1
+        repeat_rows.append(
+            {
+                "tenant_pseudonym": pseudonymize(
+                    tenant_id,
+                    settings.field_encryption_key,
+                    namespace="tenant",
+                ),
+                "event_count": len(ordered),
+                "active_days": active_days,
+                "first_seen_at": ordered[0].isoformat(),
+                "last_seen_at": ordered[-1].isoformat(),
+            }
+        )
+    repeat_rows.sort(
+        key=lambda row: (
+            -cast(int, row["active_days"]),
+            -cast(int, row["event_count"]),
+            str(row["tenant_pseudonym"]),
+        )
+    )
+
+    questions_by_category = _distribution(event.primary_intent for event in question_events)
+    recurring_problems = Counter(
+        event.primary_intent or "unclassified" for event in question_events
+    )
+
     return {
+        "generated_at": now.isoformat(),
         "smes_onboarded": tenant_count,
         "research_consent_status": {status: count for status, count in consent_rows},
-        "research_events": len(events),
-        "messages_by_channel": dict(Counter(item.channel for item in events)),
-        "questions_by_intent": dict(
-            Counter(item.primary_intent or "unclassified" for item in events)
+        "research_events": len(consented_events),
+        "active_smes": active_smes,
+        "active_users_by_channel": {
+            channel: len(users) for channel, users in sorted(channel_users.items())
+        },
+        "messages_by_channel": _distribution(event.channel for event in question_events),
+        "questions_by_category": questions_by_category,
+        # Preserve the original response field for existing API consumers.
+        "questions_by_intent": questions_by_category,
+        "questions_by_business_function": _distribution(
+            event.business_function for event in question_events
         ),
-        "bumpa_data_usage": dict(Counter(item.bumpa_data_used or "none" for item in events)),
+        "questions_by_complexity": _distribution(event.complexity for event in question_events),
+        "questions_by_ai_help_type": _distribution(event.ai_help_type for event in question_events),
+        "bumpa_data_usage": _distribution(
+            (event.bumpa_data_used for event in question_events),
+            empty="none",
+        ),
+        "hermes_response_latency": {
+            "samples": len(latency_values),
+            "average_ms": (
+                round(sum(latency_values) / len(latency_values)) if latency_values else None
+            ),
+            "p50_ms": _percentile(latency_values, 50),
+            "p95_ms": _percentile(latency_values, 95),
+        },
+        "bumpa_sync_freshness": {
+            "connected_smes": len(connections),
+            "fresh_24h": fresh_24h,
+            "stale_24_to_72h": stale_24_to_72h,
+            "overdue_72h": overdue_72h,
+            "never_synced": len(connections) - len(sync_times),
+            "latest_sync_at": max(sync_times).isoformat() if sync_times else None,
+            "oldest_sync_at": min(sync_times).isoformat() if sync_times else None,
+        },
+        "report_generation": {
+            "total": len(reports),
+            "by_status": _distribution(report.status for report in reports),
+            "by_type": _distribution(report.report_type for report in reports),
+        },
+        "exports": {
+            "total": len(artifacts),
+            "by_format": _distribution(artifact.format for artifact in artifacts),
+        },
+        "retention_by_cohort": _retention_cohorts(tenant_activity, now=now),
+        "repeat_usage": {
+            "smes_observed": len(tenant_activity),
+            "repeat_smes": repeat_smes,
+            "repeat_rate_pct": (
+                round((repeat_smes / len(tenant_activity)) * 100, 1) if tenant_activity else None
+            ),
+            "by_sme": repeat_rows[:10],
+        },
+        "top_recurring_problems": _top_labels(recurring_problems),
+        "most_common_sales_questions": _top_questions(
+            question_events,
+            matches=lambda event: (
+                event.primary_intent == "sales_analysis" or event.business_function == "sales"
+            ),
+        ),
+        "most_common_inventory_questions": _top_questions(
+            question_events,
+            matches=lambda event: (
+                event.primary_intent == "inventory_management" or event.business_function == "stock"
+            ),
+        ),
+        "most_common_customer_questions": _top_questions(
+            question_events,
+            matches=lambda event: (
+                event.primary_intent == "customer_management"
+                or event.business_function == "customers"
+            ),
+        ),
+        "most_common_advice_requests": _top_questions(
+            question_events,
+            matches=lambda event: (
+                event.primary_intent == "general_business_advice"
+                or event.ai_help_type in {"recommendation", "forecast", "draft_message", "teaching"}
+            ),
+        ),
     }
 
 
@@ -126,6 +441,7 @@ def events(
     tenant_id: str | None = None,
     channel: str | None = None,
     primary_intent: str | None = None,
+    event_type: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
     statement = (
@@ -141,6 +457,8 @@ def events(
         statement = statement.where(ResearchEvent.channel == channel)
     if primary_intent:
         statement = statement.where(ResearchEvent.primary_intent == primary_intent)
+    if event_type:
+        statement = statement.where(ResearchEvent.event_type == event_type)
     rows = db.scalars(statement).all()
     return [
         {
@@ -153,6 +471,7 @@ def events(
             ),
             "channel": row.channel,
             "event_type": row.event_type,
+            "raw_text_present": row.raw_text_present,
             "redacted_text": redact_text(row.redacted_text) if row.redacted_text else None,
             "primary_intent": row.primary_intent,
             "business_function": row.business_function,
@@ -285,7 +604,13 @@ def questions(
     settings: Settings = Depends(get_settings),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict]:
-    return events(principal, db, settings, limit=limit)
+    return events(
+        principal,
+        db,
+        settings,
+        event_type="user_message_received",
+        limit=limit,
+    )
 
 
 @router.get("/taxonomy")
@@ -354,13 +679,11 @@ def raw_event(
     a recorded reason.
     """
 
-    if not principal.has_platform_role("superadmin"):
-        raise HTTPException(status_code=403, detail="Superadmin raw access required")
-    reason = access_reason.strip()
-    if len(reason) < 12 or redact_text(reason) != reason:
-        raise HTTPException(
-            status_code=422, detail="Access reason must be specific and contain no PII"
-        )
+    reason = _permissioned_access_reason(
+        principal,
+        access_reason,
+        resource="raw event",
+    )
     event = db.get(ResearchEvent, event_id)
     if not event or not event.tenant_id:
         raise HTTPException(status_code=404, detail="Research event not found")
@@ -400,9 +723,47 @@ def raw_event(
 @router.post("/reports", response_model=ReportView, status_code=201)
 def create_report(
     payload: ReportCreate,
+    access_reason: str | None = Header(
+        default=None,
+        alias="X-Access-Reason",
+        max_length=240,
+    ),
     principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
+) -> ResearchReport:
+    return _create_artifact(
+        payload,
+        principal,
+        db,
+        settings,
+        artifact_kind="report",
+        access_reason=access_reason,
+    )
+
+
+def _raw_export_reason(
+    report_type: str,
+    principal: Principal,
+    access_reason: str | None,
+) -> str | None:
+    if report_type != RAW_REPORT_TYPE:
+        return None
+    return _permissioned_access_reason(
+        principal,
+        access_reason,
+        resource="raw export",
+    )
+
+
+def _create_artifact(
+    payload: ReportCreate,
+    principal: Principal,
+    db: Session,
+    settings: Settings,
+    *,
+    artifact_kind: str,
+    access_reason: str | None,
 ) -> ResearchReport:
     enforce_operation_rate_limit(
         settings,
@@ -417,8 +778,23 @@ def create_report(
         filters = validated_filters(payload.filters)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if payload.report_type in {"weekly_memo", "monthly_memo"} and not {
+        "date_from",
+        "date_to",
+    }.intersection(filters):
+        today = utcnow().date()
+        window_days = 6 if payload.report_type == "weekly_memo" else 29
+        filters = {
+            **filters,
+            "date_from": (today - timedelta(days=window_days)).isoformat(),
+            "date_to": today.isoformat(),
+        }
+    if payload.report_type == RAW_REPORT_TYPE and artifact_kind != "export":
+        raise HTTPException(status_code=422, detail="Raw packages must use the export endpoint")
+    sensitive_reason = _raw_export_reason(payload.report_type, principal, access_reason)
     report = ResearchReport(
         report_type=payload.report_type,
+        artifact_kind=artifact_kind,
         generated_by=principal.user.id,
         filters=filters,
         title=payload.report_type.replace("_", " ").title(),
@@ -436,13 +812,27 @@ def create_report(
             idempotency_key=f"research-report:{report.id}",
             max_attempts=3,
         )
+    audit_filters = dict(filters)
+    if tenant_id := audit_filters.pop("tenant_id", None):
+        audit_filters["tenant_pseudonym"] = pseudonymize(
+            tenant_id,
+            settings.field_encryption_key,
+            namespace="tenant",
+        )
     audit(
         db,
         actor_user_id=principal.user.id,
         action="research.report.requested",
         resource_type="research_report",
         resource_id=report.id,
-        after={"formats": sorted(set(payload.formats)), "filters": filters, "queued": queued},
+        after={
+            "formats": sorted(set(payload.formats)),
+            "filters": audit_filters,
+            "queued": queued,
+            "artifact_kind": artifact_kind,
+            "sensitive": sensitive_reason is not None,
+            **({"reason": sensitive_reason} if sensitive_reason else {}),
+        },
     )
     db.commit()
     if queued:
@@ -462,11 +852,14 @@ def reports(
     principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
+    artifact_kind: str | None = Query(default=None, pattern="^(report|export)$"),
 ) -> list[ResearchReport]:
     cleanup_expired_report_artifacts(db, settings.artifact_root)
     statement = select(ResearchReport).order_by(ResearchReport.created_at.desc())
     if not principal.has_platform_role("superadmin"):
         statement = statement.where(ResearchReport.generated_by == principal.user.id)
+    if artifact_kind:
+        statement = statement.where(ResearchReport.artifact_kind == artifact_kind)
     return [row for row in db.scalars(statement).all() if not report_is_expired(row)]
 
 
@@ -487,6 +880,8 @@ def report(
     artifacts = db.scalars(select(Artifact).where(Artifact.report_id == row.id)).all()
     return {
         "id": row.id,
+        "report_type": row.report_type,
+        "artifact_kind": row.artifact_kind,
         "status": row.status,
         "title": row.title,
         "summary": row.summary,
@@ -507,6 +902,11 @@ def report(
 def download_report(
     report_id: str,
     format: str,
+    access_reason: str | None = Header(
+        default=None,
+        alias="X-Access-Reason",
+        max_length=240,
+    ),
     principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -515,6 +915,11 @@ def download_report(
     if not report_row:
         raise HTTPException(status_code=404, detail="Report not found")
     _authorize_report(report_row, principal)
+    sensitive_reason = _raw_export_reason(
+        report_row.report_type,
+        principal,
+        access_reason,
+    )
     if report_is_expired(report_row) or report_consent_revoked(db, report_row):
         deleted = purge_report_artifacts(db, settings.artifact_root, report_row)
         audit(
@@ -532,21 +937,47 @@ def download_report(
     )
     if not artifact:
         raise HTTPException(status_code=404, detail="Artifact not found")
-    content = LocalArtifactStore(settings.artifact_root).get(artifact.storage_key)
+    store = LocalArtifactStore(settings.artifact_root)
+    try:
+        content = store.get(artifact.storage_key)
+    except (OSError, ValueError):
+        content = b""
+    checksum = hashlib.sha256(content).hexdigest()
+    if len(content) != artifact.byte_size or not secrets.compare_digest(
+        checksum, artifact.checksum_sha256
+    ):
+        deleted = purge_report_artifacts(db, settings.artifact_root, report_row)
+        audit(
+            db,
+            actor_user_id=principal.user.id,
+            action="research.report.integrity_failed",
+            resource_type="research_report",
+            resource_id=report_row.id,
+            after={"artifact_count": deleted, "format": format},
+        )
+        db.commit()
+        raise HTTPException(status_code=410, detail="Report artifact failed integrity validation")
     audit(
         db,
         actor_user_id=principal.user.id,
         action="research.report.downloaded",
         resource_type="research_report",
         resource_id=report_row.id,
-        after={"format": format},
+        after={
+            "format": format,
+            "sensitive": sensitive_reason is not None,
+            **({"reason": sensitive_reason} if sensitive_reason else {}),
+        },
     )
     db.commit()
     return Response(
         content=content,
         media_type=artifact.content_type,
         headers={
-            "Content-Disposition": f'attachment; filename="research-report-{report_id}.{format}"'
+            "Content-Disposition": f'attachment; filename="research-report-{report_id}.{format}"',
+            "Cache-Control": "no-store, max-age=0",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
         },
     )
 
@@ -554,11 +985,23 @@ def download_report(
 @router.post("/exports", response_model=ReportView)
 def create_export(
     payload: ReportCreate,
+    access_reason: str | None = Header(
+        default=None,
+        alias="X-Access-Reason",
+        max_length=240,
+    ),
     principal: Principal = Depends(require_researcher),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ResearchReport:
-    return create_report(payload, principal, db, settings)
+    return _create_artifact(
+        payload,
+        principal,
+        db,
+        settings,
+        artifact_kind="export",
+        access_reason=access_reason,
+    )
 
 
 @router.delete("/reports/{report_id}", status_code=204)

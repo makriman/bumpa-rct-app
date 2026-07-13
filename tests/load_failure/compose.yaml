@@ -1,12 +1,35 @@
 x-load-failure-environment: &load-failure-environment
   APP_ENV: staging
+  LOAD_FAILURE_FIXTURE_MODE: "true"
   SEED_DEMO_DATA: "false"
   WHATSAPP_BACKEND: mock
   BUMPA_BACKEND: mock
   AGENT_BACKEND: mock
   META_APP_SECRET: load-failure-fixture-app-secret
-  META_APP_SECRET_FILE:
+  META_APP_SECRET_FILE: !reset null
+  META_SYSTEM_USER_ACCESS_TOKEN:
+  META_SYSTEM_USER_ACCESS_TOKEN_FILE: !reset null
+  META_WEBHOOK_VERIFY_TOKEN:
+  META_WEBHOOK_VERIFY_TOKEN_FILE: !reset null
+  META_TEST_SENDER_VERIFICATION_MODE: disabled
+  META_TEST_SENDER_WABA_ID: "12345"
+  META_TEST_SENDER_PHONE_NUMBER_ID: "12345"
+  META_TEST_SENDER_DISPLAY_PHONE_E164: "+15555550123"
+  GOOGLE_OAUTH_CLIENT_ID:
+  GOOGLE_OAUTH_CLIENT_SECRET:
+  GOOGLE_OAUTH_CLIENT_SECRET_FILE: !reset null
+  META_ADS_OAUTH_CLIENT_ID:
+  META_ADS_OAUTH_CLIENT_SECRET:
+  META_ADS_OAUTH_CLIENT_SECRET_FILE: !reset null
+  OPS_ALERTS_ENABLED: "false"
+  OPS_ALERT_WEBHOOK_URL:
+  OPS_ALERT_HMAC_SECRET_FILE: !reset null
   MOCK_PROVIDER_LATENCY_MS: "0"
+  OPERATION_RATE_LIMIT_ENABLED: "true"
+  CHAT_RATE_LIMIT: "4"
+  CHAT_RATE_LIMIT_WINDOW_SECONDS: "60"
+  BUMPA_SYNC_RATE_LIMIT: "2"
+  BUMPA_SYNC_RATE_LIMIT_WINDOW_SECONDS: "60"
   ASYNC_HEARTBEAT_TTL_SECONDS: "15"
   ASYNC_POP_TIMEOUT_SECONDS: "1"
   ASYNC_SCHEDULER_INTERVAL_SECONDS: "0.2"
@@ -21,6 +44,8 @@ services:
     environment: *load-failure-environment
     ports:
       - "127.0.0.1:${LOAD_FAILURE_PORT:-18080}:8000"
+    volumes:
+      - ./tests/load_failure/seed_pressure.py:/opt/bumpabestie-fixtures/seed-pressure.py:ro
 
   worker:
     environment: *load-failure-environment

@@ -8,7 +8,7 @@ from app.core.rate_limit import enforce_operation_rate_limit
 from app.db.models import AgentMessage, Conversation
 from app.db.session import get_db
 from app.schemas import ChatRequest, ChatResponse
-from app.services.chat import handle_chat
+from app.services.chat import data_freshness_at_message, handle_chat
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -50,6 +50,11 @@ def web_chat(
                     inbound_message_id=existing.id,
                     outbound_message_id=outbound.id,
                     answer=outbound.content,
+                    data_freshness=data_freshness_at_message(
+                        db,
+                        tenant_id=principal.tenant.id,
+                        message_created_at=existing.created_at,
+                    ),
                 )
     enforce_operation_rate_limit(
         settings,

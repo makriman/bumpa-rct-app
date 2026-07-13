@@ -9,11 +9,11 @@ the source of truth with Redis wake-ups and heartbeats. Production always requir
 `ASYNC_RUNTIME_ENABLED=true`; provider selectors may be disabled for containment or
 set to `meta`, `bumpa` and `hermes` only after their activation gates pass.
 
-As of 2026-07-12, release
-`41935d67696fee45b184a65c0a9bf39e0708ae89` is live on five temporary sslip.io
-hosts with valid TLS. [PR 19](https://github.com/makriman/bumpa-rct-app/pull/19),
-[main CI 29205303835](https://github.com/makriman/bumpa-rct-app/actions/runs/29205303835)
-and [publish run 29205487124](https://github.com/makriman/bumpa-rct-app/actions/runs/29205487124)
+As of 2026-07-13, release
+`8f290509668de15eaf3621e3213f4276f85a0a83` is live on the five branded
+`bumpabestie.com` hosts with valid TLS. [PR 26](https://github.com/makriman/bumpa-rct-app/pull/26),
+[main CI 29246406311](https://github.com/makriman/bumpa-rct-app/actions/runs/29246406311)
+and [publish run 29247014725](https://github.com/makriman/bumpa-rct-app/actions/runs/29247014725)
 are its exact-revision release gates. Deployed image index references are recorded
 in `docs/verification.md`.
 
@@ -21,26 +21,24 @@ Production verification found all eight services healthy with zero restarts or O
 kills. Readiness requires PostgreSQL, Redis and fresh worker/scheduler heartbeats
 and reports provider selectors `meta`, `bumpa` and `hermes`. Meta's callback
 challenge and signed-ingress processing are live, but business verification and
-approved production templates still block OTP/outbound traffic. Backup
-`20260712T195838Z` passed its format-3 manifest, five checksums and archive/dump
-parsing; the nightly timer is enabled. Provider selectors and valid credentials do
-not by themselves authorize real tenant traffic.
+approved production templates still block OTP/outbound traffic. Recovery-point
+backup `20260713T121212Z` passed its format-3 manifest, five checksums and all
+archive/dump parsers at schema `0008_bumpa_dataset_failures`; the nightly timer is
+enabled. Provider selectors and valid credentials do not by themselves authorize
+real tenant traffic.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
 
 ## External prerequisites
 
-The following are outside the repository and are still required:
+The current baseline already has DigitalOcean access, an authorized non-root SSH
+deploy key and branded DNS/TLS. A fresh host or future promotion still requires:
 
-1. DigitalOcean console access and an authorized SSH public key for a non-root
-   deploy user. Never share or commit the private key.
-2. DNS-provider access to create A records for the apex, `www`, `api`, `admin` and
-   `research` hosts.
-3. Published immutable API/web/Caddy/PostgreSQL/backup/Hermes images and either public
+1. Published immutable API/web/Caddy/PostgreSQL/backup/Hermes images and either public
    GHCR packages or a least-privilege host credential with `read:packages` only.
-4. An encrypted off-host backup target and its host-only credential.
-5. An alert destination and an identified operator for deployment and restore.
+2. An encrypted off-host backup target and its host-only credential.
+3. An alert destination and an identified operator for deployment and restore.
 
 Meta and Anthropic credentials are host secret files under `SECRETS_DIR`; Bumpa keys
 are encrypted per tenant in Postgres. Claude is called through Hermes for the
@@ -140,6 +138,18 @@ environment. `hermes_anthropic_api_key` is a `0600` file in the `0700` secrets
 directory. Per-tenant Bumpa keys do not belong in this file; the onboarding/admin
 workflow stores them encrypted in Postgres.
 
+Hermes lifecycle operations use an internal-only control listener on
+`HERMES_CONTROL_PORT` (default `8699`). The port must sit outside the per-profile
+gateway range and is never published by Compose. For initial activation, the API
+stages one private allowlisted profile bundle, then authenticates with that
+profile's encrypted gateway key. The unprivileged control service reads the
+staging volume read-only, rejects unexpected entries, symlinks, special files and
+mismatched existing runtime profiles, atomically installs only the required policy
+files, runs the fixed `hermes -p <profile> gateway start` command and waits for the
+authenticated profile readiness endpoint. Recovery accepts only the corresponding
+fixed gateway restart command. The listener accepts no caller-supplied path or
+command and has no Docker socket, host mount, root identity or host privileges.
+
 Validate without printing values:
 
 ```bash
@@ -218,6 +228,11 @@ only on operator request as root with a separate narrow capability set, includin
    restoration leaves a persistent maintenance interlock; backups and later
    promotions then fail closed until an operator reconciles the journal.
 
+   Every target, rollback, and pre-boundary recovery gate first exercises the
+   local Caddy origin at `127.0.0.1` for up to 180 seconds using each production
+   hostname, normal CA/SAN verification, and no proxy. A second 60-second gate
+   then exercises public edge DNS with any origin override explicitly cleared.
+
    For the one-time upgrade from a release that predates the coordinator, install
    the reviewed launcher directly from the fetched target commit without checking
    out that commit. This is the only root step; the launcher remains root-owned and
@@ -238,6 +253,7 @@ only on operator request as root with a separate narrow capability set, includin
      '<api-digest-ref>' '<web-digest-ref>' '<caddy-digest-ref>' \
      '<postgres-digest-ref>' '<backup-digest-ref>' '<hermes-digest-ref>'
    ```
+
 4. Confirm `.env.production` validates and its mode is `0600`.
 5. Confirm webhook routing and provider selectors match the intended activation state.
 6. The deploy script verifies image revision labels, checks the PostgreSQL major,
@@ -306,14 +322,22 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-Backup `20260712T195838Z` was verified against release
-`41935d67696fee45b184a65c0a9bf39e0708ae89`, schema
-`0004_provider_delivery`, PostgreSQL 16.14 and the exact backup image reference.
-All five checksums and every archive/dump parser check passed. The timer is enabled.
-This proves only the local stage; off-host copy and remote restore evidence remain
-open.
+Recovery-point backup `20260713T121212Z` was created immediately before the current
+promotion. Its manifest records application revision
+`f400cfe67628da787f7ee2a3a3f42c78cb6fae3f`, schema
+`0008_bumpa_dataset_failures`, PostgreSQL 16.14 and backup image
+`ghcr.io/makriman/bumpabestie-backup@sha256:7608a1557d31d4d6f985807f05ed50a6001dc33a7c9c704938fc7fab0221cc58`.
+All five checksums and every archive/dump parser check passed before release
+`8f290509668de15eaf3621e3213f4276f85a0a83` was started. The timer is enabled.
+This proves the local recovery point only; off-host copy and remote restore evidence
+remain open.
 
 ## Five-store production onboarding
+
+The 2026-07-13 production database audit verifies all five
+owner/tenant/phone/Bumpa mappings and the intended dual global-admin/demo
+membership. The workflow below remains the fail-closed method for re-auditing or
+reconciling those mappings; do not create duplicates merely to rerun a canary.
 
 Use `scripts/production_onboard.py` from a trusted operator workstation. The
 credential file must be a regular `0600` file and credentials are streamed to the
@@ -394,6 +418,77 @@ responses. The downgrade refuses while status-less evidence exists instead of
 inventing an HTTP status. A hybrid rollback therefore retains the target
 operations checkout and schema 0008 while the prior application image continues
 writing its older HTTP-only raw-response shape.
+
+## Optional MCP OAuth clients
+
+Google and Meta Ads connections remain disabled until their provider OAuth clients
+are approved. When activating one, keep its client secret out of `.env.production`:
+write it to a private absolute host file with mode `0400` or `0600`, then set the
+public client ID and corresponding host path. The one-shot secret initializer copies
+it into the API/worker/scheduler runtime volume as a `0400` file.
+
+```bash
+MCP_GOOGLE_OAUTH_ENABLED=true
+GOOGLE_OAUTH_CLIENT_ID=approved-google-client-id
+GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST=/var/lib/bumpabestie/google_oauth_client_secret
+
+MCP_META_ADS_OAUTH_ENABLED=true
+META_ADS_OAUTH_CLIENT_ID=123456789012345
+META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST=/var/lib/bumpabestie/meta_ads_oauth_client_secret
+```
+
+Leave the inline `*_CLIENT_SECRET` values blank. Production validation rejects an
+enabled connector whose host file is missing, symlinked, broadly readable, or still
+mapped to `/dev/null`. Register the following exact redirect URI with each enabled
+OAuth provider, replacing the hostname with `PUBLIC_ORIGIN`:
+
+```text
+https://bumpabestie.example.com/api/backend/settings/mcp-oauth/callback
+```
+
+The callback intentionally returns through the same-origin web proxy. Keep
+`SESSION_COOKIE_DOMAIN` blank: the host-only HttpOnly session cookie is sufficient
+and does not need to be exposed to the API, admin, or research subdomains.
+
+## Proactive SME insights and external alerts
+
+Both capabilities are disabled by default. Keep proactive insights disabled until
+Meta approves `bb_daily_insight` and `bb_weekly_insight`; each template has one body
+text variable for the bounded aggregate summary. The scheduler evaluates active,
+research-consented tenants in their IANA timezone. At execution, the worker again
+checks consent, active owner membership, approved identity, STOP opt-out and typed
+Bumpa freshness. Calendar-slot and message fences prevent duplicate sends.
+
+For external alerts, create a 32+ character HMAC secret in an absolute private host
+file readable by the sandboxed `bumpabestie` systemd services (recommended
+`/var/lib/bumpabestie/ops_alert_webhook_hmac_secret`, owner
+`bumpabestie:bumpabestie`, mode `0400`) and configure:
+
+```bash
+OPS_ALERTS_ENABLED=true
+OPS_ALERT_WEBHOOK_URL=https://alerts.example.com/v1/bumpabestie-events
+OPS_ALERT_HMAC_SECRET_FILE_HOST=/var/lib/bumpabestie/ops_alert_webhook_hmac_secret
+OPS_ALERT_HMAC_SECRET_FILE=/run/runtime-secrets/ops_alert_hmac_secret
+```
+
+Create `/etc/bumpabestie/alerts.json` owned by `root:bumpabestie` with mode `0640`
+for host disk/backup alerts. It is a narrow fixed-config file, not the application
+environment:
+
+```json
+{
+  "webhook_url": "https://alerts.example.com/v1/bumpabestie-events",
+  "hmac_secret_file": "/var/lib/bumpabestie/ops_alert_webhook_hmac_secret",
+  "max_attempts": 3,
+  "timeout_seconds": 10
+}
+```
+
+The optional secret is copied into the app runtime-secret volume only when the host
+file exists. Payloads use fixed summaries, allowlisted categories, aggregate host
+percentages and opaque HMAC/hash references—never phone numbers, raw tenant/source
+IDs, provider bodies or credentials. Receivers verify `X-BumpaBestie-Signature`
+over `<X-BumpaBestie-Timestamp>.<raw-body>` and deduplicate `Idempotency-Key`.
 
 ## GitHub controls before launch
 

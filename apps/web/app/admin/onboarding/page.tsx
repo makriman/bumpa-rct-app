@@ -1,4 +1,5 @@
-import { Onboarding } from "@/components/admin-pages";
+import { ResumableOnboardingStart } from "@/components/admin-onboarding";
+
 export default function Page() {
-  return <Onboarding />;
+  return <ResumableOnboardingStart />;
 }

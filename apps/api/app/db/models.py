@@ -17,10 +17,12 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.ids import new_id
 from app.core.time import utcnow
 from app.db.base import Base, IdMixin, TimestampMixin
 
@@ -30,6 +32,12 @@ IpAddressType = String(45).with_variant(postgresql.INET(), "postgresql")
 
 class Tenant(IdMixin, TimestampMixin, Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'suspended', 'archived', 'provisioning')",
+            name="ck_tenants_status",
+        ),
+    )
 
     slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
@@ -383,6 +391,88 @@ class HermesProfile(IdMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), default="active")
 
 
+class TenantOnboarding(IdMixin, TimestampMixin, Base):
+    """Durable, secret-free administrative tenant provisioning saga."""
+
+    __tablename__ = "tenant_onboardings"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('in_progress', 'attention_required', 'completed')",
+            name="ck_tenant_onboardings_status",
+        ),
+        CheckConstraint(
+            "current_step IN "
+            "('owner', 'phone', 'bumpa', 'initial_sync', 'hermes', 'review', 'completed')",
+            name="ck_tenant_onboardings_current_step",
+        ),
+        CheckConstraint("revision >= 0", name="ck_tenant_onboardings_revision_nonnegative"),
+        CheckConstraint(
+            "sync_attempt >= 0",
+            name="ck_tenant_onboardings_sync_attempt_nonnegative",
+        ),
+        CheckConstraint(
+            "(status = 'completed' AND current_step = 'completed' AND completed_at IS NOT NULL) "
+            "OR (status != 'completed' AND current_step != 'completed' AND completed_at IS NULL)",
+            name="ck_tenant_onboardings_completion_state",
+        ),
+        UniqueConstraint("tenant_id", name="uq_tenant_onboardings_tenant_id"),
+        UniqueConstraint(
+            "start_idempotency_key_hash",
+            name="uq_tenant_onboardings_start_idempotency_key_hash",
+        ),
+        Index("ix_tenant_onboardings_status_updated", "status", "updated_at"),
+        Index("ix_tenant_onboardings_step_updated", "current_step", "updated_at"),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="in_progress")
+    current_step: Mapped[str] = mapped_column(String(24), default="owner")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    start_idempotency_key_hash: Mapped[str] = mapped_column(String(64))
+    start_fingerprint: Mapped[str] = mapped_column(String(64))
+    owner_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    owner_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    phone_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    phone_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    bumpa_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    bumpa_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    initial_sync_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    initial_sync_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    initial_sync_accept_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    initial_sync_accept_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    hermes_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    hermes_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    complete_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
+    complete_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    owner_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    owner_membership_id: Mapped[str | None] = mapped_column(
+        ForeignKey("tenant_memberships.id", ondelete="SET NULL")
+    )
+    phone_identity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("phone_identities.id", ondelete="SET NULL")
+    )
+    bumpa_connection_id: Mapped[str | None] = mapped_column(
+        ForeignKey("bumpa_connections.id", ondelete="SET NULL")
+    )
+    initial_sync_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("async_jobs.id", ondelete="SET NULL")
+    )
+    initial_sync_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("bumpa_sync_runs.id", ondelete="SET NULL")
+    )
+    sync_attempt: Mapped[int] = mapped_column(Integer, default=0)
+    hermes_profile_id: Mapped[str | None] = mapped_column(
+        ForeignKey("hermes_profiles.id", ondelete="SET NULL")
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(80))
+    failure_step: Mapped[str | None] = mapped_column(String(24))
+    failure_retryable: Mapped[bool | None] = mapped_column(Boolean)
+    failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Conversation(IdMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
     __table_args__ = (Index("ix_conversation_tenant_updated", "tenant_id", "updated_at"),)
@@ -405,7 +495,12 @@ class AgentMessage(IdMixin, Base):
             "direction IN ('inbound', 'outbound')",
             name="ck_agent_messages_direction",
         ),
-        UniqueConstraint("channel", "external_message_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "channel",
+            "external_message_id",
+            name="uq_agent_messages_tenant_channel_external_message_id",
+        ),
         Index(
             "ix_message_tenant_conversation_created", "tenant_id", "conversation_id", "created_at"
         ),
@@ -512,8 +607,26 @@ class ResearchEvent(IdMixin, Base):
     __tablename__ = "research_events"
     __table_args__ = (
         Index("ix_research_filters", "tenant_id", "channel", "primary_intent", "created_at"),
+        Index("ix_research_event_type_created", "event_type", "created_at"),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_research_events_idempotency_key",
+        ),
+        CheckConstraint(
+            "agent_confidence IS NULL OR agent_confidence IN ('low', 'medium', 'high')",
+            name="ck_research_events_agent_confidence",
+        ),
+        CheckConstraint(
+            "response_length_chars IS NULL OR response_length_chars >= 0",
+            name="ck_research_events_response_length_nonnegative",
+        ),
+        CheckConstraint(
+            "response_latency_ms IS NULL OR response_latency_ms >= 0",
+            name="ck_research_events_response_latency_nonnegative",
+        ),
     )
 
+    idempotency_key: Mapped[str] = mapped_column(String(160), default=lambda: f"legacy:{new_id()}")
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     conversation_id: Mapped[str | None] = mapped_column(
@@ -524,6 +637,7 @@ class ResearchEvent(IdMixin, Base):
     )
     channel: Mapped[str] = mapped_column(String(24))
     event_type: Mapped[str] = mapped_column(String(80))
+    raw_text_present: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     redacted_text: Mapped[str | None] = mapped_column(Text)
     primary_intent: Mapped[str | None] = mapped_column(String(80), index=True)
     business_function: Mapped[str | None] = mapped_column(String(80))
@@ -531,7 +645,14 @@ class ResearchEvent(IdMixin, Base):
     complexity: Mapped[str | None] = mapped_column(String(80))
     bumpa_data_used: Mapped[str | None] = mapped_column(String(80))
     classification_version: Mapped[str | None] = mapped_column(String(40))
+    language: Mapped[str | None] = mapped_column(String(16))
+    agent_confidence: Mapped[str | None] = mapped_column(String(16))
+    response_length_chars: Mapped[int | None] = mapped_column(Integer)
+    response_latency_ms: Mapped[int | None] = mapped_column(Integer)
+    follow_up_detected: Mapped[bool | None] = mapped_column(Boolean)
     outcome: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    business_outcome: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
     pii_redacted: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -543,9 +664,16 @@ class ResearchReport(IdMixin, Base):
             "status IN ('queued', 'running', 'success', 'failed')",
             name="ck_research_reports_status",
         ),
+        CheckConstraint(
+            "artifact_kind IN ('report', 'export')",
+            name="ck_research_reports_artifact_kind",
+        ),
     )
 
     report_type: Mapped[str] = mapped_column(String(80))
+    artifact_kind: Mapped[str] = mapped_column(
+        String(16), default="report", server_default="report"
+    )
     generated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     filters: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(24), default="queued")
@@ -576,6 +704,12 @@ class McpConnection(IdMixin, TimestampMixin, Base):
             "provider IN ('google_drive', 'google_sheets', 'gmail', 'calendar', 'meta_ads')",
             name="ck_mcp_connections_provider",
         ),
+        CheckConstraint(
+            "status IN ('disabled', 'admin_pending', 'approved', 'oauth_in_progress', "
+            "'active', 'rejected', 'error')",
+            name="ck_mcp_connections_status",
+        ),
+        UniqueConstraint("tenant_id", "provider", name="uq_mcp_connections_tenant_provider"),
     )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)

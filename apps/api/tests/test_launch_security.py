@@ -118,6 +118,25 @@ def test_cookie_origin_policy_rejects_cross_site_and_supports_internal_bff() -> 
     assert missing_origin.value.status_code == 403
 
 
+def test_cors_preflight_allows_revision_preconditions(client: TestClient) -> None:
+    origin = get_settings().effective_cors_origins[0]
+    response = client.options(
+        "/v1/admin/onboarding/test-id/owner",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "PATCH",
+            "Access-Control-Request-Headers": "Authorization,Content-Type,If-Match",
+        },
+    )
+
+    assert response.status_code == 200
+    allowed_headers = {
+        header.strip().lower()
+        for header in response.headers["access-control-allow-headers"].split(",")
+    }
+    assert {"authorization", "content-type", "if-match"} <= allowed_headers
+
+
 def test_cookie_auth_mutation_enforces_origin_but_bearer_is_not_csrf_scoped(
     client: TestClient,
 ) -> None:

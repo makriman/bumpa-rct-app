@@ -1,6 +1,28 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+emit_backup_alert() {
+  local status="$1"
+  local hook="${BUMPABESTIE_ALERT_HOOK:-}"
+  [[ -n "$hook" && "$hook" == /* && -f "$hook" && ! -L "$hook" && -x "$hook" ]] || return 0
+  local event_json
+  event_json="$(printf '{"event":"backup","occurred_at":"%s","status":"%s"}' \
+    "$(date -u +%FT%TZ)" "$status")"
+  if ! BUMPABESTIE_ALERT_EVENT=backup "$hook" <<<"$event_json"; then
+    echo "Backup outcome alert could not be delivered" >&2
+  fi
+}
+
+alert_early_failure() {
+  local result=$?
+  trap - EXIT
+  if ((result != 0)); then
+    emit_backup_alert failure
+  fi
+  exit "$result"
+}
+trap alert_early_failure EXIT
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -35,6 +57,11 @@ resume_writers() {
       echo "Backup completed or failed, but one or more application services did not resume" >&2
       result=1
     fi
+  fi
+  if ((result == 0)); then
+    emit_backup_alert success
+  else
+    emit_backup_alert failure
   fi
   exit "$result"
 }

@@ -4,8 +4,9 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Release
-`41935d67696fee45b184a65c0a9bf39e0708ae89` is deployed on the sslip.io hosts
-with all eight services and selectors `meta`, `bumpa` and `hermes`. Always confirm
+`8f290509668de15eaf3621e3213f4276f85a0a83` is deployed on the branded
+`bumpabestie.com` hosts with all eight services and selectors `meta`, `bumpa` and
+`hermes`. Always confirm
 the actual boundary from `.deployed-release.json`, Compose state and
 `/health/ready` before applying an incident procedure; selector state is not a
 provider canary.
@@ -72,8 +73,9 @@ reconciled before another deployment or backup.
 The verified production snapshot is Caddy, web, API, worker, scheduler, Hermes,
 PostgreSQL and Redis with zero restarts and zero OOM kills. Caddy is 2.11.4 built
 with Go 1.26.5 and runs as UID 10001 with restricted capabilities; PostgreSQL is
-16.14 and Redis is 7.4.9. The five temporary host variants have valid TLS and route
-correctly. Readiness reports database/Redis/worker/scheduler `ok` and the intended
+16.14 and Redis is 7.4.9. The public, `www`, API, admin and research branded hosts
+have valid TLS and route correctly. Readiness reports database/Redis/worker/scheduler
+`ok` and the intended
 provider selectors. Meta callback verification and signed ingress pass, while OTP
 remains unavailable until Meta approves the authentication template.
 
@@ -86,8 +88,14 @@ Readiness must report all providers as `disabled`.
 Verify the public boundaries:
 
 ```bash
-SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
+SMOKE_SCHEME=https SMOKE_PORT=443 SMOKE_OVERALL_TIMEOUT_SECONDS=60 \
+  ./scripts/smoke_test.sh
 ```
+
+`SMOKE_OVERALL_TIMEOUT_SECONDS` is one positive deadline shared by every
+endpoint and retry. To verify the local TLS origin without trusting public DNS or
+an inherited proxy, set `SMOKE_ORIGIN_ADDRESS=127.0.0.1`; curl still validates
+the normal hostname certificate and SAN through a per-host `--resolve` mapping.
 
 Then verify the principal public provider-dependent path fails closed:
 
@@ -179,11 +187,13 @@ quiesces Caddy/API/worker/scheduler/Hermes, creates the backup, and resumes exac
 the recorded service set even when backup creation fails. Alert if no verified
 backup ID appears within the expected window or any service fails to resume.
 
-Backup `20260712T195838Z` passed its format-3 manifest, all five SHA-256 entries,
-three archive parses and the 252-entry PostgreSQL dump parse. Its release, schema,
-PostgreSQL version and exact backup image match the live deployment. The timer is
-enabled and its last service result succeeded. Off-host durability remains
-unconfigured.
+Pre-promotion recovery point `20260713T121212Z` passed its format-3 manifest, all
+five SHA-256 entries and every archive/dump parser. Its manifest records application
+revision `f400cfe67628da787f7ee2a3a3f42c78cb6fae3f`, schema
+`0008_bumpa_dataset_failures`, PostgreSQL 16.14 and the backup image used by the
+current deployment. Release `8f290509668de15eaf3621e3213f4276f85a0a83` started
+after this recovery point; do not mislabel the backup as a post-release snapshot.
+The timer is enabled. Off-host durability remains unconfigured.
 
 ## Restore drill
 
@@ -229,7 +239,8 @@ backup_id=YYYYMMDDTHHMMSSZ
 "${compose[@]}" up -d --wait postgres redis hermes
 ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
 "${compose[@]}" --profile async up -d --wait api web worker scheduler hermes caddy
-SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
+SMOKE_SCHEME=https SMOKE_PORT=443 SMOKE_OVERALL_TIMEOUT_SECONDS=60 \
+  ./scripts/smoke_test.sh
 ```
 
 If restore fails, keep writers stopped, preserve logs and the pre-restore backup,
@@ -277,8 +288,12 @@ each passed their activation gate for the exact release:
 6. Run a bounded test sync. Confirm all expected datasets/orders, availability,
    Decimal normalization, rate-limit metadata and freshness. Do not proceed on an
    auth error or unexplained partial result.
-7. Provision the tenant's Hermes profile. Verify private URL/port/auth, filesystem
-   isolation, health, SOUL/policy and absence of Bumpa/Meta keys in its context.
+7. Provision and activate the tenant's Hermes profile. The admin request must not
+   return `active` until the private control plane has imported the exact staged
+   bundle, started the selected gateway and passed authenticated readiness. Verify
+   private URL/port/auth, filesystem isolation, health, SOUL/policy and absence of
+   Bumpa/Meta keys in its context. A degraded result or activation-failure audit is
+   a stop condition; retry the same profile rather than creating another mapping.
 8. Send the approved invite/OTP and complete owner login.
 9. Run one synthetic browser chat and one approved WhatsApp canary; verify both hit
    the same tenant profile and that another tenant cannot access either record.
@@ -330,13 +345,26 @@ tell users an OTP was sent. When the selector is `meta`, use the procedure below
 
 ## Hermes/Claude failure
 
+Operator-initiated profile recovery is available in the admin tenant view. It
+requires an explicit confirmation and controlled reason, is audit logged, and
+restarts only the selected profile through the authenticated internal control
+plane. Initial onboarding uses the same private listener for one narrower
+activation operation: it reads an API-staged bundle from a read-only volume,
+accepts only the required regular policy files, refuses symlinks, special files and
+runtime key/port/policy mismatches, atomically creates that named runtime profile,
+runs the fixed gateway start command and waits for authenticated readiness. The
+control listener is not host-published, cannot accept an arbitrary profile path or
+command, and has no Docker socket, host mount or root identity. Use a full
+service/container restart only when the profile-scoped control plane itself is
+unhealthy.
+
 1. Circuit-break only the affected profile and return a clear unavailable response.
 2. Verify tenant/profile mapping, private endpoint, authentication, process health,
    model availability, budget/limit state and redacted context size.
 3. Never route to another tenant profile and never inject an Anthropic key into the
    control-plane services.
-4. Use the approved lifecycle operation for restart; record actor, reason and audit
-   ID.
+4. Use only the approved profile activation or restart operation; record actor,
+   reason and audit ID.
 5. If state is corrupt, restore only from a verified backup with the profile mapping
    preserved.
 6. Run same-tenant functionality and cross-profile isolation canaries before
@@ -348,6 +376,25 @@ Postgres jobs/outbox are authoritative; Redis carries wake-up IDs and heartbeats
 Never replay a job without checking its idempotency key and
 side-effect record. Redis recovery alone does not prove Postgres-to-queue handoff
 correctness.
+
+## Proactive insight and external alert controls
+
+- Keep `PROACTIVE_INSIGHTS_ENABLED=false` until both Meta templates are approved.
+  After activation, prove one synthetic owner delivery per cadence, STOP blocks the
+  next slot and START does not replay an old slot.
+- `ineligible`, `no_recipients` and `no_fresh_data` are intentional no-send results.
+  Correct the source state; never bypass a calendar/message idempotency fence.
+- Pause the master flag on broad Meta/template errors. An `ambiguous` outbound row
+  requires Meta reconciliation before replay.
+- App alerts cover degraded/terminal Bumpa sync, outbound WhatsApp failure, Hermes
+  call errors and periodic Hermes health. Host alerts cover disk/inode pressure and
+  backup success/failure.
+- If alerts stop, check worker dead letters, both systemd unit journals, endpoint
+  TLS, secret-file ownership/mode and receiver HMAC verification. Never print the
+  secret or copy customer/provider payloads into incident tools.
+- Receivers must accept duplicate idempotency keys after transport retries.
+  Non-retryable 4xx responses become terminal; 408/425/429/5xx and transport
+  failures use the bounded retry budget.
 
 ## Database, disk or container failure
 

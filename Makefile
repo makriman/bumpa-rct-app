@@ -47,7 +47,7 @@ e2e: ## Run the current desktop/mobile Playwright browser checks
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
 	./scripts/local_e2e.sh
 
-load-failure: ## Run isolated 50-webhook load and Redis/Postgres restart drills
+load-failure: ## Run sealed chat/sync pressure, disk alert, webhook load, and restart drills
 	python3 tests/load_failure/run.py
 
 quality: format-check lint typecheck test compose-config production-contract ## Run the local merge gate

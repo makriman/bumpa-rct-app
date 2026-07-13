@@ -123,6 +123,48 @@ function Distribution({
   );
 }
 
+function RankedList({
+  title,
+  description,
+  values,
+  empty = "No consented evidence has been observed yet.",
+  classifyLabels = false,
+}: {
+  title: string;
+  description: string;
+  values: Array<{ label: string; count: number }>;
+  empty?: string;
+  classifyLabels?: boolean;
+}) {
+  return (
+    <Card padded>
+      <div className="card-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+      </div>
+      {values.length ? (
+        values.map((item, index) => (
+          <div className="detail-row" key={`${item.label}-${index}`}>
+            <span className="detail-label">
+              {index + 1}. {classifyLabels ? titleCase(item.label) : item.label}
+            </span>
+            <span className="detail-value">{item.count.toLocaleString()}</span>
+          </div>
+        ))
+      ) : (
+        <p className="table-secondary">{empty}</p>
+      )}
+    </Card>
+  );
+}
+
+function formatLatency(value: number | null): string {
+  if (value === null) return "Not measured";
+  return value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`;
+}
+
 function downloadJson(filename: string, value: unknown) {
   const url = URL.createObjectURL(
     new Blob([JSON.stringify(value, null, 2)], { type: "application/json" }),
@@ -148,7 +190,7 @@ export function ResearchOverview() {
     <AppShell surface="research" title="Research overview">
       <PageHeader
         title="Research overview"
-        description="Pseudonymised evidence returned by the consent-filtered research APIs."
+        description="A consent-safe view of adoption, question patterns, data use, performance, retention, and research operations."
         actions={
           <button
             className="button button-secondary"
@@ -166,8 +208,9 @@ export function ResearchOverview() {
         error={overview.error}
       />
       <div className="alert alert-info">
-        This surface uses redacted research records. Raw identities and raw
-        message text are not requested by the frontend.
+        Event-level measures include only SMEs with active research consent.
+        Tenant activity is pseudonymised, question text is redacted, and raw
+        identities are never requested by this view.
       </div>
       {overview.status !== "ready" || !data ? (
         <ResourceState
@@ -177,46 +220,349 @@ export function ResearchOverview() {
         />
       ) : (
         <>
-          <div className="grid grid-3">
+          <div className="grid grid-4">
             <Metric
               label="SMEs onboarded"
               value={data.smes_onboarded.toLocaleString()}
-              note="Current platform count"
+              note="All current workspaces"
             />
+            <Metric
+              label="Active today"
+              value={data.active_smes.day.toLocaleString()}
+              note="Consented SMEs · trailing 24 hours"
+            />
+            <Metric
+              label="Active this week"
+              value={data.active_smes.week.toLocaleString()}
+              note="Consented SMEs · trailing 7 days"
+            />
+            <Metric
+              label="Active this month"
+              value={data.active_smes.month.toLocaleString()}
+              note="Consented SMEs · trailing 30 days"
+            />
+          </div>
+          <div className="grid grid-4" style={{ marginTop: 18 }}>
             <Metric
               label="Research events"
               value={data.research_events.toLocaleString()}
-              note="Consent-filtered event count"
+              note="Consent-filtered evidence"
             />
             <Metric
-              label="Channels observed"
-              value={String(Object.keys(data.messages_by_channel).length)}
-              note="From classified events"
+              label="Repeat usage"
+              value={
+                data.repeat_usage.repeat_rate_pct === null
+                  ? "Not measured"
+                  : `${data.repeat_usage.repeat_rate_pct}%`
+              }
+              note={`${data.repeat_usage.repeat_smes} of ${data.repeat_usage.smes_observed} observed SMEs used the assistant on 2+ days`}
+            />
+            <Metric
+              label="Hermes response p50"
+              value={formatLatency(data.hermes_response_latency.p50_ms)}
+              note={`${data.hermes_response_latency.samples.toLocaleString()} measured responses`}
+            />
+            <Metric
+              label="Generated artifacts"
+              value={data.exports.total.toLocaleString()}
+              note={`${data.report_generation.total.toLocaleString()} report requests`}
             />
           </div>
+
           <div className="grid grid-3" style={{ marginTop: 18 }}>
             <Distribution
+              title="Research consent"
+              description="Current workspace participation choices."
+              values={Object.entries(data.research_consent_status).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
               title="Messages by channel"
-              description="Counts returned by the overview endpoint."
+              description="Consent-filtered questions by product channel."
               values={Object.entries(data.messages_by_channel).sort(
                 (a, b) => b[1] - a[1],
               )}
             />
             <Distribution
-              title="Questions by intent"
-              description="Primary-intent counts returned by the API."
-              values={Object.entries(data.questions_by_intent).sort(
-                (a, b) => b[1] - a[1],
-              )}
-            />
-            <Distribution
-              title="Bumpa data usage"
-              description="Recorded data-context labels."
-              values={Object.entries(data.bumpa_data_usage).sort(
+              title="Active users by channel"
+              description="Distinct consented users observed on each channel."
+              values={Object.entries(data.active_users_by_channel).sort(
                 (a, b) => b[1] - a[1],
               )}
             />
           </div>
+
+          <div className="grid grid-3" style={{ marginTop: 18 }}>
+            <Distribution
+              title="Questions by category"
+              description="Primary intent recorded for each consented question."
+              values={Object.entries(data.questions_by_category).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
+              title="Business functions"
+              description="The operating area each question concerns."
+              values={Object.entries(data.questions_by_business_function).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
+              title="Reasoning complexity"
+              description="Observed depth of assistance requested."
+              values={Object.entries(data.questions_by_complexity).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+          </div>
+
+          <div className="grid grid-3" style={{ marginTop: 18 }}>
+            <Distribution
+              title="AI help type"
+              description="Lookup, diagnosis, recommendations, and other modes."
+              values={Object.entries(data.questions_by_ai_help_type).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <Distribution
+              title="Bumpa data used"
+              description="Business context recorded for each answer."
+              values={Object.entries(data.bumpa_data_usage).sort(
+                (a, b) => b[1] - a[1],
+              )}
+            />
+            <RankedList
+              title="Recurring problem areas"
+              description="The most frequently observed question categories."
+              values={data.top_recurring_problems}
+              classifyLabels
+            />
+          </div>
+
+          <div className="grid grid-3" style={{ marginTop: 18 }}>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Hermes response latency</h2>
+                  <p>End-to-end runtime latency for consented conversations.</p>
+                </div>
+              </div>
+              {[
+                [
+                  "Median (p50)",
+                  formatLatency(data.hermes_response_latency.p50_ms),
+                ],
+                [
+                  "Tail (p95)",
+                  formatLatency(data.hermes_response_latency.p95_ms),
+                ],
+                [
+                  "Average",
+                  formatLatency(data.hermes_response_latency.average_ms),
+                ],
+                [
+                  "Samples",
+                  data.hermes_response_latency.samples.toLocaleString(),
+                ],
+              ].map(([label, value]) => (
+                <div className="detail-row" key={label}>
+                  <span className="detail-label">{label}</span>
+                  <span className="detail-value">{value}</span>
+                </div>
+              ))}
+            </Card>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Bumpa sync freshness</h2>
+                  <p>Current sync age for consented connected SMEs.</p>
+                </div>
+              </div>
+              {[
+                ["Connected SMEs", data.bumpa_sync_freshness.connected_smes],
+                ["Fresh · under 24h", data.bumpa_sync_freshness.fresh_24h],
+                ["Watch · 24–72h", data.bumpa_sync_freshness.stale_24_to_72h],
+                ["Overdue · 72h+", data.bumpa_sync_freshness.overdue_72h],
+                ["Never synced", data.bumpa_sync_freshness.never_synced],
+              ].map(([label, value]) => (
+                <div className="detail-row" key={String(label)}>
+                  <span className="detail-label">{label}</span>
+                  <span className="detail-value">{value}</span>
+                </div>
+              ))}
+              <p className="table-secondary" style={{ marginTop: 14 }}>
+                Latest successful sync:{" "}
+                {formatDate(data.bumpa_sync_freshness.latest_sync_at)}
+              </p>
+            </Card>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Research operations</h2>
+                  <p>Report requests and durable artifact generation.</p>
+                </div>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">Report requests</span>
+                <span className="detail-value">
+                  {data.report_generation.total}
+                </span>
+              </div>
+              <div className="detail-row">
+                <span className="detail-label">Generated artifacts</span>
+                <span className="detail-value">{data.exports.total}</span>
+              </div>
+              {Object.entries(data.report_generation.by_status)
+                .sort((a, b) => b[1] - a[1])
+                .map(([status, count]) => (
+                  <div className="detail-row" key={`status-${status}`}>
+                    <span className="detail-label">
+                      Reports · {titleCase(status)}
+                    </span>
+                    <span className="detail-value">{count}</span>
+                  </div>
+                ))}
+              {Object.entries(data.report_generation.by_type)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([type, count]) => (
+                  <div className="detail-row" key={`type-${type}`}>
+                    <span className="detail-label">{titleCase(type)}</span>
+                    <span className="detail-value">{count}</span>
+                  </div>
+                ))}
+              {Object.entries(data.exports.by_format)
+                .sort((a, b) => b[1] - a[1])
+                .map(([format, count]) => (
+                  <div className="detail-row" key={format}>
+                    <span className="detail-label">{format.toUpperCase()}</span>
+                    <span className="detail-value">{count}</span>
+                  </div>
+                ))}
+            </Card>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Retention by first-observed cohort</h2>
+                  <p>
+                    An SME is retained when it returns at least 7 or 30 days
+                    after its first consented event. Immature cohorts remain
+                    unscored.
+                  </p>
+                </div>
+              </div>
+              {data.retention_by_cohort.length ? (
+                <div className="table-wrap">
+                  <table style={{ minWidth: 720 }}>
+                    <thead>
+                      <tr>
+                        <th>Cohort</th>
+                        <th>SMEs</th>
+                        <th>7-day eligible</th>
+                        <th>7-day retained</th>
+                        <th>30-day eligible</th>
+                        <th>30-day retained</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.retention_by_cohort.map((cohort) => (
+                        <tr key={cohort.cohort}>
+                          <td>{cohort.cohort}</td>
+                          <td>{cohort.smes}</td>
+                          <td>{cohort.eligible_7d}</td>
+                          <td>
+                            {cohort.retention_7d_pct === null
+                              ? "Maturing"
+                              : `${cohort.retention_7d_pct}%`}
+                          </td>
+                          <td>{cohort.eligible_30d}</td>
+                          <td>
+                            {cohort.retention_30d_pct === null
+                              ? "Maturing"
+                              : `${cohort.retention_30d_pct}%`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="table-secondary">
+                  Retention appears after the first consented SME interaction.
+                </p>
+              )}
+            </Card>
+          </div>
+
+          <div style={{ marginTop: 18 }}>
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Repeat usage by SME</h2>
+                  <p>
+                    Pseudonymous workspace activity, ranked by distinct active
+                    days and message volume.
+                  </p>
+                </div>
+              </div>
+              {data.repeat_usage.by_sme.length ? (
+                <div className="table-wrap">
+                  <table style={{ minWidth: 680 }}>
+                    <thead>
+                      <tr>
+                        <th>SME pseudonym</th>
+                        <th>Active days</th>
+                        <th>Events</th>
+                        <th>First observed</th>
+                        <th>Last observed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.repeat_usage.by_sme.map((sme) => (
+                        <tr key={sme.tenant_pseudonym}>
+                          <td>{sme.tenant_pseudonym}</td>
+                          <td>{sme.active_days}</td>
+                          <td>{sme.event_count}</td>
+                          <td>{formatDate(sme.first_seen_at)}</td>
+                          <td>{formatDate(sme.last_seen_at)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="table-secondary">No repeat-usage evidence yet.</p>
+              )}
+            </Card>
+          </div>
+
+          <div className="grid grid-2" style={{ marginTop: 18 }}>
+            <RankedList
+              title="Common sales questions"
+              description="Repeated redacted questions about sales and revenue."
+              values={data.most_common_sales_questions}
+            />
+            <RankedList
+              title="Common inventory questions"
+              description="Repeated redacted questions about stock and restocking."
+              values={data.most_common_inventory_questions}
+            />
+            <RankedList
+              title="Common customer questions"
+              description="Repeated redacted questions about buyers and customer behaviour."
+              values={data.most_common_customer_questions}
+            />
+            <RankedList
+              title="Common advice requests"
+              description="Recommendations, forecasts, teaching, and drafting requests."
+              values={data.most_common_advice_requests}
+            />
+          </div>
+
           {events.status === "ready" && (
             <>
               <LiveDataBanner
@@ -426,6 +772,12 @@ export function Questions() {
             ["Tenant pseudonym", selected.tenant_pseudonym],
             ["Event type", titleCase(selected.event_type)],
             [
+              "Raw source retained",
+              selected.raw_text_present
+                ? "Yes — superadmin request required"
+                : "No",
+            ],
+            [
               "Classification",
               `${titleCase(selected.primary_intent)} · ${titleCase(selected.ai_help_type)}`,
             ],
@@ -623,7 +975,8 @@ export function Conversations() {
                 <span className="table-secondary">
                   {event.user_pseudonym ?? "Participant unavailable"} ·{" "}
                   {titleCase(event.ai_help_type)} ·{" "}
-                  {titleCase(event.bumpa_data_used)}
+                  {titleCase(event.bumpa_data_used)} · Raw source{" "}
+                  {event.raw_text_present ? "retained" : "not retained"}
                 </span>
               </div>
             ))}
@@ -860,6 +1213,8 @@ export function Cohorts() {
 
 type ReportDetail = {
   id: string;
+  report_type: string;
+  artifact_kind: "report" | "export";
   status: string;
   title: string | null;
   summary: string | null;
@@ -872,19 +1227,57 @@ type ReportDetail = {
 
 function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
   const resource = useApiResource<Report[]>(
-    "/research/reports",
+    `/research/reports?artifact_kind=${mode.slice(0, -1)}`,
     previewReports,
   );
   const [modal, setModal] = useState(false);
   const [type, setType] = useState(
     mode === "reports" ? "weekly_memo" : "sme_usage",
   );
-  const [format, setFormat] = useState(mode === "reports" ? "pdf" : "csv");
+  const [formats, setFormats] = useState<string[]>([
+    mode === "reports" ? "pdf" : "csv",
+  ]);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [tenantPseudonym, setTenantPseudonym] = useState("");
+  const [channel, setChannel] = useState("");
+  const [primaryIntent, setPrimaryIntent] = useState("");
+  const [businessFunction, setBusinessFunction] = useState("");
+  const [aiHelpType, setAiHelpType] = useState("");
+  const [complexity, setComplexity] = useState("");
+  const [accessReason, setAccessReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [detail, setDetail] = useState<ReportDetail | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  const raw = type === "raw_export_package";
+  const visibleReports = (resource.data ?? []).filter(
+    (report) =>
+      !report.artifact_kind || report.artifact_kind === mode.slice(0, -1),
+  );
+  const selectedFilters = () =>
+    Object.fromEntries(
+      Object.entries({
+        date_from: dateFrom,
+        date_to: dateTo,
+        tenant_pseudonym: tenantPseudonym,
+        channel,
+        primary_intent: primaryIntent,
+        business_function: businessFunction,
+        ai_help_type: aiHelpType,
+        complexity,
+      })
+        .map(([key, value]) => [key, value.trim()])
+        .filter(([, value]) => value),
+    );
+  const toggleFormat = (candidate: string) => {
+    setFormats((current) =>
+      current.includes(candidate)
+        ? current.filter((item) => item !== candidate)
+        : [...current, candidate],
+    );
+  };
   const create = async () => {
     setBusy(true);
     setError("");
@@ -893,14 +1286,16 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
         mode === "reports" ? "/research/reports" : "/research/exports",
         {
           method: "POST",
+          headers: raw ? { "X-Access-Reason": accessReason.trim() } : undefined,
           body: JSON.stringify({
             report_type: type,
-            filters: {},
-            formats: [format],
+            filters: selectedFilters(),
+            formats,
           }),
         },
       );
       resource.replace([created, ...(resource.data ?? [])]);
+      if (raw) setAccessReason("");
       setModal(false);
       setToast(
         `${mode === "reports" ? "Report" : "Export"} queued. Its status will appear in the artifact list shortly.`,
@@ -919,12 +1314,57 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
     setDetailBusy(true);
     setError("");
     try {
-      setDetail(await apiRequest<ReportDetail>(`/research/reports/${id}`));
+      const loaded = await apiRequest<ReportDetail>(`/research/reports/${id}`);
+      if (loaded.report_type === "raw_export_package") setAccessReason("");
+      setDetail(loaded);
     } catch (reason) {
       setError(
         reason instanceof Error
           ? reason.message
           : "Report details could not be loaded.",
+      );
+    } finally {
+      setDetailBusy(false);
+    }
+  };
+  const download = async (artifact: ReportDetail["artifacts"][number]) => {
+    if (!detail) return;
+    setDetailBusy(true);
+    setError("");
+    try {
+      const isRaw = detail.report_type === "raw_export_package";
+      const response = await fetch(
+        `/api/backend/research/reports/${detail.id}/download/${artifact.format}`,
+        {
+          credentials: "same-origin",
+          headers: isRaw
+            ? { "X-Access-Reason": accessReason.trim() }
+            : undefined,
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          detail?: string;
+        } | null;
+        throw new Error(
+          payload?.detail ?? `Download failed (${response.status})`,
+        );
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `research-report-${detail.id}.${artifact.format}`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      if (isRaw) setAccessReason("");
+      setToast(
+        `${artifact.format.toUpperCase()} integrity check passed and download started.`,
+      );
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "The download could not be completed.",
       );
     } finally {
       setDetailBusy(false);
@@ -976,7 +1416,7 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
           error={resource.error}
           retry={resource.reload}
         />
-      ) : !resource.data?.length ? (
+      ) : !visibleReports.length ? (
         <ResourceState
           status="ready"
           error={null}
@@ -997,7 +1437,7 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
               </tr>
             </thead>
             <tbody>
-              {resource.data.map((report) => (
+              {visibleReports.map((report) => (
                 <tr key={report.id}>
                   <td>
                     <div className="table-primary">
@@ -1043,7 +1483,12 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
               </button>
               <button
                 className="button button-primary"
-                disabled={busy}
+                disabled={
+                  busy ||
+                  !formats.length ||
+                  (raw && accessReason.trim().length < 12) ||
+                  Boolean(dateFrom && dateTo && dateTo < dateFrom)
+                }
                 onClick={() => void create()}
               >
                 {busy ? "Generating…" : `Generate ${noun}`}
@@ -1062,23 +1507,190 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
               <option value="sme_usage">SME usage</option>
               <option value="cohort_behavior">Cohort behaviour</option>
               <option value="question_taxonomy">Question taxonomy</option>
+              <option value="business_outcome_correlation">
+                Business outcome correlation
+              </option>
               <option value="weekly_memo">Weekly memo</option>
               <option value="monthly_memo">Monthly memo</option>
+              {mode === "exports" && (
+                <option value="anonymized_export_package">
+                  Anonymized export package
+                </option>
+              )}
+              {mode === "exports" && (
+                <option value="raw_export_package">
+                  Permissioned raw export (superadmin)
+                </option>
+              )}
             </select>
           </div>
           <div className="field">
-            <label htmlFor="report-format">Format</label>
-            <select
-              id="report-format"
-              className="select"
-              value={format}
-              onChange={(event) => setFormat(event.target.value)}
-            >
-              <option value="csv">CSV</option>
-              <option value="jsonl">JSONL</option>
-              <option value="pdf">PDF</option>
-            </select>
+            <label>Formats</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+              {[
+                ["csv", "CSV"],
+                ["jsonl", "JSONL"],
+                ["pdf", "PDF"],
+              ].map(([value, label]) => (
+                <label
+                  className="button button-secondary button-small"
+                  key={value}
+                >
+                  <input
+                    type="checkbox"
+                    checked={formats.includes(value)}
+                    onChange={() => toggleFormat(value)}
+                  />{" "}
+                  {label}
+                </label>
+              ))}
+            </div>
+            {!formats.length && (
+              <span className="field-error">Select at least one format.</span>
+            )}
           </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+              gap: 12,
+            }}
+          >
+            <div className="field">
+              <label htmlFor="report-date-from">From date</label>
+              <input
+                id="report-date-from"
+                className="input"
+                type="date"
+                value={dateFrom}
+                onChange={(event) => setDateFrom(event.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="report-date-to">To date</label>
+              <input
+                id="report-date-to"
+                className="input"
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(event) => setDateTo(event.target.value)}
+              />
+            </div>
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-pseudonym">SME pseudonym</label>
+            <input
+              id="tenant-pseudonym"
+              className="input"
+              value={tenantPseudonym}
+              placeholder="Optional exact pseudonym"
+              onChange={(event) => setTenantPseudonym(event.target.value)}
+            />
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+              gap: 12,
+            }}
+          >
+            <div className="field">
+              <label htmlFor="report-channel">Channel</label>
+              <select
+                id="report-channel"
+                className="select"
+                value={channel}
+                onChange={(event) => setChannel(event.target.value)}
+              >
+                <option value="">All channels</option>
+                <option value="web">Web</option>
+                <option value="whatsapp">WhatsApp</option>
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="report-intent">Question category</label>
+              <select
+                id="report-intent"
+                className="select"
+                value={primaryIntent}
+                onChange={(event) => setPrimaryIntent(event.target.value)}
+              >
+                <option value="">All categories</option>
+                {previewTaxonomy.primary_intent.map((item) => (
+                  <option value={item} key={item}>
+                    {titleCase(item)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="report-function">Business function</label>
+              <select
+                id="report-function"
+                className="select"
+                value={businessFunction}
+                onChange={(event) => setBusinessFunction(event.target.value)}
+              >
+                <option value="">All functions</option>
+                {previewTaxonomy.business_function.map((item) => (
+                  <option value={item} key={item}>
+                    {titleCase(item)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="report-help-type">AI help type</label>
+              <select
+                id="report-help-type"
+                className="select"
+                value={aiHelpType}
+                onChange={(event) => setAiHelpType(event.target.value)}
+              >
+                <option value="">All help types</option>
+                {previewTaxonomy.ai_help_type.map((item) => (
+                  <option value={item} key={item}>
+                    {titleCase(item)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="report-complexity">Complexity</label>
+              <select
+                id="report-complexity"
+                className="select"
+                value={complexity}
+                onChange={(event) => setComplexity(event.target.value)}
+              >
+                <option value="">All complexity levels</option>
+                {previewTaxonomy.complexity.map((item) => (
+                  <option value={item} key={item}>
+                    {titleCase(item)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {raw && (
+            <div className="field">
+              <label htmlFor="raw-export-reason">Required access reason</label>
+              <textarea
+                id="raw-export-reason"
+                className="textarea"
+                minLength={12}
+                maxLength={240}
+                value={accessReason}
+                placeholder="Explain the approved research purpose without personal data."
+                onChange={(event) => setAccessReason(event.target.value)}
+              />
+              <span className="field-help">
+                Raw packages are superadmin-only. Creation and every download
+                are separately audited.
+              </span>
+            </div>
+          )}
           <div className="alert alert-info">
             Requests are consent-filtered and audit-logged. In production,
             generation runs on the durable report queue.
@@ -1099,6 +1711,23 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
           }
         >
           <p>{detail.summary ?? "No summary was recorded."}</p>
+          {detail.report_type === "raw_export_package" && (
+            <div className="field">
+              <label htmlFor="raw-download-reason">Fresh download reason</label>
+              <textarea
+                id="raw-download-reason"
+                className="textarea"
+                minLength={12}
+                maxLength={240}
+                value={accessReason}
+                placeholder="State the approved research purpose for this download."
+                onChange={(event) => setAccessReason(event.target.value)}
+              />
+              <span className="field-help">
+                Each raw download requires and records a fresh justification.
+              </span>
+            </div>
+          )}
           {detail.artifacts.length ? (
             detail.artifacts.map((artifact) => (
               <div className="detail-row" key={artifact.format}>
@@ -1110,12 +1739,17 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
                     {artifact.checksum_sha256.slice(0, 12)}…
                   </span>
                 </span>
-                <a
+                <button
                   className="button button-primary button-small"
-                  href={`/api/backend/research/reports/${detail.id}/download/${artifact.format}`}
+                  disabled={
+                    detailBusy ||
+                    (detail.report_type === "raw_export_package" &&
+                      accessReason.trim().length < 12)
+                  }
+                  onClick={() => void download(artifact)}
                 >
-                  Download
-                </a>
+                  {detailBusy ? "Checking…" : "Download"}
+                </button>
               </div>
             ))
           ) : (

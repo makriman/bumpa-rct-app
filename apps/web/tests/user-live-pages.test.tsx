@@ -4,6 +4,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -111,46 +112,62 @@ describe("deployment-facing user pages", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("loads the authenticated profile and tenant while keeping unsupported writes disabled", async () => {
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.endsWith("/auth/me")) {
-        return jsonResponse({
-          user: {
-            id: "user-live",
-            name: "Nneka Mensah",
-            email: "nneka@example.com",
-            phone_e164: "+233200000001",
-          },
-          platform_roles: [],
-          memberships: [
-            {
-              id: "membership-live",
-              tenant_id: "tenant-live",
-              role: "owner",
-              status: "active",
+  it("loads and updates the authenticated profile and revokes other sessions", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return jsonResponse({
+            user: {
+              id: "user-live",
+              name: "Nneka Mensah",
+              email: "nneka@example.com",
+              phone_e164: "+233200000001",
             },
-          ],
-          current_tenant_id: "tenant-live",
-        });
-      }
-      if (url.endsWith("/tenants/current")) {
-        return jsonResponse({
-          id: "tenant-live",
-          slug: "real-studio",
-          name: "Real Studio",
-          status: "active",
-          business_category: "Fashion",
-          country: "Ghana",
-          city: "Accra",
-          timezone: "Africa/Accra",
-          currency_code: "GHS",
-          research_consent_status: "pending",
-          role: "owner",
-        });
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
+            platform_roles: [],
+            memberships: [
+              {
+                id: "membership-live",
+                tenant_id: "tenant-live",
+                role: "owner",
+                status: "active",
+              },
+            ],
+            current_tenant_id: "tenant-live",
+          });
+        }
+        if (url.endsWith("/tenants/current")) {
+          return jsonResponse({
+            id: "tenant-live",
+            slug: "real-studio",
+            name: "Real Studio",
+            status: "active",
+            business_category: "Fashion",
+            country: "Ghana",
+            city: "Accra",
+            timezone: "Africa/Accra",
+            currency_code: "GHS",
+            research_consent_status: "pending",
+            role: "owner",
+          });
+        }
+        if (url.endsWith("/settings/profile") && init?.method === "PATCH") {
+          return jsonResponse({
+            id: "user-live",
+            name: "Nneka A. Mensah",
+            email: "nneka.updated@example.com",
+            phone_e164: "+233200000001",
+          });
+        }
+        if (url.endsWith("/auth/logout-others") && init?.method === "POST") {
+          return jsonResponse({
+            message: "Other sessions signed out",
+            revoked_sessions: 2,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
 
     render(<ProfilePage />);
 
@@ -161,14 +178,37 @@ describe("deployment-facing user pages", () => {
     expect(screen.getByText("Real Studio")).toBeInTheDocument();
     expect(screen.getByText("Accra, Ghana")).toBeInTheDocument();
     expect(screen.getByText("GHS")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Editing unavailable" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", {
-        name: "Sign out other devices unavailable",
+    fireEvent.click(screen.getByRole("button", { name: "Edit profile" }));
+    const profileDialog = within(screen.getByRole("dialog"));
+    fireEvent.change(
+      profileDialog.getByLabelText("Full name", { selector: "input" }),
+      { target: { value: "Nneka A. Mensah" } },
+    );
+    fireEvent.change(
+      profileDialog.getByLabelText("Email address", { selector: "input" }),
+      { target: { value: "nneka.updated@example.com" } },
+    );
+    fireEvent.click(
+      profileDialog.getByRole("button", { name: "Save changes" }),
+    );
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("/settings/profile"),
+        expect.objectContaining({ method: "PATCH" }),
+      ),
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Sign out other sessions" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Sign out other sessions",
       }),
-    ).toBeDisabled();
+    );
+    expect(
+      await screen.findByText("2 other sessions signed out."),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Kaia Home")).not.toBeInTheDocument();
   });
 

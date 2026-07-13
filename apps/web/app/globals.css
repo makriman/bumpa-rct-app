@@ -843,6 +843,12 @@ a {
 .grid-4 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
+.onboarding-start-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.75fr);
+}
+.onboarding-progress-layout {
+  grid-template-columns: minmax(240px, 0.65fr) minmax(0, 1fr);
+}
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -1773,6 +1779,9 @@ a {
   }
   .grid-2 {
     grid-template-columns: 1fr;
+  }
+  .onboarding-layout {
+    grid-template-columns: minmax(0, 1fr);
   }
   .chat-layout {
     grid-template-columns: 1fr;

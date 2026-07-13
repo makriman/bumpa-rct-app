@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+exec /command/s6-setuidgid hermes \
+  env -u ANTHROPIC_API_KEY -u ANTHROPIC_API_KEY_FILE \
+  HOME=/opt/data python3 /usr/local/bin/bumpabestie-hermes-control.py

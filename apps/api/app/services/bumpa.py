@@ -28,6 +28,7 @@ from app.providers.diagnostics import (
 )
 from app.providers.local import LocalCommerceProvider
 from app.providers.redaction import redact_order_payload
+from app.services.research_events import record_research_event
 
 logger = logging.getLogger("bumpabestie.providers")
 
@@ -163,6 +164,7 @@ def run_sync(
         else:
             connection.last_failed_sync_at = completed_at
             connection.last_error = "Some Bumpa datasets or orders were unavailable"
+        _record_bumpa_sync_completion(db, run)
         db.commit()
         if staged.completion.quality == "degraded" and staged.live_result is not None:
             _log_degraded_bumpa_sync(run, staged.live_result)
@@ -175,6 +177,12 @@ def run_sync(
         run.finished_at = utcnow()
         connection.last_failed_sync_at = utcnow()
         connection.last_error = run.error
+        _record_bumpa_sync_failure(
+            db,
+            run,
+            failure_kind="provider_not_configured",
+            retryable=False,
+        )
         db.commit()
         raise
     except BumpaProviderError as exc:
@@ -185,6 +193,12 @@ def run_sync(
         run.finished_at = utcnow()
         connection.last_failed_sync_at = utcnow()
         connection.last_error = run.error
+        _record_bumpa_sync_failure(
+            db,
+            run,
+            failure_kind=exc.failure_kind,
+            retryable=exc.retryable,
+        )
         db.commit()
         logger.warning(
             "bumpa_sync_provider_failed",
@@ -205,6 +219,12 @@ def run_sync(
         failed_at = utcnow()
         if not publication_completed:
             _terminalize_generic_failure(run, connection, failed_at)
+            _record_bumpa_sync_failure(
+                db,
+                run,
+                failure_kind="internal_failure",
+                retryable=False,
+            )
             try:
                 db.commit()
             except Exception:
@@ -417,6 +437,12 @@ def _recover_generic_failure_after_outer_rollback(
     if _connection_failure_publication_boundary(connection) == failure_publication_boundary:
         connection.last_failed_sync_at = failed_at
         connection.last_error = failed_run.error
+    _record_bumpa_sync_failure(
+        db,
+        failed_run,
+        failure_kind="internal_failure",
+        retryable=False,
+    )
     db.commit()
     return failed_run
 
@@ -445,6 +471,68 @@ def _log_degraded_bumpa_sync(run: BumpaSyncRun, result: BumpaSyncResult) -> None
             retry_after_seconds=(failure.retry_after_seconds if failure is not None else None),
             sync_run_id=run.id,
         ),
+    )
+
+
+def _record_bumpa_sync_completion(db: Session, run: BumpaSyncRun) -> None:
+    outcome = {
+        "status": run.status,
+        "completion_quality": run.completion_quality,
+        "partial_reason": run.partial_reason,
+        "orders_availability": run.orders_availability,
+        "orders_count": run.orders_count,
+        "datasets_available": sum(
+            availability == "available" for availability in run.dataset_results.values()
+        ),
+        "datasets_unavailable": sum(
+            availability == "unavailable" for availability in run.dataset_results.values()
+        ),
+        "datasets_error": sum(
+            availability == "error" for availability in run.dataset_results.values()
+        ),
+    }
+    quality_flags = (run.partial_reason,) if run.partial_reason else ()
+    record_research_event(
+        db,
+        tenant_id=run.tenant_id,
+        event_type="bumpa_sync_completed",
+        source_parts=(run.id,),
+        channel="worker",
+        business_outcome=outcome,
+        quality_flags=quality_flags,
+    )
+    if run.completion_quality == "degraded":
+        record_research_event(
+            db,
+            tenant_id=run.tenant_id,
+            event_type="bumpa_sync_degraded",
+            source_parts=(run.id,),
+            channel="worker",
+            business_outcome=outcome,
+            quality_flags=quality_flags,
+        )
+
+
+def _record_bumpa_sync_failure(
+    db: Session,
+    run: BumpaSyncRun,
+    *,
+    failure_kind: str,
+    retryable: bool,
+) -> None:
+    record_research_event(
+        db,
+        tenant_id=run.tenant_id,
+        event_type="bumpa_sync_failed",
+        source_parts=(run.id,),
+        channel="worker",
+        business_outcome={
+            "status": "failed",
+            "completion_quality": "failed",
+            "failure_kind": failure_kind,
+            "retryable": retryable,
+        },
+        quality_flags=(failure_kind,),
     )
 
 

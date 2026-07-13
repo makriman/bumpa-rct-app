@@ -28,6 +28,7 @@ from app.providers.contracts import MessagingProvider
 from app.providers.local import LocalMessagingProvider
 from app.providers.meta import MAX_TEXT_LENGTH, MetaProviderError, MetaWhatsAppClient
 from app.services.chat import handle_chat
+from app.services.research_events import record_research_event
 
 
 def process_inbox_event(db: Session, event_id: str, settings: Settings) -> dict[str, Any]:
@@ -67,6 +68,23 @@ def extract_delivery_status(payload: dict[str, Any]) -> dict[str, Any] | None:
         return statuses[0] if statuses else None
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def extract_inbound_sender(payload: dict[str, Any]) -> tuple[str, str] | None:
+    """Extract the WABA and receiving phone-number IDs from a Meta message envelope."""
+
+    try:
+        entry = payload["entry"][0]
+        value = entry["changes"][0]["value"]
+        waba_id = entry["id"]
+        phone_number_id = value["metadata"]["phone_number_id"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(waba_id, str) or not isinstance(phone_number_id, str):
+        return None
+    if not waba_id.isdigit() or not phone_number_id.isdigit():
+        return None
+    return waba_id, phone_number_id
 
 
 def split_inbox_events(payload: dict[str, Any]) -> list[tuple[dict[str, Any], str]]:
@@ -152,6 +170,14 @@ def _process_message(
     external_id = str(message.get("id", ""))
     if not external_id:
         raise PermanentJobError("WhatsApp message is missing an external identifier")
+    reply_sender: tuple[str, str] | None = None
+    if settings.whatsapp_backend == "meta":
+        inbound_sender = extract_inbound_sender(event.payload)
+        if inbound_sender not in settings.allowed_meta_inbound_reply_senders:
+            event.processing_status = "ignored"
+            db.commit()
+            return {"status": "rejected_unconfigured_sender"}
+        reply_sender = inbound_sender
     phone = "+" + str(message.get("from", "")).lstrip("+")
     text = str(message.get("text", {}).get("body", "")).strip()
     identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.phone_e164 == phone))
@@ -194,6 +220,15 @@ def _process_message(
         identity.opt_out = True
         inbound.status = "processed"
         event.processing_status = "processed"
+        record_research_event(
+            db,
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            event_type="user_opted_out",
+            source_parts=(external_id,),
+            channel="whatsapp",
+            business_outcome={"status": "completed", "opt_out": True},
+        )
         db.commit()
         return {"status": "opted_out"}
 
@@ -218,6 +253,7 @@ def _process_message(
                 phone=phone,
                 body="This number is not approved for Bumpa Bestie. Ask your store owner to add it.",
                 settings=settings,
+                meta_sender=reply_sender,
             )
         inbound.status = "rejected"
         event.processing_status = "processed"
@@ -228,6 +264,15 @@ def _process_message(
     assert user is not None
     if text.upper() == "START":
         identity.opt_out = False
+        record_research_event(
+            db,
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            event_type="user_opted_in",
+            source_parts=(external_id,),
+            channel="whatsapp",
+            business_outcome={"status": "completed", "opt_out": False},
+        )
         db.commit()
         _deliver_once(
             db,
@@ -238,6 +283,7 @@ def _process_message(
             settings=settings,
             tenant_id=identity.tenant_id,
             user_id=identity.user_id,
+            meta_sender=reply_sender,
         )
         inbound.status = "processed"
         event.processing_status = "processed"
@@ -268,6 +314,7 @@ def _process_message(
             settings=settings,
             tenant_id=tenant.id,
             user_id=user.id,
+            meta_sender=reply_sender,
         )
         inbound.status = "processed"
         event.processing_status = "processed"
@@ -275,6 +322,7 @@ def _process_message(
         return {"status": "rate_limited"}
     existing_agent_message = db.scalar(
         select(AgentMessage).where(
+            AgentMessage.tenant_id == tenant.id,
             AgentMessage.channel == "whatsapp",
             AgentMessage.external_message_id == external_id,
         )
@@ -283,6 +331,7 @@ def _process_message(
         outgoing = db.scalar(
             select(AgentMessage)
             .where(
+                AgentMessage.tenant_id == tenant.id,
                 AgentMessage.conversation_id == existing_agent_message.conversation_id,
                 AgentMessage.direction == "outbound",
                 AgentMessage.created_at >= existing_agent_message.created_at,
@@ -310,6 +359,7 @@ def _process_message(
         settings=settings,
         tenant_id=tenant.id,
         user_id=user.id,
+        meta_sender=reply_sender,
     )
     inbound.status = "processed"
     event.processing_status = "processed"
@@ -327,6 +377,7 @@ def _deliver_text_chunks(
     settings: Settings,
     tenant_id: str | None = None,
     user_id: str | None = None,
+    meta_sender: tuple[str, str] | None = None,
 ) -> list[str]:
     """Deliver a logical reply as deterministic, independently idempotent parts."""
 
@@ -345,6 +396,7 @@ def _deliver_text_chunks(
                 settings=settings,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                meta_sender=meta_sender,
             )
         )
     return message_ids
@@ -382,6 +434,7 @@ def _deliver_once(
     settings: Settings,
     tenant_id: str | None = None,
     user_id: str | None = None,
+    meta_sender: tuple[str, str] | None = None,
 ) -> str:
     key = _idempotency_key(event.id, purpose)
     outbound = db.scalar(select(WhatsappMessage).where(WhatsappMessage.idempotency_key == key))
@@ -398,7 +451,18 @@ def _deliver_once(
             direction="outbound",
             message_type="text",
             text_body=body,
-            payload={"provider": settings.whatsapp_backend, "purpose": purpose},
+            payload={
+                "provider": settings.whatsapp_backend,
+                "purpose": purpose,
+                **(
+                    {
+                        "sender_waba_id": meta_sender[0],
+                        "sender_phone_number_id": meta_sender[1],
+                    }
+                    if meta_sender
+                    else {}
+                ),
+            },
             status="prepared",
         )
         db.add(outbound)
@@ -406,7 +470,10 @@ def _deliver_once(
     outbound.status = "sending"
     db.commit()
     try:
-        provider = _messaging_provider(settings)
+        provider = _messaging_provider(
+            settings,
+            meta_sender=meta_sender,
+        )
         message_id = provider.send_text(phone, body)
     except ValueError as exc:
         # Validation failures are deterministic. Persist the rejected terminal
@@ -441,10 +508,20 @@ def _deliver_once(
     return message_id
 
 
-def _messaging_provider(settings: Settings) -> MessagingProvider:
+def _messaging_provider(
+    settings: Settings,
+    *,
+    meta_sender: tuple[str, str] | None = None,
+) -> MessagingProvider:
     if settings.whatsapp_backend == "mock":
         return LocalMessagingProvider()
     if settings.whatsapp_backend == "meta":
+        if meta_sender:
+            return MetaWhatsAppClient.for_inbound_reply(
+                settings,
+                waba_id=meta_sender[0],
+                phone_number_id=meta_sender[1],
+            )
         return MetaWhatsAppClient.from_settings(settings)
     raise PermanentJobError("WhatsApp delivery is disabled")
 

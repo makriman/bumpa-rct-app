@@ -14,6 +14,66 @@ export type SourcedResponse<T> = {
   source: DataSource;
 };
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly correlationId: string | null;
+  readonly retryable: boolean;
+
+  constructor({
+    status,
+    code,
+    message,
+    correlationId,
+    retryable = false,
+  }: {
+    status: number;
+    code: string;
+    message: string;
+    correlationId: string | null;
+    retryable?: boolean;
+  }) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.correlationId = correlationId;
+    this.retryable = retryable;
+  }
+}
+
+type ErrorPayload = {
+  detail?: string | { code?: string; message?: string; retryable?: boolean };
+  error?: { code?: string; message?: string };
+};
+
+function responseError(
+  response: Response,
+  payload: ErrorPayload | null,
+): ApiError {
+  const structuredDetail =
+    payload?.detail && typeof payload.detail === "object"
+      ? payload.detail
+      : null;
+  const message =
+    structuredDetail?.message ??
+    (typeof payload?.detail === "string" ? payload.detail : null) ??
+    payload?.error?.message ??
+    `Request failed (${response.status})`;
+  return new ApiError({
+    status: response.status,
+    code:
+      structuredDetail?.code ??
+      payload?.error?.code ??
+      `http_${response.status}`,
+    message,
+    correlationId: response.headers.get("X-Correlation-ID"),
+    retryable:
+      structuredDetail?.retryable ??
+      (response.status === 429 || response.status >= 500),
+  });
+}
+
 /** API-ready fetch wrapper. In local demo mode callers supply deterministic fixtures. */
 export async function apiRequest<T>(
   path: string,
@@ -27,10 +87,10 @@ export async function apiRequest<T>(
       headers: { "Content-Type": "application/json", ...init?.headers },
     });
     if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as {
-        detail?: string;
-      } | null;
-      throw new Error(payload?.detail ?? `Request failed (${response.status})`);
+      const payload = (await response
+        .json()
+        .catch(() => null)) as ErrorPayload | null;
+      throw responseError(response, payload);
     }
     if (response.status === 204) return undefined as T;
     return response.json() as Promise<T>;

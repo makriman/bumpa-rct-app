@@ -27,6 +27,7 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 // Authorization and hop-by-hop transport headers) must never cross the BFF.
 const FORWARDED_APPLICATION_HEADERS = [
   "idempotency-key",
+  "if-match",
   "x-tenant-id",
   "x-access-reason",
 ] as const;
@@ -100,8 +101,34 @@ async function proxy(
     )
       ? upstreamCorrelationId
       : correlationId;
-    const response = new NextResponse(await upstream.arrayBuffer(), {
-      status: upstream.status,
+    const upstreamBody = await upstream.arrayBuffer();
+    let responseBody: ArrayBuffer | string = upstreamBody;
+    let responseStatus = upstream.status;
+    let forwardSetCookie = true;
+    if (
+      upstream.ok &&
+      path.length === 2 &&
+      path[0] === "auth" &&
+      path[1] === "verify-otp"
+    ) {
+      try {
+        const payload = JSON.parse(
+          new TextDecoder().decode(upstreamBody),
+        ) as Record<string, unknown> | null;
+        if (payload && typeof payload === "object") {
+          delete payload.access_token;
+          responseBody = JSON.stringify(payload);
+        }
+      } catch {
+        responseBody = JSON.stringify({
+          detail: "Authentication response was invalid",
+        });
+        responseStatus = 502;
+        forwardSetCookie = false;
+      }
+    }
+    const response = new NextResponse(responseBody, {
+      status: responseStatus,
       headers: {
         "content-type":
           upstream.headers.get("content-type") ?? "application/json",
@@ -110,7 +137,8 @@ async function proxy(
       },
     });
     const setCookie = upstream.headers.get("set-cookie");
-    if (setCookie) response.headers.set("set-cookie", setCookie);
+    if (setCookie && forwardSetCookie)
+      response.headers.set("set-cookie", setCookie);
     for (const name of [
       "content-disposition",
       "retry-after",
@@ -118,6 +146,20 @@ async function proxy(
     ]) {
       const value = upstream.headers.get(name);
       if (value) response.headers.set(name, value);
+    }
+    const redirectLocation = upstream.headers.get("location");
+    if (redirectLocation && upstream.status >= 300 && upstream.status < 400) {
+      const redirect = new URL(redirectLocation, request.nextUrl.origin);
+      if (redirect.origin !== request.nextUrl.origin) {
+        return NextResponse.json(
+          { detail: "The API returned an invalid redirect target" },
+          {
+            status: 502,
+            headers: { "x-correlation-id": responseCorrelationId },
+          },
+        );
+      }
+      response.headers.set("location", redirect.toString());
     }
     return response;
   } catch {

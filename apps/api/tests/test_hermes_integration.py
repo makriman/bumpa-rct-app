@@ -16,9 +16,10 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import Settings, get_settings
 from app.core.crypto import FieldCipher
 from app.db.base import Base
-from app.db.models import HermesProfile, Tenant, UsageEvent
+from app.db.models import AuditLog, HermesProfile, SystemError, Tenant, UsageEvent
 from app.db.session import SessionLocal
 from app.main import app
+from app.providers import hermes as hermes_module
 from app.providers.hermes import (
     HermesAuthenticationError,
     HermesCircuitBreaker,
@@ -31,7 +32,10 @@ from app.providers.hermes import (
     HermesReadiness,
     HermesResult,
     HermesUnavailable,
+    activate_reserved_profile,
+    materialize_profile,
     provision_profile,
+    reserve_profile,
 )
 from tests.conftest import auth_headers
 
@@ -244,11 +248,13 @@ def test_profile_provisioning_allocates_unique_ports_and_private_files(tmp_path:
         first_key = FieldCipher(settings.field_encryption_key).decrypt(first.encrypted_api_key)
         second_key = FieldCipher(settings.field_encryption_key).decrypt(second.encrypted_api_key)
         assert first_key != second_key
+        assert stat.S_IMODE(settings.hermes_profile_root.stat().st_mode) == 0o2750
 
         for profile, key in ((first, first_key), (second, second_key)):
             profile_path = Path(profile.profile_path or "")
-            assert stat.S_IMODE(profile_path.stat().st_mode) == 0o700
-            assert stat.S_IMODE((profile_path / ".env").stat().st_mode) == 0o600
+            assert stat.S_IMODE(profile_path.stat().st_mode) == 0o2750
+            assert stat.S_IMODE((profile_path / ".env").stat().st_mode) == 0o640
+            assert stat.S_IMODE((profile_path / "skills").stat().st_mode) == 0o750
             env_text = (profile_path / ".env").read_text()
             assert f"API_SERVER_PORT={profile.api_port}" in env_text
             assert f"API_SERVER_KEY={key}" in env_text
@@ -256,6 +262,125 @@ def test_profile_provisioning_allocates_unique_ports_and_private_files(tmp_path:
             config_text = (profile_path / "config.yaml").read_text()
             assert "disabled_toolsets" in config_text
             assert "hard_stop_enabled: true" in config_text
+
+
+def test_profile_reservation_is_db_first_and_materialization_is_retry_safe(tmp_path: Path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    settings = _settings(tmp_path)
+
+    with factory() as db:
+        tenant = Tenant(slug="db-first", name="DB First", status="provisioning")
+        db.add(tenant)
+        db.commit()
+
+        profile = reserve_profile(db, tenant, settings)
+        profile_path = Path(profile.profile_path or "")
+        assert profile_path.exists() is False
+        db.rollback()
+        assert profile_path.exists() is False
+        assert db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant.id)) is None
+
+        profile = reserve_profile(db, tenant, settings)
+        db.commit()
+        assert profile_path.exists() is False
+        created = materialize_profile(profile, tenant, settings)
+        original_env = (created / ".env").read_bytes()
+        assert materialize_profile(profile, tenant, settings) == created
+        assert (created / ".env").read_bytes() == original_env
+
+        (created / "SOUL.md").write_text("conflicting policy", encoding="utf-8")
+        with pytest.raises(HermesProfileError, match="conflicts with its reservation"):
+            materialize_profile(profile, tenant, settings)
+
+
+def test_reserved_profile_activation_is_idempotent_and_sets_active_only_after_control(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    settings = _settings(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    class Control:
+        def activate(self, *, profile_name: str, api_key: str) -> object:
+            calls.append((profile_name, api_key))
+            if len(calls) == 1:
+                raise HermesUnavailable("synthetic unavailable")
+            return object()
+
+    with factory() as db:
+        tenant = Tenant(slug="activation-retry", name="Activation Retry", status="provisioning")
+        db.add(tenant)
+        db.commit()
+        profile = reserve_profile(db, tenant, settings)
+        db.commit()
+
+        with pytest.raises(HermesUnavailable):
+            activate_reserved_profile(profile, tenant, settings, control=Control())
+        assert profile.status == "provisioning"
+        assert Path(profile.profile_path or "").is_dir()
+
+        activated = activate_reserved_profile(profile, tenant, settings, control=Control())
+        assert activated.status == "active"
+        assert calls[1] == calls[0]
+
+
+def test_committed_reservation_self_heals_after_materialization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    settings = _settings(tmp_path)
+    original_write = hermes_module._write_profile_directory
+    attempts = 0
+
+    def fail_once(target: Path, profile_name: str, files: dict[str, str]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("synthetic materialization failure")
+        original_write(target, profile_name, files)
+
+    with factory() as db:
+        tenant = Tenant(slug="materialize-retry", name="Materialize Retry", status="provisioning")
+        db.add(tenant)
+        db.commit()
+        profile = reserve_profile(db, tenant, settings)
+        db.commit()
+        profile_id = profile.id
+        path = Path(profile.profile_path or "")
+
+        monkeypatch.setattr(hermes_module, "_write_profile_directory", fail_once)
+        with pytest.raises(HermesProfileError, match="staging failed"):
+            materialize_profile(profile, tenant, settings)
+        assert path.exists() is False
+        assert db.get(HermesProfile, profile_id) is not None
+
+        assert materialize_profile(profile, tenant, settings) == path
+        assert path.is_dir()
+
+
+def test_profile_reservation_rejects_a_symlinked_staging_root(tmp_path: Path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+    settings = _settings(linked)
+
+    with factory() as db:
+        tenant = Tenant(slug="root-symlink", name="Root Symlink", status="provisioning")
+        db.add(tenant)
+        db.flush()
+        with pytest.raises(HermesProfileError, match="must not be a symlink"):
+            reserve_profile(db, tenant, settings)
 
 
 def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
@@ -267,6 +392,14 @@ def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
     phone = "+23487" + suffix.translate(str.maketrans("abcdef", "123456"))[:8]
     configured = _settings(tmp_path)
     captured: dict[str, str] = {}
+
+    class FakeControlClient:
+        def __init__(self, supplied: Settings) -> None:
+            assert supplied is configured
+
+        def activate(self, *, profile_name: str, api_key: str) -> object:
+            captured.update({"activated_profile": profile_name, "activated_key": api_key})
+            return object()
 
     class FakeHermesClient:
         def __init__(self, _settings: Settings) -> None:
@@ -294,6 +427,7 @@ def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
 
     monkeypatch.setattr("app.services.chat.HermesClient", FakeHermesClient)
     monkeypatch.setattr("app.routes.hermes.HermesClient", FakeHermesClient)
+    monkeypatch.setattr("app.routes.admin.HermesControlClient", FakeControlClient)
     app.dependency_overrides[get_settings] = lambda: configured
     try:
         operator = auth_headers(client, "+2348099990001")
@@ -310,20 +444,32 @@ def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
             json={"name": "Hermes Owner", "phone_e164": phone, "role": "owner"},
         )
         assert created_user.status_code == 201, created_user.text
+        approved_phone = client.post(
+            f"/v1/admin/tenants/{tenant_id}/phones",
+            headers=operator,
+            json={
+                "user_id": created_user.json()["user_id"],
+                "phone_e164": phone,
+                "label": "Hermes owner",
+            },
+        )
+        assert approved_phone.status_code == 201, approved_phone.text
         provisioned = client.post(
             f"/v1/admin/tenants/{tenant_id}/hermes-profile",
             headers=operator,
         )
         assert provisioned.status_code == 200, provisioned.text
-        assert provisioned.json()["status"] == "provisioning"
+        assert provisioned.json()["status"] == "active"
         assert "api_key" not in provisioned.text.lower()
 
         with SessionLocal() as db:
             profile = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant_id))
             assert profile is not None
-            profile.status = "active"
             encrypted_key = profile.encrypted_api_key
-            db.commit()
+            assert profile.status == "active"
+            profile_key = FieldCipher(configured.field_encryption_key).decrypt(encrypted_key)
+            assert captured["activated_profile"] == profile.profile_name
+            assert captured["activated_key"] == profile_key
 
         owner = auth_headers(client, phone, tenant_id)
         response = client.post(
@@ -338,9 +484,7 @@ def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
         assert response.json()["answer"] == "Hermes live answer"
         assert captured["message"] == "My email is [EMAIL]. Show sales."
         assert "API" not in captured["context"].upper()
-        assert captured["api_key"] == FieldCipher(configured.field_encryption_key).decrypt(
-            encrypted_key
-        )
+        assert captured["api_key"] == profile_key
 
         readiness = client.get("/v1/hermes/profile/readiness", headers=owner)
         assert readiness.status_code == 200, readiness.text
@@ -354,6 +498,97 @@ def test_admin_provisions_and_web_chat_uses_redacted_hermes_boundary(
             assert usage is not None
             assert usage.event_metadata["total_tokens"] == 29
             assert usage.event_metadata["provider"] == "hermes"
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_admin_activation_failure_is_safe_and_existing_profile_retries(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suffix = uuid4().hex[:8]
+    configured = _settings(tmp_path)
+    calls: list[tuple[str, str]] = []
+
+    class RecoveringControlClient:
+        def __init__(self, supplied: Settings) -> None:
+            assert supplied is configured
+
+        def activate(self, *, profile_name: str, api_key: str) -> object:
+            calls.append((profile_name, api_key))
+            if len(calls) == 1:
+                raise HermesUnavailable("safe synthetic control failure")
+            return object()
+
+    monkeypatch.setattr("app.routes.admin.HermesControlClient", RecoveringControlClient)
+    app.dependency_overrides[get_settings] = lambda: configured
+    try:
+        operator = auth_headers(client, "+2348099990001")
+        tenant = client.post(
+            "/v1/admin/tenants",
+            headers=operator,
+            json={"slug": f"activate-{suffix}", "name": "Activation Recovery"},
+        )
+        tenant_id = tenant.json()["id"]
+        failed = client.post(
+            f"/v1/admin/tenants/{tenant_id}/hermes-profile",
+            headers=operator,
+        )
+        assert failed.status_code == 503
+        assert failed.json() == {"detail": "Hermes profile could not be activated"}
+        assert calls[0][1] not in failed.text
+
+        with SessionLocal() as db:
+            profile = db.scalar(select(HermesProfile).where(HermesProfile.tenant_id == tenant_id))
+            assert profile is not None and profile.status == "degraded"
+            profile_id = profile.id
+            failed_audit = db.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "hermes.profile.activation_failed",
+                    AuditLog.resource_id == profile_id,
+                )
+            )
+            assert failed_audit is not None
+            assert failed_audit.after == {
+                "status": "degraded",
+                "category": "hermes_unavailable",
+            }
+            error = db.scalar(
+                select(SystemError).where(
+                    SystemError.tenant_id == tenant_id,
+                    SystemError.service == "hermes",
+                )
+            )
+            assert error is not None
+            assert error.error_metadata == {
+                "category": "hermes_unavailable",
+                "profile_id": profile_id,
+            }
+
+        recovered = client.post(
+            f"/v1/admin/tenants/{tenant_id}/hermes-profile",
+            headers=operator,
+        )
+        assert recovered.status_code == 200, recovered.text
+        assert recovered.json()["id"] == profile_id
+        assert recovered.json()["status"] == "active"
+        assert calls[1] == calls[0]
+
+        with SessionLocal() as db:
+            profile = db.get(HermesProfile, profile_id)
+            assert profile is not None and profile.status == "active"
+            activated = db.scalar(
+                select(AuditLog).where(
+                    AuditLog.action == "hermes.profile.activated",
+                    AuditLog.resource_id == profile_id,
+                )
+            )
+            assert activated is not None
+            assert activated.after == {
+                "status": "active",
+                "control_status": "activated",
+            }
     finally:
         app.dependency_overrides.pop(get_settings, None)
 

@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 
 import app.core.config as config_module
 from alembic import command
+from scripts.verify_postgres_rls import _revision_in_lineage
 
 API_ROOT = Path(__file__).parents[1]
 
@@ -23,6 +24,17 @@ def _config(database_url: str, monkeypatch: pytest.MonkeyPatch) -> Config:
     config = Config(str(API_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(API_ROOT / "alembic"))
     return config
+
+
+def test_bumpa_raw_verifier_accepts_forward_migration_ancestry() -> None:
+    assert _revision_in_lineage(
+        "0010_mcp_lifecycle",
+        "0008_bumpa_dataset_failures",
+    )
+    assert not _revision_in_lineage(
+        "0007_legacy_sync_writer",
+        "0008_bumpa_dataset_failures",
+    )
 
 
 def test_bumpa_dataset_failure_migration_preserves_old_writer_and_typed_evidence(

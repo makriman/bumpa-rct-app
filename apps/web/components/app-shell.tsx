@@ -166,7 +166,7 @@ export function AppShell({
   }));
   const demoName =
     surface === "admin"
-      ? "Demo operator"
+      ? "Demo platform admin"
       : surface === "research"
         ? "Demo researcher"
         : "Demo SME owner";
@@ -183,7 +183,7 @@ export function AppShell({
         ? "Researcher · redacted access"
         : `${currentMembership?.role ?? "member"} · current workspace`
     : surface === "admin"
-      ? "Demo preview · operator"
+      ? "Demo preview · administrator"
       : surface === "research"
         ? "Demo preview · researcher"
         : "Demo preview · owner";

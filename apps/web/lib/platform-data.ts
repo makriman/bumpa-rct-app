@@ -49,6 +49,154 @@ export type BumpaStatus = {
   last_error?: string | null;
 };
 
+/**
+ * Authoritative projection for the resumable tenant-provisioning saga. The
+ * browser renders this projection after every command; it never reconstructs
+ * completion from local form state.
+ */
+export type OnboardingStep =
+  | "owner"
+  | "phone"
+  | "bumpa"
+  | "initial_sync"
+  | "hermes"
+  | "review"
+  | "completed";
+
+export type OnboardingStatus =
+  | "in_progress"
+  | "attention_required"
+  | "completed";
+
+export type TenantOnboarding = {
+  id: string;
+  tenant_id: string;
+  status: OnboardingStatus;
+  current_step: OnboardingStep;
+  revision: number;
+  tenant: {
+    id: string;
+    slug: string;
+    name: string;
+    status: string;
+  };
+  owner: {
+    user_id: string;
+    membership_id: string;
+    name: string | null;
+    email_masked: string | null;
+    status: string;
+  } | null;
+  phone: {
+    identity_id: string;
+    label: string | null;
+    phone_masked: string;
+    status: string;
+    opt_out: boolean;
+  } | null;
+  bumpa: {
+    connection_id: string;
+    provider: string;
+    status: string;
+    scope_type: string;
+    scope_id_last4: string;
+  } | null;
+  initial_sync: {
+    attempt: number;
+    requested_from: string;
+    requested_to: string;
+    job_id: string;
+    job_status: string;
+    sync_run_id: string | null;
+    sync_status: string | null;
+    completion_quality: string | null;
+    orders_availability: string | null;
+    orders_count: number | null;
+  } | null;
+  hermes: {
+    profile_id: string;
+    profile_name: string;
+    provider: string;
+    status: string;
+    api_port: number | null;
+  } | null;
+  failure: {
+    code: string;
+    step: OnboardingStep;
+    retryable: boolean;
+    at: string;
+  } | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+export type TenantOperations = {
+  tenant_id: string;
+  people: Array<{
+    membership_id: string;
+    user_id: string;
+    name: string | null;
+    phone_masked: string;
+    role: string;
+    status: string;
+  }>;
+  phones: Array<{
+    id: string;
+    user_id: string;
+    phone_masked: string;
+    label: string | null;
+    status: string;
+    opt_out: boolean;
+  }>;
+  bumpa: {
+    connected: boolean;
+    status: string;
+    scope_type: string | null;
+    scope_id_last4: string | null;
+    provider: string | null;
+    last_successful_sync_at: string | null;
+    last_failed_sync_at: string | null;
+    last_error: string | null;
+  };
+  hermes: {
+    provisioned: boolean;
+    profile_name: string | null;
+    provider: string | null;
+    status: string;
+    api_port: number | null;
+  };
+};
+
+export type WhatsAppDeliveryFailure = {
+  id: string;
+  tenant_id: string | null;
+  message_reference: string;
+  phone_masked: string | null;
+  status: string;
+  provider_error_code: string | null;
+  provider_error_title: string | null;
+  created_at: string;
+};
+
+export type HermesCallError = {
+  id: string;
+  tenant_id: string | null;
+  category: string;
+  retryable: boolean | null;
+  profile_reference: string | null;
+  created_at: string;
+};
+
+export type AdminExport = {
+  export_id: string;
+  filename: string;
+  content_type: "text/csv";
+  content: string;
+  row_count: number;
+  checksum_sha256: string;
+};
+
 export type SyncRun = {
   id: string;
   tenant_id?: string;
@@ -128,11 +276,79 @@ export type AuditEvent = {
 };
 
 export type ResearchOverviewData = {
+  generated_at: string;
   smes_onboarded: number;
+  research_consent_status: Record<string, number>;
   research_events: number;
+  active_smes: {
+    day: number;
+    week: number;
+    month: number;
+  };
+  active_users_by_channel: Record<string, number>;
   messages_by_channel: Record<string, number>;
+  questions_by_category: Record<string, number>;
   questions_by_intent: Record<string, number>;
+  questions_by_business_function: Record<string, number>;
+  questions_by_complexity: Record<string, number>;
+  questions_by_ai_help_type: Record<string, number>;
   bumpa_data_usage: Record<string, number>;
+  hermes_response_latency: {
+    samples: number;
+    average_ms: number | null;
+    p50_ms: number | null;
+    p95_ms: number | null;
+  };
+  bumpa_sync_freshness: {
+    connected_smes: number;
+    fresh_24h: number;
+    stale_24_to_72h: number;
+    overdue_72h: number;
+    never_synced: number;
+    latest_sync_at: string | null;
+    oldest_sync_at: string | null;
+  };
+  report_generation: {
+    total: number;
+    by_status: Record<string, number>;
+    by_type: Record<string, number>;
+  };
+  exports: {
+    total: number;
+    by_format: Record<string, number>;
+  };
+  retention_by_cohort: Array<{
+    cohort: string;
+    smes: number;
+    eligible_7d: number;
+    retained_7d: number;
+    retention_7d_pct: number | null;
+    eligible_30d: number;
+    retained_30d: number;
+    retention_30d_pct: number | null;
+  }>;
+  repeat_usage: {
+    smes_observed: number;
+    repeat_smes: number;
+    repeat_rate_pct: number | null;
+    by_sme: Array<{
+      tenant_pseudonym: string;
+      event_count: number;
+      active_days: number;
+      first_seen_at: string;
+      last_seen_at: string;
+    }>;
+  };
+  top_recurring_problems: ResearchRankedItem[];
+  most_common_sales_questions: ResearchRankedItem[];
+  most_common_inventory_questions: ResearchRankedItem[];
+  most_common_customer_questions: ResearchRankedItem[];
+  most_common_advice_requests: ResearchRankedItem[];
+};
+
+export type ResearchRankedItem = {
+  label: string;
+  count: number;
 };
 
 export type ResearchEvent = {
@@ -140,6 +356,7 @@ export type ResearchEvent = {
   tenant_pseudonym: string;
   channel: string;
   event_type: string;
+  raw_text_present: boolean;
   redacted_text: string | null;
   primary_intent: string | null;
   business_function: string | null;
@@ -182,6 +399,7 @@ export type Taxonomy = {
 export type Report = {
   id: string;
   report_type: string;
+  artifact_kind?: "report" | "export";
   status: string;
   title: string | null;
   summary: string | null;
@@ -196,12 +414,31 @@ export type McpConnection = {
   scopes: string[];
   read_only: boolean;
   admin_approved: boolean;
+  oauth_available: boolean;
+  permissions: Record<string, McpToolPermission>;
+};
+
+export type McpToolPermission = "deny" | "read" | "write_with_confirmation";
+
+export type McpRegistryTool = {
+  name: string;
+  label: string;
+  kind: "read" | "write";
 };
 
 export type McpRegistryItem = {
   provider: string;
   name: string;
   enabled: boolean;
+  default_mode: "read_only";
+  tools: McpRegistryTool[];
+};
+
+export type McpAdminConnection = McpConnection & {
+  tenant_id: string;
+  tenant_name: string;
+  created_by: string | null;
+  created_at: string;
 };
 
 export function titleCase(value: string | null | undefined): string {

@@ -222,13 +222,37 @@ def test_research_conversations_group_redacted_events_behind_pseudonymous_ids(
                 .order_by(ResearchEvent.created_at)
             ).all()
         )
-        assert len(events) == 2
+        assert len(events) == 8
+        assert {
+            event_type: sum(event.event_type == event_type for event in events)
+            for event_type in {
+                "user_message_received",
+                "bumpa_context_built",
+                "research_classification_completed",
+                "assistant_response_sent",
+            }
+        } == {
+            "user_message_received": 2,
+            "bumpa_context_built": 2,
+            "research_classification_completed": 2,
+            "assistant_response_sent": 2,
+        }
+        assert all(
+            event.raw_text_present
+            == (event.event_type in {"user_message_received", "assistant_response_sent"})
+            for event in events
+        )
         tenant_id = events[0].tenant_id
         user_id = events[0].user_id
         assert tenant_id is not None and user_id is not None
         event_ids = [event.id for event in events]
-        previous_text = events[0].redacted_text
-        events[0].redacted_text = RAW_PII
+        latest_redacted_text = events[-1].redacted_text
+        poisoned_event = next(
+            event for event in events if event.redacted_text == first.json()["answer"]
+        )
+        poisoned_event_id = poisoned_event.id
+        previous_text = poisoned_event.redacted_text
+        poisoned_event.redacted_text = RAW_PII
         db.commit()
 
     settings = get_settings()
@@ -247,8 +271,8 @@ def test_research_conversations_group_redacted_events_behind_pseudonymous_ids(
         summary = next(row for row in listed.json() if row["id"] == expected_conversation)
         assert summary["tenant_pseudonym"] == expected_tenant
         assert summary["participant_pseudonyms"] == [expected_user]
-        assert summary["event_count"] == 2
-        assert summary["latest_redacted_text"] == "What should I restock next?"
+        assert summary["event_count"] == 8
+        assert summary["latest_redacted_text"] == latest_redacted_text
 
         detail = client.get(
             f"/v1/research/conversations/{expected_conversation}", headers=researcher
@@ -256,8 +280,8 @@ def test_research_conversations_group_redacted_events_behind_pseudonymous_ids(
         assert detail.status_code == 200, detail.text
         payload = detail.json()
         assert payload["id"] == expected_conversation
-        assert len(payload["events"]) == 2
-        assert payload["events"][0]["redacted_text"] != RAW_PII
+        assert len(payload["events"]) == 8
+        assert all(event["redacted_text"] != RAW_PII for event in payload["events"])
         serialized = str(payload)
         for sensitive in (
             conversation_id,
@@ -295,7 +319,7 @@ def test_research_conversations_group_redacted_events_behind_pseudonymous_ids(
             tenant = db.get(Tenant, tenant_id)
             if tenant is not None:
                 tenant.research_consent_status = "granted"
-            event = db.get(ResearchEvent, event_ids[0])
+            event = db.get(ResearchEvent, poisoned_event_id)
             if event is not None:
                 event.redacted_text = previous_text
             db.commit()

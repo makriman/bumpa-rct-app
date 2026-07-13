@@ -59,6 +59,16 @@ through connectors and compromised dependencies/images.
   allowlisted base URLs. MCP never accepts arbitrary production URLs.
 - Tool execution reconstructs tenant scope server-side; model-provided tenant IDs,
   URLs, credentials and authorization claims are ignored.
+- MCP providers, OAuth endpoints, scopes and tools come from a fixed server-side
+  registry. Connections require a tenant-admin request plus platform-operator
+  approval before OAuth can start. OAuth state is authenticated, encrypted,
+  short-lived and identity-bound; returned tokens are response-bounded and
+  encrypted at rest.
+- MCP read tools are allowlisted individually. Write tools require an approved
+  non-read-only connection, an explicit permission record and fresh user
+  confirmation for every invocation. Revocation immediately deletes local access
+  and attempts a fixed-origin upstream token revocation without blocking local
+  safety when the provider is unavailable.
 - Secrets and raw PII never enter prompts or tool telemetry.
 
 ### Secrets
@@ -83,9 +93,9 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Publish run 29205487124 completed
+and SBOM, then scans each exact registry digest. Publish run 29247014725 completed
 that gate for all six application/infrastructure images deployed at release
-`41935d67696fee45b184a65c0a9bf39e0708ae89`; Redis remains pinned to its
+`8f290509668de15eaf3621e3213f4276f85a0a83`; Redis remains pinned to its
 reviewed upstream digest.
 
 ## Research governance

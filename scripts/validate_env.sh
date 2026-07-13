@@ -191,6 +191,134 @@ if [[ "$expected_environment" == "production" ]]; then
     echo "BUMPA_BACKEND must be disabled or bumpa in production" >&2
     failed=1
   }
+  meta_test_sender_mode="$(value_for META_TEST_SENDER_VERIFICATION_MODE)"
+  if [[ ! "$meta_test_sender_mode" =~ ^(disabled|inbound_replies_only)$ ]]; then
+    echo "META_TEST_SENDER_VERIFICATION_MODE must be disabled or inbound_replies_only" >&2
+    failed=1
+  elif [[ "$meta_test_sender_mode" == "inbound_replies_only" ]]; then
+    test_waba_id="$(value_for META_TEST_SENDER_WABA_ID)"
+    test_phone_number_id="$(value_for META_TEST_SENDER_PHONE_NUMBER_ID)"
+    test_display_phone="$(value_for META_TEST_SENDER_DISPLAY_PHONE_E164)"
+    if [[ "$whatsapp_backend" != "meta" ]]; then
+      echo "Meta test-sender verification requires WHATSAPP_BACKEND=meta" >&2
+      failed=1
+    fi
+    if [[ ! "$test_waba_id" =~ ^[0-9]{5,64}$ ]]; then
+      echo "META_TEST_SENDER_WABA_ID must be numeric" >&2
+      failed=1
+    fi
+    if [[ ! "$test_phone_number_id" =~ ^[0-9]{5,64}$ ]]; then
+      echo "META_TEST_SENDER_PHONE_NUMBER_ID must be numeric" >&2
+      failed=1
+    fi
+    if [[ ! "$test_display_phone" =~ ^\+[1-9][0-9]{7,14}$ ]]; then
+      echo "META_TEST_SENDER_DISPLAY_PHONE_E164 must be valid E.164" >&2
+      failed=1
+    fi
+    if [[ "$test_phone_number_id" == "$(value_for META_PHONE_NUMBER_ID)" ]]; then
+      echo "Meta test sender phone-number ID must differ from production" >&2
+      failed=1
+    fi
+  fi
+  proactive_enabled="$(value_for PROACTIVE_INSIGHTS_ENABLED)"
+  daily_insights_enabled="$(value_for DAILY_INSIGHTS_ENABLED)"
+  weekly_insights_enabled="$(value_for WEEKLY_INSIGHTS_ENABLED)"
+  for value in "$proactive_enabled" "$daily_insights_enabled" "$weekly_insights_enabled"; do
+    if [[ ! "$value" =~ ^(true|false)$ ]]; then
+      echo "Proactive insight feature flags must be true or false" >&2
+      failed=1
+    fi
+  done
+  if [[ "$proactive_enabled" != "true" \
+    && ("$daily_insights_enabled" == "true" || "$weekly_insights_enabled" == "true") ]]; then
+    echo "Insight cadences cannot be enabled while proactive insights are disabled" >&2
+    failed=1
+  fi
+  if [[ "$proactive_enabled" == "true" ]]; then
+    if [[ "$whatsapp_backend" != "meta" ]]; then
+      echo "Proactive insights require WHATSAPP_BACKEND=meta" >&2
+      failed=1
+    fi
+    if [[ "$daily_insights_enabled" != "true" && "$weekly_insights_enabled" != "true" ]]; then
+      echo "Proactive insights require at least one enabled cadence" >&2
+      failed=1
+    fi
+    for key in META_DAILY_INSIGHT_TEMPLATE_NAME META_WEEKLY_INSIGHT_TEMPLATE_NAME; do
+      if [[ ! "$(value_for "$key")" =~ ^[a-z0-9_]{1,512}$ ]]; then
+        echo "$key is invalid" >&2
+        failed=1
+      fi
+    done
+  fi
+  ops_alerts_enabled="$(value_for OPS_ALERTS_ENABLED)"
+  if [[ ! "$ops_alerts_enabled" =~ ^(true|false)$ ]]; then
+    echo "OPS_ALERTS_ENABLED must be true or false" >&2
+    failed=1
+  elif [[ "$ops_alerts_enabled" == "true" ]]; then
+    alert_url="$(value_for OPS_ALERT_WEBHOOK_URL)"
+    alert_secret_file="$(value_for OPS_ALERT_HMAC_SECRET_FILE_HOST)"
+    if [[ ! "$alert_url" =~ ^https://[^/@:]+([:][0-9]+)?/.+$ \
+      || "$alert_url" == *\?* || "$alert_url" == *\#* ]]; then
+      echo "OPS_ALERT_WEBHOOK_URL must be an uncredentialed HTTPS URL without query or fragment" >&2
+      failed=1
+    fi
+    if [[ "$alert_secret_file" != /* || "$alert_secret_file" == "/dev/null" \
+      || ! -f "$alert_secret_file" || -L "$alert_secret_file" ]]; then
+      echo "OPS_ALERT_HMAC_SECRET_FILE_HOST must be an absolute regular non-symlink file" >&2
+      failed=1
+    elif [[ ! "$(stat -c %a "$alert_secret_file")" =~ ^(400|600)$ ]]; then
+      echo "OPS_ALERT_HMAC_SECRET_FILE_HOST must have mode 0400 or 0600" >&2
+      failed=1
+    fi
+  fi
+  google_oauth_enabled="$(value_for MCP_GOOGLE_OAUTH_ENABLED)"
+  meta_ads_oauth_enabled="$(value_for MCP_META_ADS_OAUTH_ENABLED)"
+  for enabled_key in MCP_GOOGLE_OAUTH_ENABLED MCP_META_ADS_OAUTH_ENABLED; do
+    if [[ ! "$(value_for "$enabled_key")" =~ ^(true|false)$ ]]; then
+      echo "$enabled_key must be true or false" >&2
+      failed=1
+    fi
+  done
+  if [[ "$google_oauth_enabled" == "true" ]]; then
+    google_client_id="$(value_for GOOGLE_OAUTH_CLIENT_ID)"
+    google_secret_host="$(value_for GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST)"
+    if [[ -z "$google_client_id" || "$google_client_id" =~ [[:space:]] ]]; then
+      echo "GOOGLE_OAUTH_CLIENT_ID is required and must not contain whitespace" >&2
+      failed=1
+    fi
+    if [[ -n "$(value_for GOOGLE_OAUTH_CLIENT_SECRET)" ]]; then
+      echo "Google OAuth client secret must use the host secret file" >&2
+      failed=1
+    fi
+    if [[ "$google_secret_host" != /* || "$google_secret_host" == "/dev/null" \
+      || ! -f "$google_secret_host" || -L "$google_secret_host" ]]; then
+      echo "GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST must be an absolute regular non-symlink file" >&2
+      failed=1
+    elif [[ ! "$(stat -c %a "$google_secret_host")" =~ ^(400|600)$ ]]; then
+      echo "GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST must have mode 0400 or 0600" >&2
+      failed=1
+    fi
+  fi
+  if [[ "$meta_ads_oauth_enabled" == "true" ]]; then
+    meta_ads_client_id="$(value_for META_ADS_OAUTH_CLIENT_ID)"
+    meta_ads_secret_host="$(value_for META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST)"
+    if [[ ! "$meta_ads_client_id" =~ ^[0-9]{5,64}$ ]]; then
+      echo "META_ADS_OAUTH_CLIENT_ID must be a numeric app ID" >&2
+      failed=1
+    fi
+    if [[ -n "$(value_for META_ADS_OAUTH_CLIENT_SECRET)" ]]; then
+      echo "Meta Ads OAuth client secret must use the host secret file" >&2
+      failed=1
+    fi
+    if [[ "$meta_ads_secret_host" != /* || "$meta_ads_secret_host" == "/dev/null" \
+      || ! -f "$meta_ads_secret_host" || -L "$meta_ads_secret_host" ]]; then
+      echo "META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST must be an absolute regular non-symlink file" >&2
+      failed=1
+    elif [[ ! "$(stat -c %a "$meta_ads_secret_host")" =~ ^(400|600)$ ]]; then
+      echo "META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST must have mode 0400 or 0600" >&2
+      failed=1
+    fi
+  fi
   if [[ "$whatsapp_backend" == "meta" ]]; then
     for key in META_APP_ID META_BUSINESS_ID META_WABA_ID META_PHONE_NUMBER_ID META_PHONE_NUMBER; do
       if [[ -z "$(value_for "$key")" ]]; then
@@ -219,10 +347,21 @@ if [[ "$expected_environment" == "production" ]]; then
     fi
     hermes_port_start="$(value_for HERMES_PROFILE_PORT_START)"
     hermes_port_end="$(value_for HERMES_PROFILE_PORT_END)"
+    hermes_control_port="$(value_for HERMES_CONTROL_PORT)"
     if [[ ! "$hermes_port_start" =~ ^[0-9]+$ || ! "$hermes_port_end" =~ ^[0-9]+$ ]] \
       || ((10#${hermes_port_start:-0} < 1024 || 10#${hermes_port_end:-0} > 65535 \
         || 10#${hermes_port_start:-0} > 10#${hermes_port_end:-0})); then
       echo "Hermes profile ports must form an ascending range within 1024-65535" >&2
+      failed=1
+    fi
+    if [[ ! "$hermes_control_port" =~ ^[0-9]+$ ]] \
+      || ((10#${hermes_control_port:-0} < 1024 || 10#${hermes_control_port:-0} > 65535)); then
+      echo "HERMES_CONTROL_PORT must be within 1024-65535" >&2
+      failed=1
+    elif [[ "$hermes_port_start" =~ ^[0-9]+$ && "$hermes_port_end" =~ ^[0-9]+$ ]] \
+      && ((10#$hermes_control_port >= 10#$hermes_port_start \
+        && 10#$hermes_control_port <= 10#$hermes_port_end)); then
+      echo "HERMES_CONTROL_PORT must be outside the profile port range" >&2
       failed=1
     fi
   fi

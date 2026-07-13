@@ -13,6 +13,18 @@ services:
     volumes:
       - runtime_app_secrets:/runtime-secrets
       - ./scripts/init_runtime_secrets.sh:/usr/local/bin/init-runtime-secrets:ro
+      - type: bind
+        source: ${OPS_ALERT_HMAC_SECRET_FILE_HOST:-/dev/null}
+        target: /run/optional-secrets/ops_alert_hmac_secret
+        read_only: true
+      - type: bind
+        source: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST:-/dev/null}
+        target: /run/optional-secrets/google_oauth_client_secret
+        read_only: true
+      - type: bind
+        source: ${META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST:-/dev/null}
+        target: /run/optional-secrets/meta_ads_oauth_client_secret
+        read_only: true
     secrets:
       - meta_app_secret
       - meta_system_user_access_token
@@ -67,6 +79,8 @@ services:
   api:
     image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
+    group_add:
+      - "10000"
     environment:
       APP_ENV: production
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
@@ -86,6 +100,12 @@ services:
       META_SYSTEM_USER_ACCESS_TOKEN_FILE: /run/runtime-secrets/meta_system_user_access_token
       META_WEBHOOK_VERIFY_TOKEN: ""
       META_WEBHOOK_VERIFY_TOKEN_FILE: /run/runtime-secrets/meta_webhook_verify_token
+      OPS_ALERT_HMAC_SECRET: ""
+      OPS_ALERT_HMAC_SECRET_FILE: /run/runtime-secrets/ops_alert_hmac_secret
+      GOOGLE_OAUTH_CLIENT_SECRET: ""
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
+      META_ADS_OAUTH_CLIENT_SECRET: ""
+      META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
       HERMES_PROFILE_ROOT: /data/hermes/profiles
     read_only: true
     tmpfs:
@@ -131,6 +151,12 @@ services:
       META_SYSTEM_USER_ACCESS_TOKEN_FILE: /run/runtime-secrets/meta_system_user_access_token
       META_WEBHOOK_VERIFY_TOKEN: ""
       META_WEBHOOK_VERIFY_TOKEN_FILE: /run/runtime-secrets/meta_webhook_verify_token
+      OPS_ALERT_HMAC_SECRET: ""
+      OPS_ALERT_HMAC_SECRET_FILE: /run/runtime-secrets/ops_alert_hmac_secret
+      GOOGLE_OAUTH_CLIENT_SECRET: ""
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
+      META_ADS_OAUTH_CLIENT_SECRET: ""
+      META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
@@ -160,13 +186,30 @@ services:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
       ASYNC_RUNTIME_ENABLED: "true"
-      WHATSAPP_BACKEND: disabled
+      WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:?Set WHATSAPP_BACKEND}
       BUMPA_BACKEND: disabled
       AGENT_BACKEND: disabled
+      META_APP_SECRET: ""
+      META_APP_SECRET_FILE: /run/runtime-secrets/meta_app_secret
+      META_SYSTEM_USER_ACCESS_TOKEN: ""
+      META_SYSTEM_USER_ACCESS_TOKEN_FILE: /run/runtime-secrets/meta_system_user_access_token
+      META_WEBHOOK_VERIFY_TOKEN: ""
+      META_WEBHOOK_VERIFY_TOKEN_FILE: /run/runtime-secrets/meta_webhook_verify_token
+      OPS_ALERT_HMAC_SECRET: ""
+      OPS_ALERT_HMAC_SECRET_FILE: /run/runtime-secrets/ops_alert_hmac_secret
+      GOOGLE_OAUTH_CLIENT_SECRET: ""
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
+      META_ADS_OAUTH_CLIENT_SECRET: ""
+      META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
+    depends_on:
+      app-secrets-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime_app_secrets:/run/runtime-secrets:ro
     deploy:
       resources:
         limits:
@@ -191,8 +234,12 @@ services:
     environment:
       ANTHROPIC_API_KEY_FILE: /run/secrets/hermes_anthropic_api_key
       HERMES_DASHBOARD: "0"
+      HERMES_CONTROL_PORT: ${HERMES_CONTROL_PORT:-8699}
+      HERMES_PROFILE_ROOT: /opt/data/profiles
+      HERMES_STAGING_ROOT: /staged/profiles
     volumes:
       - hermes_data:/opt/data
+      - hermes_staging_data:/staged:ro
     secrets:
       - source: hermes_anthropic_api_key
         target: hermes_anthropic_api_key
@@ -211,7 +258,11 @@ services:
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"]
     healthcheck:
-      test: ["CMD-SHELL", "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"]
+      test:
+        [
+          "CMD-SHELL",
+          "/command/s6-svstat /run/service/main-hermes | grep -q '^up' && /command/s6-svstat /run/service/bumpabestie-hermes-control | grep -q '^up' && curl --fail --silent --max-time 3 http://127.0.0.1:$${HERMES_CONTROL_PORT}/health >/dev/null",
+        ]
       interval: 15s
       timeout: 5s
       retries: 8
@@ -254,7 +305,16 @@ services:
     build: !reset null
     user: "0:0"
     entrypoint: ["sh", "-c"]
-    command: ["chown -R 100:101 /staged && chmod 0700 /staged"]
+    command:
+      - |
+        set -eu
+        if find /staged -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
+          echo "Hermes staging contains an unsafe filesystem entry" >&2
+          exit 1
+        fi
+        chown -R 100:10000 /staged
+        find /staged -type d -exec chmod 2750 {} +
+        find /staged -type f -exec chmod 0640 {} +
     volumes:
       - hermes_staging_data:/staged
     network_mode: none

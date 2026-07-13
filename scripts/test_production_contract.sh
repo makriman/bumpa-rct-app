@@ -11,6 +11,7 @@ contract_env="$(mktemp)"
 invalid_env="$(mktemp)"
 duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
+verification_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
 runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
 backup_init_volume="bumpabestie-backup-init-contract-$$"
@@ -19,7 +20,7 @@ offsite_hook="$(mktemp)"
 offsite_marker="$(mktemp)"
 cleanup() {
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
-    "$offsite_env" "$offsite_hook" "$offsite_marker"
+    "$verification_env" "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets"
   docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
   docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
@@ -94,6 +95,10 @@ for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_ve
   printf 'contract-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
   chmod 0600 "$contract_secrets/$secret_name"
 done
+for secret_name in google_oauth_client_secret meta_ads_oauth_client_secret; do
+  printf 'optional-oauth-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
+  chmod 0600 "$contract_secrets/$secret_name"
+done
 
 cat > "$offsite_hook" <<'EOF'
 #!/usr/bin/env bash
@@ -117,6 +122,7 @@ docker run --rm --network none --user 0:0 --read-only \
   --security-opt no-new-privileges:true \
   --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
   --volume "$contract_secrets:/run/secrets:ro" \
+  --volume "$contract_secrets:/run/optional-secrets:ro" \
   --volume "$runtime_secret_volume:/runtime-secrets" \
   --volume "$ROOT_DIR/scripts/init_runtime_secrets.sh:/usr/local/bin/init-runtime-secrets:ro" \
   python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
@@ -126,11 +132,11 @@ docker run --rm --network none --user 100:101 --read-only \
   --volume "$runtime_secret_volume:/run/runtime-secrets:ro" \
   python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df \
   sh -eu -c '
-    for name in meta_app_secret meta_system_user_access_token meta_webhook_verify_token; do
+    for name in meta_app_secret meta_system_user_access_token meta_webhook_verify_token google_oauth_client_secret meta_ads_oauth_client_secret; do
       test -r "/run/runtime-secrets/$name"
       test "$(stat -c %a "/run/runtime-secrets/$name")" = 400
     done
-    test "$(find /run/runtime-secrets -mindepth 1 -maxdepth 1 -type f | wc -l)" = 3
+    test "$(find /run/runtime-secrets -mindepth 1 -maxdepth 1 -type f | wc -l)" = 5
   '
 
 # Reproduce the ownership left by the former image entrypoint, then verify the
@@ -270,6 +276,9 @@ if ! jq --exit-status '
   (.services.api.command | index("--no-access-log") != null) and
   .services.worker.environment.ASYNC_RUNTIME_ENABLED == "true" and
   .services.scheduler.environment.ASYNC_RUNTIME_ENABLED == "true" and
+  .services.worker.environment.PROACTIVE_INSIGHTS_ENABLED == "false" and
+  .services.scheduler.environment.DAILY_INSIGHTS_ENABLED == "false" and
+  .services.worker.environment.OPS_ALERTS_ENABLED == "false" and
   .services.worker.healthcheck.test == ["CMD", "python", "-m", "app.jobs.health", "worker"] and
   .services.scheduler.healthcheck.test == ["CMD", "python", "-m", "app.jobs.health", "scheduler"] and
   .services.worker.cap_drop == ["ALL"] and .services.scheduler.cap_drop == ["ALL"] and
@@ -296,6 +305,13 @@ if ! jq --exit-status '
   .services.hermes.stop_grace_period == "1m0s" and
   (.services.hermes.ports == null) and (.services.hermes.networks | keys == ["app", "egress"]) and
   .services.hermes.environment.ANTHROPIC_API_KEY_FILE == "/run/secrets/hermes_anthropic_api_key" and
+  .services.hermes.environment.HERMES_CONTROL_PORT == "8699" and
+  .services.hermes.environment.HERMES_PROFILE_ROOT == "/opt/data/profiles" and
+  .services.hermes.environment.HERMES_STAGING_ROOT == "/staged/profiles" and
+  .services.api.environment.HERMES_CONTROL_PORT == "8699" and
+  .services.api.group_add == ["10000"] and
+  (.services.hermes.healthcheck.test[1] | contains("bumpabestie-hermes-control")) and
+  (.services.hermes.healthcheck.test[1] | contains("HERMES_CONTROL_PORT")) and
   (.services.hermes.environment | has("ANTHROPIC_API_KEY") | not) and
   (.services.hermes.secrets | length == 1) and
   .services.hermes.secrets[0].source == "hermes_anthropic_api_key" and
@@ -309,6 +325,10 @@ if ! jq --exit-status '
   (.services["hermes-import"].secrets == null) and
   .services["hermes-staging-init"].image == .services.api.image and
   .services["hermes-staging-init"].network_mode == "none" and
+  (.services["hermes-staging-init"].command[0] | contains("chown -R 100:10000 /staged")) and
+  (.services["hermes-staging-init"].command[0] | contains("chmod 2750")) and
+  (.services["hermes-staging-init"].command[0] | contains("chmod 0640")) and
+  (.services["hermes-staging-init"].command[0] | contains("unsafe filesystem entry")) and
   .services["app-secrets-init"].image == .services.api.image and
   .services["app-secrets-init"].network_mode == "none" and
   .services["app-secrets-init"].read_only == true and
@@ -319,26 +339,39 @@ if ! jq --exit-status '
   .services.api.depends_on["hermes-staging-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
   .services.worker.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
+  .services.scheduler.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
   .services.api.environment.META_APP_SECRET_FILE == "/run/runtime-secrets/meta_app_secret" and
   .services.worker.environment.META_SYSTEM_USER_ACCESS_TOKEN_FILE == "/run/runtime-secrets/meta_system_user_access_token" and
+  .services.worker.environment.OPS_ALERT_HMAC_SECRET_FILE == "/run/runtime-secrets/ops_alert_hmac_secret" and
+  .services.scheduler.environment.OPS_ALERT_HMAC_SECRET_FILE == "/run/runtime-secrets/ops_alert_hmac_secret" and
+  .services.api.environment.GOOGLE_OAUTH_CLIENT_SECRET_FILE == "/run/runtime-secrets/google_oauth_client_secret" and
+  .services.worker.environment.META_ADS_OAUTH_CLIENT_SECRET_FILE == "/run/runtime-secrets/meta_ads_oauth_client_secret" and
+  .services.scheduler.environment.GOOGLE_OAUTH_CLIENT_SECRET_FILE == "/run/runtime-secrets/google_oauth_client_secret" and
   (.services.api.secrets == null) and (.services.worker.secrets == null) and
   ([.services.api.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
   ([.services.worker.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services.scheduler.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
   ([.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets" and .read_only != true)] | length == 1) and
   ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .target == "/usr/local/bin/init-runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/ops_alert_hmac_secret" and .read_only == true)] | length == 1) and
+  ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/google_oauth_client_secret" and .read_only == true)] | length == 1) and
+  ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/meta_ads_oauth_client_secret" and .read_only == true)] | length == 1) and
   ([.services.api.volumes[] | select(.target == "/run/runtime-secrets") | .source] == [.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets") | .source]) and
   (.services.scheduler.secrets == null) and (.services.migrate.secrets == null) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-runtime") | .source] == ["hermes_data"]) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-staging") | .source] == ["hermes_staging_data"]) and
+  ([.services.hermes.volumes[] | select(.target == "/staged" and .read_only == true) | .source] == ["hermes_staging_data"]) and
+  ([.services.api.volumes[] | select(.target == "/data/hermes") | .source] == ["hermes_staging_data"]) and
   ([.services.backup.volumes[] | select(.target | startswith("/source/hermes-"))] | length == 2) and
   ([.services[]?.volumes[]? | select(.source == "/var/run/docker.sock")] | length == 0)
 ' <<<"$rendered" >/dev/null; then
   jq '{
-    hermes: (.services.hermes | {image, build, cap_drop, read_only, stop_grace_period, ports, networks, environment, secrets}),
+    hermes: (.services.hermes | {image, build, cap_drop, read_only, stop_grace_period, ports, networks, environment, secrets, volumes}),
     hermes_import: (.services["hermes-import"] | {image, network_mode, networks, read_only, secrets, volumes}),
-    hermes_staging_init: (.services["hermes-staging-init"] | {image, network_mode, networks, read_only}),
+    hermes_staging_init: (.services["hermes-staging-init"] | {image, command, network_mode, networks, read_only}),
     app_secrets_init: (.services["app-secrets-init"] | {image, network_mode, networks, read_only, cap_drop, cap_add, secrets, volumes}),
     api_meta_file: .services.api.environment.META_APP_SECRET_FILE,
+    api_group_add: .services.api.group_add,
     worker_meta_file: .services.worker.environment.META_SYSTEM_USER_ACCESS_TOKEN_FILE,
     api_volumes: .services.api.volumes,
     worker_volumes: .services.worker.volumes,
@@ -388,6 +421,16 @@ grep -Fq 'for service in api worker scheduler web hermes caddy postgres redis' s
 grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
 grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh
+grep -Fq 'SMOKE_ORIGIN_ADDRESS=127.0.0.1' scripts/deploy.sh
+grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=180' scripts/deploy.sh
+grep -Fq 'if ! SMOKE_SCHEME=https' scripts/deploy.sh
+grep -Fq 'SMOKE_ORIGIN_ADDRESS=' scripts/deploy.sh
+grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=60' scripts/deploy.sh
+test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 3
+if grep -Fq 'SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh' scripts/deploy.sh; then
+  echo "Deployment bypasses the bounded direct-origin and edge smoke gates" >&2
+  exit 1
+fi
 grep -Fq '"$previous_revision" "$previous_image_tag" "$target_infra_image_tag"' scripts/deploy.sh
 grep -Fq 'Application rollback succeeded and its forward-infrastructure release boundary was persisted.' scripts/deploy.sh
 grep -Fq '/usr/local/sbin/bumpabestie-promote' docs/deployment.md
@@ -592,6 +635,48 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+awk '
+  /^DAILY_INSIGHTS_ENABLED=/ { print "DAILY_INSIGHTS_ENABLED=true"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted an insight cadence without its master gate" >&2
+  exit 1
+fi
+
+awk '
+  /^OPS_ALERTS_ENABLED=/ { print "OPS_ALERTS_ENABLED=true"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted enabled alerts without endpoint credentials" >&2
+  exit 1
+fi
+
+awk '
+  /^MCP_GOOGLE_OAUTH_ENABLED=/ { print "MCP_GOOGLE_OAUTH_ENABLED=true"; next }
+  /^GOOGLE_OAUTH_CLIENT_ID=/ { print "GOOGLE_OAUTH_CLIENT_ID=contract-client.apps.example.test"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted Google OAuth without a private host secret" >&2
+  exit 1
+fi
+
+awk '
+  /^MCP_META_ADS_OAUTH_ENABLED=/ { print "MCP_META_ADS_OAUTH_ENABLED=true"; next }
+  /^META_ADS_OAUTH_CLIENT_ID=/ { print "META_ADS_OAUTH_CLIENT_ID=123456789012345"; next }
+  { print }
+' "$contract_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted Meta Ads OAuth without a private host secret" >&2
+  exit 1
+fi
+
 cp "$contract_env" "$duplicate_env"
 printf '%s\n' 'API_IMAGE=ghcr.io/makriman/bumpabestie-api:latest' >> "$duplicate_env"
 chmod 0600 "$duplicate_env"
@@ -610,6 +695,32 @@ chmod 0600 "$live_env"
 ./scripts/validate_env.sh "$live_env" production >/dev/null
 
 awk '
+  /^META_TEST_SENDER_VERIFICATION_MODE=/ {
+    print "META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only"; next
+  }
+  /^META_TEST_SENDER_WABA_ID=/ { print "META_TEST_SENDER_WABA_ID=567890123456789"; next }
+  /^META_TEST_SENDER_PHONE_NUMBER_ID=/ {
+    print "META_TEST_SENDER_PHONE_NUMBER_ID=678901234567890"; next
+  }
+  /^META_TEST_SENDER_DISPLAY_PHONE_E164=/ {
+    print "META_TEST_SENDER_DISPLAY_PHONE_E164=+15550102030"; next
+  }
+  { print }
+' "$live_env" > "$verification_env"
+chmod 0600 "$verification_env"
+./scripts/validate_env.sh "$verification_env" production >/dev/null
+
+awk '
+  /^META_TEST_SENDER_WABA_ID=/ { print "META_TEST_SENDER_WABA_ID="; next }
+  { print }
+' "$verification_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted an incomplete Meta test-sender mapping" >&2
+  exit 1
+fi
+
+awk '
   /^HERMES_PROFILE_PORT_START=/ { print "HERMES_PROFILE_PORT_START=9000"; next }
   /^HERMES_PROFILE_PORT_END=/ { print "HERMES_PROFILE_PORT_END=8999"; next }
   { print }
@@ -617,6 +728,16 @@ awk '
 chmod 0600 "$invalid_env"
 if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   echo "Production validation accepted an inverted Hermes profile port range" >&2
+  exit 1
+fi
+
+awk '
+  /^HERMES_CONTROL_PORT=/ { print "HERMES_CONTROL_PORT=8700"; next }
+  { print }
+' "$live_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted a Hermes control/profile port collision" >&2
   exit 1
 fi
 

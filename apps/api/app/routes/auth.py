@@ -9,18 +9,28 @@ from app.core.dependencies import Principal, extract_token, get_principal
 from app.core.rate_limit import enforce_auth_rate_limit
 from app.core.security import (
     create_access_token,
+    find_login_eligible_user,
     issue_otp,
     normalize_phone,
+    revoke_other_tokens,
     revoke_token,
     verify_otp,
 )
 from app.core.time import utcnow
 from app.db.models import PlatformRole, TenantMembership
-from app.db.session import get_db
+from app.db.session import get_db, set_security_context
 from app.providers.diagnostics import provider_failure_log_extra
 from app.providers.local import LocalMessagingProvider
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
-from app.schemas import AuthResponse, MessageResponse, OtpRequest, OtpRequested, OtpVerify
+from app.schemas import (
+    AuthResponse,
+    MessageResponse,
+    OtpRequest,
+    OtpRequested,
+    OtpVerify,
+    SessionsRevoked,
+)
+from app.services.audit import audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = logging.getLogger("bumpabestie.providers")
@@ -40,6 +50,14 @@ def request_otp(
         )
     phone_e164 = normalize_phone(payload.phone_e164)
     enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="request", settings=settings)
+    # Eligibility spans tenant-scoped identity/membership rows before a tenant
+    # principal exists. Restrict this privileged context to the bounded auth
+    # transaction, then resolve only the submitted normalized phone.
+    set_security_context(db, privileged=True)
+    if find_login_eligible_user(db, phone_e164) is None:
+        # Preserve the same public response shape without creating a credential
+        # or spending a provider message on an unknown/inactive destination.
+        return OtpRequested(expires_in_seconds=settings.otp_ttl_minutes * 60)
     otp, code = issue_otp(db, phone_e164, settings)
     try:
         if settings.whatsapp_backend == "meta":
@@ -93,6 +111,7 @@ def verify_code(
 ) -> AuthResponse:
     phone_e164 = normalize_phone(payload.phone_e164)
     enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="verify", settings=settings)
+    set_security_context(db, privileged=True)
     user = verify_otp(db, phone_e164, payload.code, settings)
     token, _session = create_access_token(db, user, settings)
     response.set_cookie(
@@ -128,6 +147,34 @@ def logout(
         samesite="lax",
     )
     return MessageResponse(message="Logged out")
+
+
+@router.post("/logout-others", response_model=SessionsRevoked)
+def logout_other_sessions(
+    token: str = Depends(extract_token),
+    principal: Principal = Depends(get_principal),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> SessionsRevoked:
+    revoked = revoke_other_tokens(
+        db,
+        user_id=principal.user.id,
+        current_token=token,
+        settings=settings,
+    )
+    audit(
+        db,
+        actor_user_id=principal.user.id,
+        tenant_id=principal.tenant.id if principal.tenant else None,
+        action="auth.sessions.revoked_others",
+        resource_type="auth_session",
+        after={"revoked_sessions": revoked},
+    )
+    db.commit()
+    return SessionsRevoked(
+        message="Other sessions signed out",
+        revoked_sessions=revoked,
+    )
 
 
 @router.get("/me")

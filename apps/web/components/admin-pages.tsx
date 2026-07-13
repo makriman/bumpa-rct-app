@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import { apiRequest } from "@/lib/api";
 import {
+  type AdminExport,
   durationBetween,
   formatDate,
   maskPhone,
@@ -11,16 +12,21 @@ import {
   type AsyncJob,
   type AsyncJobReplayReason,
   type AuditEvent,
+  type HermesCallError,
   type PlatformAdmin,
   type SyncRun,
   type SystemError,
   type Tenant,
+  type TenantOperations,
   type UsageEvent,
+  type WhatsAppDeliveryFailure,
 } from "@/lib/platform-data";
 import {
   previewAudits,
   previewDeadLetterJobs,
   previewErrors,
+  previewPlatformAdmins,
+  previewPlatformAdminSession,
   previewSyncRuns,
   previewTenants,
   previewUsage,
@@ -471,6 +477,35 @@ export function TenantDetail({ id }: { id: string }) {
     [id],
   );
   const resource = useApiResource<Tenant>(`/admin/tenants/${id}`, demoTenant);
+  const demoOperations = useMemo<TenantOperations>(
+    () => ({
+      tenant_id: id,
+      people: [],
+      phones: [],
+      bumpa: {
+        connected: false,
+        status: "not_connected",
+        scope_type: null,
+        scope_id_last4: null,
+        provider: null,
+        last_successful_sync_at: null,
+        last_failed_sync_at: null,
+        last_error: null,
+      },
+      hermes: {
+        provisioned: false,
+        profile_name: null,
+        provider: null,
+        status: "not_provisioned",
+        api_port: null,
+      },
+    }),
+    [id],
+  );
+  const operations = useApiResource<TenantOperations>(
+    `/admin/tenants/${id}/operations`,
+    demoOperations,
+  );
   const auditResource = useApiResource<AuditEvent[]>(
     "/admin/audit",
     previewAudits,
@@ -479,7 +514,189 @@ export function TenantDetail({ id }: { id: string }) {
   const [toast, setToast] = useState("");
   const [mutationError, setMutationError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [modal, setModal] = useState<
+    "tenant" | "user" | "phone" | "bumpa" | null
+  >(null);
+  const [tenantForm, setTenantForm] = useState({
+    name: "",
+    status: "active",
+    business_category: "",
+    city: "",
+    timezone: "Africa/Lagos",
+  });
+  const [userForm, setUserForm] = useState({
+    name: "",
+    phone_e164: "",
+    email: "",
+    role: "member",
+  });
+  const [phoneForm, setPhoneForm] = useState({
+    user_id: "",
+    phone_e164: "",
+    label: "Team member",
+  });
+  const [bumpaForm, setBumpaForm] = useState({
+    api_key: "",
+    scope_type: "business_id",
+    scope_id: "",
+  });
   const tenant = resource.data;
+
+  const failMutation = (reason: unknown, fallback: string) => {
+    setMutationError(reason instanceof Error ? reason.message : fallback);
+  };
+
+  const triggerSync = async () => {
+    if (!tenant || resource.source !== "live" || syncing) return;
+    if (
+      !window.confirm(
+        `Queue a 30-day Bumpa refresh for ${tenant.name}? This uses provider capacity and is audit logged.`,
+      )
+    )
+      return;
+    const dateTo = new Date();
+    const dateFrom = new Date(dateTo);
+    dateFrom.setUTCDate(dateFrom.getUTCDate() - 29);
+    setSyncing(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${tenant.id}/bumpa/sync`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `admin-${tenant.id}-${Date.now()}`,
+        },
+        body: JSON.stringify({
+          date_from: dateFrom.toISOString().slice(0, 10),
+          date_to: dateTo.toISOString().slice(0, 10),
+          reason: "operator_requested_refresh",
+          confirmation: "trigger_bumpa_sync",
+        }),
+      });
+      setToast("Bumpa refresh queued with an audited operation ID.");
+    } catch (reason) {
+      failMutation(reason, "The Bumpa refresh could not be queued.");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const saveTenant = async () => {
+    if (!tenant || !tenantForm.name.trim()) return;
+    setSaving(true);
+    setMutationError("");
+    try {
+      const updated = await apiRequest<Tenant>(`/admin/tenants/${tenant.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          ...tenantForm,
+          business_category: tenantForm.business_category.trim() || null,
+          city: tenantForm.city.trim() || null,
+        }),
+      });
+      resource.replace(updated);
+      setModal(null);
+      setToast("Tenant details updated and audit logged.");
+    } catch (reason) {
+      failMutation(reason, "The tenant details could not be updated.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addUser = async () => {
+    if (!tenant || !userForm.name.trim() || !userForm.phone_e164.trim()) return;
+    setSaving(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${tenant.id}/users`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...userForm,
+          email: userForm.email.trim() || null,
+        }),
+      });
+      await operations.reload();
+      setModal(null);
+      setUserForm({ name: "", phone_e164: "", email: "", role: "member" });
+      setToast("Tenant member added and recorded in the audit trail.");
+    } catch (reason) {
+      failMutation(reason, "The member could not be added.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const approvePhone = async () => {
+    if (!tenant || !phoneForm.user_id || !phoneForm.phone_e164.trim()) return;
+    setSaving(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${tenant.id}/phones`, {
+        method: "POST",
+        body: JSON.stringify(phoneForm),
+      });
+      await operations.reload();
+      setModal(null);
+      setPhoneForm({ user_id: "", phone_e164: "", label: "Team member" });
+      setToast("WhatsApp number approved for this tenant.");
+    } catch (reason) {
+      failMutation(reason, "The number could not be approved.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveBumpa = async () => {
+    if (!tenant || !bumpaForm.api_key || !bumpaForm.scope_id.trim()) return;
+    setSaving(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${tenant.id}/bumpa`, {
+        method: "POST",
+        body: JSON.stringify({ ...bumpaForm, provider: "bumpa" }),
+      });
+      await operations.reload();
+      setModal(null);
+      setBumpaForm({ api_key: "", scope_type: "business_id", scope_id: "" });
+      setToast(
+        "Bumpa connection verified. The API key is no longer displayed.",
+      );
+    } catch (reason) {
+      setBumpaForm((current) => ({ ...current, api_key: "" }));
+      failMutation(reason, "The Bumpa connection could not be verified.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const restartHermes = async () => {
+    if (!tenant || operations.source !== "live" || restarting) return;
+    if (
+      !window.confirm(
+        `Restart only ${tenant.name}'s Hermes profile? Active requests may briefly retry.`,
+      )
+    )
+      return;
+    setRestarting(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${tenant.id}/hermes-profile/restart`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "operator_health_recovery",
+          confirmation: "restart_hermes_profile",
+        }),
+      });
+      await operations.reload();
+      setToast("Hermes restart accepted by the private control plane.");
+    } catch (reason) {
+      failMutation(reason, "The Hermes profile could not be restarted.");
+    } finally {
+      setRestarting(false);
+    }
+  };
   const suspend = async () => {
     if (!tenant || resource.source !== "live") return;
     if (
@@ -521,10 +738,32 @@ export function TenantDetail({ id }: { id: string }) {
           <>
             <button
               className="button button-secondary"
-              disabled
-              title="No operator-scoped sync endpoint is available."
+              disabled={!tenant || resource.source !== "live" || saving}
+              onClick={() => {
+                if (!tenant) return;
+                setTenantForm({
+                  name: tenant.name,
+                  status: tenant.status,
+                  business_category: tenant.business_category ?? "",
+                  city: tenant.city ?? "",
+                  timezone: tenant.timezone,
+                });
+                setModal("tenant");
+              }}
             >
-              ↻ Trigger sync
+              Edit details
+            </button>
+            <button
+              className="button button-secondary"
+              disabled={
+                !tenant ||
+                resource.source !== "live" ||
+                !operations.data?.bumpa.connected ||
+                syncing
+              }
+              onClick={() => void triggerSync()}
+            >
+              {syncing ? "Queueing…" : "↻ Trigger sync"}
             </button>
             <button
               className="button button-danger"
@@ -636,51 +875,195 @@ export function TenantDetail({ id }: { id: string }) {
                   <span className="detail-label">Research consent</span>
                   <Badge>{titleCase(tenant.research_consent_status)}</Badge>
                 </div>
-                <div
-                  className="alert alert-info"
-                  style={{ marginTop: 16, marginBottom: 0 }}
-                >
-                  Membership, Bumpa, and Hermes readiness require dedicated
-                  operator read endpoints before they can be asserted here.
+                <div className="detail-row">
+                  <span className="detail-label">People</span>
+                  <Badge>{operations.data?.people.length ?? "—"}</Badge>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Bumpa</span>
+                  <Badge>{titleCase(operations.data?.bumpa.status)}</Badge>
+                </div>
+                <div className="detail-row">
+                  <span className="detail-label">Hermes</span>
+                  <Badge>{titleCase(operations.data?.hermes.status)}</Badge>
                 </div>
               </Card>
             </div>
           )}
           {tab === "People & phones" && (
-            <StatePanel
-              type="empty"
-              title="Cross-tenant identity detail is not exposed"
-              description="The operator API can create users and phones, but it does not yet provide a tenant-scoped identity list. No preview identities are shown as live."
-              action={
-                <button className="button button-secondary" disabled>
-                  ＋ Add user unavailable
-                </button>
-              }
-            />
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>People and approved WhatsApp numbers</h2>
+                  <p>
+                    Numbers are masked after approval; roles remain
+                    tenant-scoped.
+                  </p>
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    className="button button-secondary button-small"
+                    disabled={operations.source !== "live"}
+                    onClick={() => setModal("phone")}
+                  >
+                    Approve number
+                  </button>
+                  <button
+                    className="button button-primary button-small"
+                    disabled={operations.source !== "live"}
+                    onClick={() => setModal("user")}
+                  >
+                    ＋ Add person
+                  </button>
+                </div>
+              </div>
+              {operations.status !== "ready" ? (
+                <ResourceState
+                  status={operations.status}
+                  error={operations.error}
+                  onRetry={operations.reload}
+                />
+              ) : operations.data?.people.length ? (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Person</th>
+                        <th>Role</th>
+                        <th>Membership</th>
+                        <th>Approved numbers</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {operations.data.people.map((person) => {
+                        const phones = operations.data?.phones.filter(
+                          (phone) => phone.user_id === person.user_id,
+                        );
+                        return (
+                          <tr key={person.membership_id}>
+                            <td>
+                              <span className="table-primary">
+                                {person.name || "Unnamed member"}
+                              </span>
+                              <div className="table-secondary">
+                                {person.phone_masked}
+                              </div>
+                            </td>
+                            <td>
+                              <Badge>{titleCase(person.role)}</Badge>
+                            </td>
+                            <td>
+                              <Badge>{titleCase(person.status)}</Badge>
+                            </td>
+                            <td>
+                              {phones?.length
+                                ? phones
+                                    .map((phone) => phone.phone_masked)
+                                    .join(", ")
+                                : "None"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="table-secondary">
+                  No tenant members were returned.
+                </p>
+              )}
+            </Card>
           )}
           {tab === "Bumpa" && (
-            <StatePanel
-              type="empty"
-              title="Bumpa status is not exposed to operators"
-              description="Connection credentials can be written during onboarding, but the API has no operator-scoped status endpoint for this tenant."
-              action={
-                <button className="button button-secondary" disabled>
-                  Replace API key unavailable
-                </button>
-              }
-            />
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Bumpa connection</h2>
+                  <p>
+                    Credential values are write-only and never returned here.
+                  </p>
+                </div>
+                <Badge>{titleCase(operations.data?.bumpa.status)}</Badge>
+              </div>
+              {[
+                ["Provider", titleCase(operations.data?.bumpa.provider)],
+                ["Scope", titleCase(operations.data?.bumpa.scope_type)],
+                [
+                  "Scope reference",
+                  operations.data?.bumpa.scope_id_last4
+                    ? `••••${operations.data.bumpa.scope_id_last4}`
+                    : "Not set",
+                ],
+                [
+                  "Last successful sync",
+                  formatDate(operations.data?.bumpa.last_successful_sync_at),
+                ],
+                [
+                  "Last failed sync",
+                  formatDate(operations.data?.bumpa.last_failed_sync_at),
+                ],
+              ].map(([label, value]) => (
+                <div className="detail-row" key={label}>
+                  <span className="detail-label">{label}</span>
+                  <span className="detail-value">{value}</span>
+                </div>
+              ))}
+              <button
+                className="button button-secondary"
+                disabled={operations.source !== "live"}
+                onClick={() => setModal("bumpa")}
+                style={{ marginTop: 16 }}
+              >
+                {operations.data?.bumpa.connected
+                  ? "Replace API key"
+                  : "Connect Bumpa"}
+              </button>
+            </Card>
           )}
           {tab === "Hermes" && (
-            <StatePanel
-              type="empty"
-              title="Hermes status is not exposed to operators"
-              description="A profile can be provisioned, but runtime health and restart endpoints are not available yet."
-              action={
-                <button className="button button-secondary" disabled>
-                  Restart unavailable
-                </button>
-              }
-            />
+            <Card padded>
+              <div className="card-head">
+                <div>
+                  <h2>Hermes profile</h2>
+                  <p>
+                    Lifecycle control is isolated to this authenticated profile.
+                  </p>
+                </div>
+                <Badge>{titleCase(operations.data?.hermes.status)}</Badge>
+              </div>
+              {[
+                [
+                  "Profile",
+                  operations.data?.hermes.profile_name ?? "Not provisioned",
+                ],
+                ["Provider", titleCase(operations.data?.hermes.provider)],
+                [
+                  "Runtime port",
+                  operations.data?.hermes.api_port
+                    ? String(operations.data.hermes.api_port)
+                    : "Not allocated",
+                ],
+              ].map(([label, value]) => (
+                <div className="detail-row" key={label}>
+                  <span className="detail-label">{label}</span>
+                  <span className="detail-value">{value}</span>
+                </div>
+              ))}
+              <button
+                className="button button-danger"
+                disabled={
+                  operations.source !== "live" ||
+                  !operations.data?.hermes.provisioned ||
+                  operations.data.hermes.provider !== "hermes" ||
+                  restarting
+                }
+                onClick={() => void restartHermes()}
+                style={{ marginTop: 16 }}
+              >
+                {restarting ? "Restarting…" : "Restart profile"}
+              </button>
+            </Card>
           )}
           {tab === "Audit log" &&
             (auditResource.status !== "ready" ? (
@@ -715,6 +1098,362 @@ export function TenantDetail({ id }: { id: string }) {
             ))}
         </>
       )}
+      {modal === "tenant" && (
+        <Modal
+          title="Edit tenant details"
+          onClose={() => !saving && setModal(null)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={saving}
+                onClick={() => setModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={saving || !tenantForm.name.trim()}
+                onClick={() => void saveTenant()}
+              >
+                {saving ? "Saving…" : "Save changes"}
+              </button>
+            </>
+          }
+        >
+          <div className="field">
+            <label htmlFor="tenant-edit-name">Business name</label>
+            <input
+              id="tenant-edit-name"
+              className="input"
+              value={tenantForm.name}
+              onChange={(event) =>
+                setTenantForm((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-edit-status">Status</label>
+            <select
+              id="tenant-edit-status"
+              className="select"
+              value={tenantForm.status}
+              onChange={(event) =>
+                setTenantForm((current) => ({
+                  ...current,
+                  status: event.target.value,
+                }))
+              }
+            >
+              <option value="active">Active</option>
+              <option value="suspended">Suspended</option>
+              <option value="archived">Archived</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-edit-category">Business category</label>
+            <input
+              id="tenant-edit-category"
+              className="input"
+              value={tenantForm.business_category}
+              onChange={(event) =>
+                setTenantForm((current) => ({
+                  ...current,
+                  business_category: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-edit-city">City</label>
+            <input
+              id="tenant-edit-city"
+              className="input"
+              value={tenantForm.city}
+              onChange={(event) =>
+                setTenantForm((current) => ({
+                  ...current,
+                  city: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-edit-timezone">Timezone</label>
+            <input
+              id="tenant-edit-timezone"
+              className="input"
+              value={tenantForm.timezone}
+              onChange={(event) =>
+                setTenantForm((current) => ({
+                  ...current,
+                  timezone: event.target.value,
+                }))
+              }
+            />
+          </div>
+        </Modal>
+      )}
+      {modal === "user" && (
+        <Modal
+          title="Add tenant member"
+          onClose={() => !saving && setModal(null)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={saving}
+                onClick={() => setModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={
+                  saving || !userForm.name.trim() || !userForm.phone_e164.trim()
+                }
+                onClick={() => void addUser()}
+              >
+                {saving ? "Adding…" : "Add member"}
+              </button>
+            </>
+          }
+        >
+          <div className="field">
+            <label htmlFor="tenant-user-name">Name</label>
+            <input
+              id="tenant-user-name"
+              className="input"
+              autoComplete="name"
+              value={userForm.name}
+              onChange={(event) =>
+                setUserForm((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-user-phone">Phone in E.164 format</label>
+            <input
+              id="tenant-user-phone"
+              className="input"
+              type="tel"
+              autoComplete="tel"
+              placeholder="+2348012345678"
+              value={userForm.phone_e164}
+              onChange={(event) =>
+                setUserForm((current) => ({
+                  ...current,
+                  phone_e164: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-user-email">Email (optional)</label>
+            <input
+              id="tenant-user-email"
+              className="input"
+              type="email"
+              autoComplete="email"
+              value={userForm.email}
+              onChange={(event) =>
+                setUserForm((current) => ({
+                  ...current,
+                  email: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-user-role">Tenant role</label>
+            <select
+              id="tenant-user-role"
+              className="select"
+              value={userForm.role}
+              onChange={(event) =>
+                setUserForm((current) => ({
+                  ...current,
+                  role: event.target.value,
+                }))
+              }
+            >
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+              <option value="owner">Owner</option>
+            </select>
+          </div>
+        </Modal>
+      )}
+      {modal === "phone" && (
+        <Modal
+          title="Approve WhatsApp number"
+          onClose={() => !saving && setModal(null)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={saving}
+                onClick={() => setModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={
+                  saving || !phoneForm.user_id || !phoneForm.phone_e164.trim()
+                }
+                onClick={() => void approvePhone()}
+              >
+                {saving ? "Approving…" : "Approve number"}
+              </button>
+            </>
+          }
+        >
+          <div className="alert alert-info">
+            Approval maps this login and WhatsApp identity to this tenant. The
+            number is masked after saving.
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-phone-user">Tenant member</label>
+            <select
+              id="tenant-phone-user"
+              className="select"
+              value={phoneForm.user_id}
+              onChange={(event) =>
+                setPhoneForm((current) => ({
+                  ...current,
+                  user_id: event.target.value,
+                }))
+              }
+            >
+              <option value="">Select a person</option>
+              {operations.data?.people.map((person) => (
+                <option key={person.user_id} value={person.user_id}>
+                  {person.name || person.phone_masked}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-phone-value">Phone in E.164 format</label>
+            <input
+              id="tenant-phone-value"
+              className="input"
+              type="tel"
+              placeholder="+2348012345678"
+              value={phoneForm.phone_e164}
+              onChange={(event) =>
+                setPhoneForm((current) => ({
+                  ...current,
+                  phone_e164: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-phone-label">Label</label>
+            <input
+              id="tenant-phone-label"
+              className="input"
+              value={phoneForm.label}
+              onChange={(event) =>
+                setPhoneForm((current) => ({
+                  ...current,
+                  label: event.target.value,
+                }))
+              }
+            />
+          </div>
+        </Modal>
+      )}
+      {modal === "bumpa" && (
+        <Modal
+          title={
+            operations.data?.bumpa.connected
+              ? "Replace Bumpa credential"
+              : "Connect Bumpa"
+          }
+          onClose={() => !saving && setModal(null)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={saving}
+                onClick={() => setModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={
+                  saving || !bumpaForm.api_key || !bumpaForm.scope_id.trim()
+                }
+                onClick={() => void saveBumpa()}
+              >
+                {saving ? "Verifying…" : "Verify and save"}
+              </button>
+            </>
+          }
+        >
+          <div className="alert alert-warning">
+            The replacement is verified before activation. It is encrypted at
+            rest and never displayed again.
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-bumpa-key">Bumpa API key</label>
+            <input
+              id="tenant-bumpa-key"
+              className="input"
+              type="password"
+              autoComplete="off"
+              value={bumpaForm.api_key}
+              onChange={(event) =>
+                setBumpaForm((current) => ({
+                  ...current,
+                  api_key: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-bumpa-scope-type">Scope type</label>
+            <select
+              id="tenant-bumpa-scope-type"
+              className="select"
+              value={bumpaForm.scope_type}
+              onChange={(event) =>
+                setBumpaForm((current) => ({
+                  ...current,
+                  scope_type: event.target.value,
+                }))
+              }
+            >
+              <option value="business_id">Business ID</option>
+              <option value="location_id">Location ID</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-bumpa-scope-id">Scope ID</label>
+            <input
+              id="tenant-bumpa-scope-id"
+              className="input"
+              value={bumpaForm.scope_id}
+              onChange={(event) =>
+                setBumpaForm((current) => ({
+                  ...current,
+                  scope_id: event.target.value,
+                }))
+              }
+            />
+          </div>
+        </Modal>
+      )}
       {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
@@ -722,7 +1461,10 @@ export function TenantDetail({ id }: { id: string }) {
 
 export function UserList() {
   const [search, setSearch] = useState("");
-  const admins = useApiResource<PlatformAdmin[]>("/admin/platform-admins");
+  const admins = useApiResource<PlatformAdmin[]>(
+    "/admin/platform-admins",
+    previewPlatformAdmins,
+  );
   const session = useApiResource<{
     user: { id: string };
     platform_roles: string[];
@@ -733,7 +1475,7 @@ export function UserList() {
       status: string;
     }>;
     current_tenant_id: string | null;
-  }>("/auth/me");
+  }>("/auth/me", previewPlatformAdminSession);
   const [addOpen, setAddOpen] = useState(false);
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -969,6 +1711,10 @@ export function UserList() {
                             <span className="admin-protected-label">
                               Superadmin protected
                             </span>
+                          ) : admins.source !== "live" ? (
+                            <span className="admin-protected-label">
+                              Demo preview
+                            </span>
                           ) : (
                             <button
                               className="button button-danger button-small"
@@ -1170,21 +1916,88 @@ export function SyncList() {
   const successCount = (runs.data ?? []).filter(
     (run) => run.status === "success",
   ).length;
+  const [selectedTenant, setSelectedTenant] = useState("");
+  const [syncing, setSyncing] = useState(false);
+  const [mutationError, setMutationError] = useState("");
+  const [toast, setToast] = useState("");
+
+  async function queueSync() {
+    if (!selectedTenant || syncing || tenants.source !== "live") return;
+    const tenant = (tenants.data ?? []).find(
+      (row) => row.id === selectedTenant,
+    );
+    if (
+      !window.confirm(
+        `Queue a 30-day Bumpa refresh for ${tenant?.name ?? "this tenant"}?`,
+      )
+    )
+      return;
+    const dateTo = new Date();
+    const dateFrom = new Date(dateTo);
+    dateFrom.setUTCDate(dateFrom.getUTCDate() - 29);
+    setSyncing(true);
+    setMutationError("");
+    try {
+      await apiRequest(`/admin/tenants/${selectedTenant}/bumpa/sync`, {
+        method: "POST",
+        headers: {
+          "Idempotency-Key": `admin-${selectedTenant}-${Date.now()}`,
+        },
+        body: JSON.stringify({
+          date_from: dateFrom.toISOString().slice(0, 10),
+          date_to: dateTo.toISOString().slice(0, 10),
+          reason: "operator_requested_refresh",
+          confirmation: "trigger_bumpa_sync",
+        }),
+      });
+      await runs.reload();
+      setToast("Bumpa refresh queued and audit logged.");
+    } catch (reason) {
+      setMutationError(
+        reason instanceof Error
+          ? reason.message
+          : "The Bumpa refresh could not be queued.",
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }
   return (
     <AppShell surface="admin" title="Sync runs">
       <PageHeader
         title="Bumpa sync runs"
         description="Monitor freshness and upstream failures from recorded sync runs."
         actions={
-          <button
-            className="button button-primary"
-            disabled
-            title="Choose a tenant after an operator-scoped trigger endpoint is added."
-          >
-            ↻ Trigger sync unavailable
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select
+              className="select"
+              aria-label="Tenant to refresh"
+              value={selectedTenant}
+              onChange={(event) => setSelectedTenant(event.target.value)}
+              disabled={tenants.status !== "ready" || syncing}
+            >
+              <option value="">Choose tenant</option>
+              {(tenants.data ?? []).map((tenant) => (
+                <option key={tenant.id} value={tenant.id}>
+                  {tenant.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="button button-primary"
+              disabled={!selectedTenant || tenants.source !== "live" || syncing}
+              onClick={() => void queueSync()}
+            >
+              {syncing ? "Queueing…" : "↻ Trigger sync"}
+            </button>
+          </div>
         }
       />
+      {mutationError && (
+        <div className="alert alert-danger" role="alert">
+          {mutationError}
+        </div>
+      )}
       <LiveDataBanner
         label="sync runs"
         source={runs.source}
@@ -1273,6 +2086,7 @@ export function SyncList() {
           </section>
         </>
       )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }
@@ -1481,20 +2295,6 @@ export function ErrorList() {
                       </p>
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-                    <button
-                      className="button button-secondary button-small"
-                      disabled
-                    >
-                      Inspect unavailable
-                    </button>
-                    <button
-                      className="button button-ghost button-small"
-                      disabled
-                    >
-                      Resolve unavailable
-                    </button>
-                  </div>
                 </Card>
               ))}
               {!rows.length && (
@@ -1577,21 +2377,176 @@ export function ErrorList() {
   );
 }
 
-function downloadUsage(events: UsageEvent[]) {
-  const lines = [
-    "id,tenant_id,event_name,created_at",
-    ...events.map((event) =>
-      [event.id, event.tenant_id ?? "", event.event_name, event.created_at]
-        .map((value) => `"${String(value).replaceAll('"', '""')}"`)
-        .join(","),
-    ),
-  ];
-  const url = URL.createObjectURL(
-    new Blob([lines.join("\n")], { type: "text/csv" }),
+export function ProviderFailures() {
+  const whatsapp = useApiResource<WhatsAppDeliveryFailure[]>(
+    "/admin/system/whatsapp-delivery-failures",
+    [],
   );
+  const hermes = useApiResource<HermesCallError[]>(
+    "/admin/system/hermes-call-errors",
+    [],
+  );
+  const [search, setSearch] = useState("");
+  const whatsappRows = (whatsapp.data ?? []).filter((row) =>
+    `${row.status} ${row.provider_error_code ?? ""} ${row.phone_masked ?? ""}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
+  const hermesRows = (hermes.data ?? []).filter((row) =>
+    `${row.category} ${row.profile_reference ?? ""}`
+      .toLowerCase()
+      .includes(search.toLowerCase()),
+  );
+
+  return (
+    <AppShell surface="admin" title="Provider failures">
+      <PageHeader
+        title="Provider failures"
+        description="Bounded WhatsApp delivery and Hermes runtime diagnostics without message content, credentials, raw provider IDs, prompts, or stack traces."
+      />
+      <div className="grid grid-2">
+        <Metric
+          label="WhatsApp delivery failures"
+          value={
+            whatsapp.status === "ready"
+              ? String(whatsapp.data?.length ?? 0)
+              : "—"
+          }
+          note="Failed, rejected, or undeliverable statuses"
+        />
+        <Metric
+          label="Hermes call errors"
+          value={
+            hermes.status === "ready" ? String(hermes.data?.length ?? 0) : "—"
+          }
+          note="Safe category and retryability only"
+        />
+      </div>
+      <Filters search={search} setSearch={setSearch} />
+      <section aria-labelledby="whatsapp-failures-heading">
+        <div className="section-title">
+          <div>
+            <h2 id="whatsapp-failures-heading">WhatsApp delivery failures</h2>
+            <p>
+              Use the hashed reference to correlate with protected provider
+              tooling.
+            </p>
+          </div>
+        </div>
+        {whatsapp.status !== "ready" ? (
+          <ResourceState
+            status={whatsapp.status}
+            error={whatsapp.error}
+            onRetry={whatsapp.reload}
+          />
+        ) : whatsappRows.length ? (
+          <div className="card table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Recorded</th>
+                  <th>Status</th>
+                  <th>Recipient</th>
+                  <th>Provider code</th>
+                  <th>Reference</th>
+                </tr>
+              </thead>
+              <tbody>
+                {whatsappRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{formatDate(row.created_at)}</td>
+                    <td>
+                      <Badge tone="danger">{titleCase(row.status)}</Badge>
+                    </td>
+                    <td>{row.phone_masked ?? "Not linked"}</td>
+                    <td>{row.provider_error_code ?? "Not supplied"}</td>
+                    <td>
+                      <code>{row.message_reference}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <StatePanel
+            type="empty"
+            title="No WhatsApp delivery failures"
+            description="No matching failed delivery events are in the current operations window."
+          />
+        )}
+      </section>
+      <section
+        style={{ marginTop: 28 }}
+        aria-labelledby="hermes-errors-heading"
+      >
+        <div className="section-title">
+          <div>
+            <h2 id="hermes-errors-heading">Hermes call errors</h2>
+            <p>
+              Categories are allowlisted; upstream response text never reaches
+              this view.
+            </p>
+          </div>
+        </div>
+        {hermes.status !== "ready" ? (
+          <ResourceState
+            status={hermes.status}
+            error={hermes.error}
+            onRetry={hermes.reload}
+          />
+        ) : hermesRows.length ? (
+          <div className="card table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Recorded</th>
+                  <th>Category</th>
+                  <th>Retryable</th>
+                  <th>Profile reference</th>
+                  <th>Tenant</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hermesRows.map((row) => (
+                  <tr key={row.id}>
+                    <td>{formatDate(row.created_at)}</td>
+                    <td>
+                      <Badge>{titleCase(row.category)}</Badge>
+                    </td>
+                    <td>
+                      {row.retryable === null
+                        ? "Unknown"
+                        : row.retryable
+                          ? "Yes"
+                          : "No"}
+                    </td>
+                    <td>
+                      <code>{row.profile_reference ?? "Not linked"}</code>
+                    </td>
+                    <td>{row.tenant_id?.slice(0, 8) ?? "Platform"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <StatePanel
+            type="empty"
+            title="No Hermes call errors"
+            description="No matching safe Hermes diagnostics are in the current operations window."
+          />
+        )}
+      </section>
+    </AppShell>
+  );
+}
+
+function downloadText(filename: string, contentType: string, content: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: contentType }));
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = "bumpa-bestie-usage.csv";
+  anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
 }
@@ -1602,6 +2557,41 @@ export function UsageList() {
   const names = new Map(
     (tenants.data ?? []).map((tenant) => [tenant.id, tenant.name]),
   );
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [toast, setToast] = useState("");
+
+  async function generateExport() {
+    if (exporting || usage.source !== "live") return;
+    if (
+      !window.confirm(
+        "Generate a server-side tenant operations export? The export digest and operator are audit logged.",
+      )
+    )
+      return;
+    setExporting(true);
+    setExportError("");
+    try {
+      const exported = await apiRequest<AdminExport>("/admin/exports", {
+        method: "POST",
+        body: JSON.stringify({
+          scope: "tenant_operations",
+          format: "csv",
+          confirmation: "generate_admin_export",
+        }),
+      });
+      downloadText(exported.filename, exported.content_type, exported.content);
+      setToast(`${exported.row_count} tenant rows exported and audit logged.`);
+    } catch (reason) {
+      setExportError(
+        reason instanceof Error
+          ? reason.message
+          : "The admin export could not be generated.",
+      );
+    } finally {
+      setExporting(false);
+    }
+  }
   const grouped = useMemo(() => {
     const map = new Map<
       string,
@@ -1626,13 +2616,18 @@ export function UsageList() {
         actions={
           <button
             className="button button-secondary"
-            disabled={usage.status !== "ready" || !usage.data?.length}
-            onClick={() => usage.data && downloadUsage(usage.data)}
+            disabled={usage.source !== "live" || exporting}
+            onClick={() => void generateExport()}
           >
-            ⇩ Export loaded CSV
+            {exporting ? "Generating…" : "⇩ Generate audited export"}
           </button>
         }
       />
+      {exportError && (
+        <div className="alert alert-danger" role="alert">
+          {exportError}
+        </div>
+      )}
       <LiveDataBanner
         label="usage events"
         source={usage.source}
@@ -1712,6 +2707,7 @@ export function UsageList() {
           </div>
         </>
       )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }

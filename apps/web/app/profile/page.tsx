@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { Badge, Card, PageHeader, StatePanel } from "@/components/ui";
+import {
+  Badge,
+  Card,
+  Modal,
+  PageHeader,
+  StatePanel,
+  Toast,
+} from "@/components/ui";
 import { apiRequest, isDemoMode } from "@/lib/api";
 import { currentUser } from "@/lib/demo-data";
 
@@ -106,6 +113,12 @@ export default function ProfilePage() {
   );
   const [source, setSource] = useState<"live" | "demo" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [confirmSessions, setConfirmSessions] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState("");
 
   const loadProfile = useCallback(async () => {
     setStatus("loading");
@@ -140,9 +153,65 @@ export default function ProfilePage() {
     void loadProfile();
   }, [loadProfile]);
 
-  const updateUnavailable = "Profile editing is not available in this release.";
-  const sessionUnavailable =
-    "Session listing and remote sign-out are not available in this release.";
+  const openEdit = () => {
+    if (!profile) return;
+    setName(profile.session.user.name);
+    setEmail(profile.session.user.email ?? "");
+    setError(null);
+    setEditing(true);
+  };
+
+  const saveProfile = async () => {
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await apiRequest("/settings/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim() || null,
+        }),
+      });
+      await loadProfile();
+      setEditing(false);
+      setToast("Profile details updated.");
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Your profile could not be updated.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signOutOthers = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await apiRequest<{ revoked_sessions: number }>(
+        "/auth/logout-others",
+        { method: "POST" },
+      );
+      setConfirmSessions(false);
+      setToast(
+        result.revoked_sessions
+          ? `${result.revoked_sessions} other session${result.revoked_sessions === 1 ? "" : "s"} signed out.`
+          : "No other active sessions were found.",
+      );
+    } catch (reason) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Other sessions could not be signed out.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <AppShell surface="user" title="Profile">
@@ -150,18 +219,13 @@ export default function ProfilePage() {
         title="Your profile"
         description="Your identity and active workspace, read securely from Bumpa Bestie."
         actions={
-          <div style={{ textAlign: "right", maxWidth: 260 }}>
-            <button
-              className="button button-secondary"
-              disabled
-              title={updateUnavailable}
-            >
-              Editing unavailable
-            </button>
-            <div className="field-help" style={{ marginTop: 6 }}>
-              {updateUnavailable}
-            </div>
-          </div>
+          <button
+            className="button button-secondary"
+            disabled={source !== "live" || status !== "ready" || busy}
+            onClick={openEdit}
+          >
+            Edit profile
+          </button>
         }
       />
 
@@ -196,7 +260,7 @@ export default function ProfilePage() {
               <div>
                 {source === "demo"
                   ? "These values are illustrative and are not tenant or user data."
-                  : "These read-only values came from the authenticated user and tenant APIs."}
+                  : "These values came from the authenticated user and tenant APIs."}
               </div>
             </div>
           </div>
@@ -227,7 +291,7 @@ export default function ProfilePage() {
                   <button
                     className="button button-secondary button-small"
                     disabled
-                    title={updateUnavailable}
+                    title="Profile photo storage is not configured."
                   >
                     Photo changes unavailable
                   </button>
@@ -336,24 +400,109 @@ export default function ProfilePage() {
                   </div>
                 </div>
                 <div className="alert alert-info">
-                  This page confirms your current session, but the API does not
-                  expose device names, locations, or other active sessions.
+                  Device names and locations are deliberately not exposed. You
+                  can still revoke every other active token while keeping this
+                  session open.
                 </div>
                 <button
                   className="button button-secondary"
-                  disabled
-                  title={sessionUnavailable}
+                  disabled={source !== "live" || busy}
+                  onClick={() => setConfirmSessions(true)}
                 >
-                  Sign out other devices unavailable
+                  Sign out other sessions
                 </button>
-                <div className="field-help" style={{ marginTop: 8 }}>
-                  {sessionUnavailable}
-                </div>
               </Card>
             </div>
           </div>
         </>
       )}
+      {editing && (
+        <Modal
+          title="Edit profile"
+          onClose={() => !busy && setEditing(false)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-primary"
+                disabled={busy || !name.trim()}
+                onClick={() => void saveProfile()}
+              >
+                {busy ? "Saving…" : "Save changes"}
+              </button>
+            </>
+          }
+        >
+          <label className="field" htmlFor="edit-name">
+            <span>Full name</span>
+            <input
+              id="edit-name"
+              className="input"
+              value={name}
+              maxLength={200}
+              onChange={(event) => setName(event.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label className="field" htmlFor="edit-email">
+            <span>Email address</span>
+            <input
+              id="edit-email"
+              type="email"
+              className="input"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              disabled={busy}
+            />
+          </label>
+          {error && (
+            <div className="alert alert-danger" role="alert">
+              {error}
+            </div>
+          )}
+        </Modal>
+      )}
+      {confirmSessions && (
+        <Modal
+          title="Sign out other sessions"
+          onClose={() => !busy && setConfirmSessions(false)}
+          actions={
+            <>
+              <button
+                className="button button-secondary"
+                disabled={busy}
+                onClick={() => setConfirmSessions(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button-danger"
+                disabled={busy}
+                onClick={() => void signOutOthers()}
+              >
+                {busy ? "Signing out…" : "Sign out other sessions"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            Every other active login token for this account will be revoked.
+            This browser stays signed in.
+          </p>
+          {error && (
+            <div className="alert alert-danger" role="alert">
+              {error}
+            </div>
+          )}
+        </Modal>
+      )}
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
     </AppShell>
   );
 }
