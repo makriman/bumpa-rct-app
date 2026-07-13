@@ -61,6 +61,7 @@ secrets retain local defaults.
 - [Architecture](docs/architecture.md)
 - [Development and integrations](docs/integration.md)
 - [Security model](docs/security.md)
+- [Privacy and retention policy](docs/privacy-retention-policy.md)
 - [Deployment](docs/deployment.md)
 - [Operations runbook](docs/runbook.md)
 - [Build-plan compliance ledger](docs/build-plan-compliance.md)
@@ -71,11 +72,14 @@ secrets retain local defaults.
 
 ## Status
 
-The local gates pass: backend lint/typing plus 324 tests at 85.02% branch-aware
-coverage, frontend lint/typing/build plus 121 unit/component tests across 22 files,
-eighteen desktop/mobile Playwright checks, 37 host/operations tests, full Docker
-image and Compose startup, a non-bypass Postgres RLS probe, and a checksum-verified
-Postgres/exports/reserved-Hermes backup and restore drill. `make compose-smoke`
+The hardened candidate gates pass: backend lint/typing plus 353 local tests at
+85.07% branch-aware coverage and a separately proven PostgreSQL concurrency test;
+frontend lint/typing/build plus 121 unit/component tests across 22 files with
+enforced coverage floors; 24 desktop/mobile Playwright checks on both Darwin and
+the pinned Linux image, including Axe, keyboard and visual-regression coverage;
+37 host/operations tests; full Docker image and Compose startup; a non-bypass
+Postgres RLS probe; and a checksum-verified Postgres/exports/reserved-Hermes backup
+and restore drill. `make compose-smoke`
 also verifies Postgres-backed OTP login, Bumpa mock sync, chat, research logging
 and PDF report download through the same-origin web proxy, then removes every
 container and network it created. Production UI data comes from the authenticated
@@ -101,14 +105,16 @@ with zero no-context or cross-tenant leakage.
 Provider readiness remains deliberately partial. Five mapped durable Bumpa jobs
 completed with orders available: stores 1–4 returned accepted-partial 8/10 analytics
 datasets, while degraded store 5 returned 7/10 because `products.overview` timed
-out/returned HTTP 504. All five mapped Hermes profiles completed a live Claude
-request, but cross-profile attack and recovery canaries remain open. The configured
-Meta test WABA is subscribed to the app and its configured sender phone-number ID
-is validated, but the WABA has zero authentication templates;
-template creation was denied with Graph code
-`10`/subcode `2388185`. The lane remains reply-only with `supports_otp=false`, and
-no outbound message was sent. Off-host backup durability, a real alert destination,
-and privacy/retention approval remain launch gates.
+out/returned HTTP 504. All five mapped Hermes profiles completed live Claude
+requests; 40/40 foreign-profile gateway/control attempts were rejected, and an
+audited restart plus post-restart completion passed. Read-only Graph checks confirm
+that the configured Meta test WABA, phone-number ID and `+15550772716` display
+number match. The sender reports `PENDING` and has five approved non-authentication
+templates but no authentication template; template creation was denied with Graph
+code `10`/subcode `2388185`. The lane remains reply-only with `supports_otp=false`,
+and no outbound message was sent. Off-host backup durability, a real alert
+destination, provider-complete Bumpa coverage, and privacy/retention approval remain
+launch gates.
 
 The live adapters, durable worker/scheduler runtime, transactional outbox, Redis
 rate limits, tenant profile lifecycle, and scoped secret mounts are implemented and

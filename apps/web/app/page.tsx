@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AppIcon } from "@/components/app-icon";
 import { PublicShell } from "@/components/public-shell";
 
 export default function HomePage() {
@@ -16,7 +17,7 @@ export default function HomePage() {
           </p>
           <div className="hero-actions">
             <Link className="button button-primary" href="/login">
-              Talk to your Bestie <span aria-hidden="true">→</span>
+              Talk to your Bestie <AppIcon name="external" size={15} />
             </Link>
             <a className="button button-secondary" href="#how-it-works">
               See how it works
@@ -71,7 +72,9 @@ export default function HomePage() {
           </div>
           <div className="feature-grid">
             <article className="feature-card">
-              <span className="feature-icon">↗</span>
+              <span className="feature-icon">
+                <AppIcon name="external" size={22} />
+              </span>
               <h3>See what is really selling</h3>
               <p>
                 Find your strongest products, spot slow movers, and understand
@@ -79,7 +82,9 @@ export default function HomePage() {
               </p>
             </article>
             <article className="feature-card">
-              <span className="feature-icon">◎</span>
+              <span className="feature-icon">
+                <AppIcon name="sparkles" size={22} />
+              </span>
               <h3>Get practical next steps</h3>
               <p>
                 Turn numbers into actions — from what to restock to which
@@ -87,7 +92,9 @@ export default function HomePage() {
               </p>
             </article>
             <article className="feature-card">
-              <span className="feature-icon">◌</span>
+              <span className="feature-icon">
+                <AppIcon name="chat" size={22} />
+              </span>
               <h3>Ask from WhatsApp</h3>
               <p>
                 Use a channel your team already knows, or keep longer

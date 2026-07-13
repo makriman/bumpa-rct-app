@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.crypto import FieldCipher
 from app.core.dependencies import Principal, require_tenant, require_tenant_admin
 from app.core.rate_limit import enforce_operation_rate_limit
 from app.db.models import AsyncJob, BumpaConnection, BumpaSyncRun
@@ -82,7 +83,7 @@ def sync(
         connection=connection,
         date_from=payload.date_from,
         date_to=payload.date_to,
-        field_encryption_key=settings.field_encryption_key,
+        field_cipher=FieldCipher.from_settings(settings),
         runtime_backend=settings.bumpa_backend,
     )
     return _run_view(result)

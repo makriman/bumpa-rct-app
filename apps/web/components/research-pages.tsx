@@ -31,6 +31,7 @@ import {
   Metric,
   Modal,
   PageHeader,
+  ScrollableTable,
   StatePanel,
   Toast,
 } from "./ui";
@@ -456,7 +457,7 @@ export function ResearchOverview() {
                 </div>
               </div>
               {data.retention_by_cohort.length ? (
-                <div className="table-wrap">
+                <ScrollableTable label="Retention by first-observed cohort">
                   <table style={{ minWidth: 720 }}>
                     <thead>
                       <tr>
@@ -489,7 +490,7 @@ export function ResearchOverview() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               ) : (
                 <p className="table-secondary">
                   Retention appears after the first consented SME interaction.
@@ -510,7 +511,7 @@ export function ResearchOverview() {
                 </div>
               </div>
               {data.repeat_usage.by_sme.length ? (
-                <div className="table-wrap">
+                <ScrollableTable label="Repeat usage by SME">
                   <table style={{ minWidth: 680 }}>
                     <thead>
                       <tr>
@@ -533,7 +534,7 @@ export function ResearchOverview() {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               ) : (
                 <p className="table-secondary">No repeat-usage evidence yet.</p>
               )}
@@ -695,7 +696,7 @@ export function Questions() {
             </select>
           </Filters>
           {rows.length ? (
-            <section className="card table-wrap">
+            <ScrollableTable className="card" label="Research question events">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -736,7 +737,7 @@ export function Questions() {
                   ))}
                 </tbody>
               </table>
-            </section>
+            </ScrollableTable>
           ) : (
             <StatePanel
               type="empty"
@@ -869,7 +870,7 @@ export function Conversations() {
           empty="No consented conversations yet"
         />
       ) : (
-        <section className="card table-wrap">
+        <ScrollableTable className="card" label="Research conversations">
           <table className="data-table">
             <thead>
               <tr>
@@ -914,7 +915,7 @@ export function Conversations() {
               ))}
             </tbody>
           </table>
-        </section>
+        </ScrollableTable>
       )}
       {detailStatus === "loading" && (
         <div style={{ marginTop: 18 }}>
@@ -1062,7 +1063,7 @@ export function Classifications() {
                 Change log unavailable
               </button>
             </div>
-            <div className="table-wrap">
+            <ScrollableTable label="Research taxonomy definitions">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -1104,7 +1105,7 @@ export function Classifications() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </ScrollableTable>
           </Card>
           <div className="alert alert-info">
             Human review queues and taxonomy mutations are not exposed by the
@@ -1424,7 +1425,7 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
           empty={`No ${noun}s generated`}
         />
       ) : (
-        <section className="card table-wrap">
+        <ScrollableTable className="card" label={`${noun} artifacts`}>
           <table className="data-table">
             <thead>
               <tr>
@@ -1466,7 +1467,7 @@ function ReportInventory({ mode }: { mode: "reports" | "exports" }) {
               ))}
             </tbody>
           </table>
-        </section>
+        </ScrollableTable>
       )}
       {modal && (
         <Modal

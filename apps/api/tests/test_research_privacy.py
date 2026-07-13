@@ -120,9 +120,9 @@ def test_research_reads_and_exports_reredact_legacy_rows_and_hide_identity_ids(
         db.commit()
 
     settings = get_settings()
-    expected_event = pseudonymize(event_id, settings.field_encryption_key, namespace="event")
-    expected_tenant = pseudonymize(tenant_id, settings.field_encryption_key, namespace="tenant")
-    expected_user = pseudonymize(user_id, settings.field_encryption_key, namespace="user")
+    expected_event = pseudonymize(event_id, settings.research_pseudonym_key, namespace="event")
+    expected_tenant = pseudonymize(tenant_id, settings.research_pseudonym_key, namespace="tenant")
+    expected_user = pseudonymize(user_id, settings.research_pseudonym_key, namespace="user")
     researcher = auth_headers(client, "+2348099990002")
     try:
         response = client.get(
@@ -257,10 +257,10 @@ def test_research_conversations_group_redacted_events_behind_pseudonymous_ids(
 
     settings = get_settings()
     expected_conversation = pseudonymize(
-        conversation_id, settings.field_encryption_key, namespace="conversation"
+        conversation_id, settings.research_pseudonym_key, namespace="conversation"
     )
-    expected_tenant = pseudonymize(tenant_id, settings.field_encryption_key, namespace="tenant")
-    expected_user = pseudonymize(user_id, settings.field_encryption_key, namespace="user")
+    expected_tenant = pseudonymize(tenant_id, settings.research_pseudonym_key, namespace="tenant")
+    expected_user = pseudonymize(user_id, settings.research_pseudonym_key, namespace="user")
     researcher = auth_headers(client, "+2348099990002")
     try:
         denied = client.get("/v1/research/conversations", headers=owner)

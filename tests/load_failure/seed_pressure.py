@@ -41,7 +41,7 @@ def main() -> int:
         and settings.bumpa_backend == "mock"
     ):
         raise SystemExit("refusing to seed outside the isolated synthetic-provider stack")
-    cipher = FieldCipher(settings.field_encryption_key)
+    cipher = FieldCipher.from_settings(settings)
 
     fixtures: dict[str, dict[str, str]] = {}
     numeric_suffix = int(run_id, 16) % 10_000_000

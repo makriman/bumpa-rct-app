@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useId, useRef } from "react";
 import { statusTone, type Tone } from "@/lib/demo-data";
+import { AppIcon } from "./app-icon";
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -59,6 +60,30 @@ export function Card({
     <section className={`card ${padded ? "card-pad" : ""} ${className}`}>
       {children}
     </section>
+  );
+}
+
+export function ScrollableTable({
+  children,
+  label,
+  className = "",
+  style,
+}: {
+  children: React.ReactNode;
+  label: string;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <div
+      className={`table-wrap ${className}`.trim()}
+      role="region"
+      aria-label={label}
+      tabIndex={0}
+      style={style}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -132,7 +157,7 @@ export function StatePanel({
     <Card className="empty-state">
       <div className="empty-inner">
         <div className="empty-icon" aria-hidden="true">
-          {type === "error" ? "!" : "✦"}
+          {type === "error" ? "!" : <AppIcon name="sparkles" size={22} />}
         </div>
         <h2>
           {title ??
@@ -235,7 +260,7 @@ export function Modal({
             onClick={onClose}
             aria-label="Close dialog"
           >
-            ×
+            <AppIcon name="close" />
           </button>
         </div>
         <div className="modal-body">{children}</div>

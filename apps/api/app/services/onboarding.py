@@ -417,7 +417,7 @@ class OnboardingService:
             extra={
                 "credential_hmac": secret_hash(
                     f"onboarding-bumpa:{api_key}",
-                    self.settings.field_encryption_key,
+                    self.settings.onboarding_integrity_key,
                 )
             },
         )
@@ -470,7 +470,7 @@ class OnboardingService:
             return OnboardingMutation(view=self._view(db, saga), replayed=True)
         self._require_step(saga, "bumpa", expected_revision)
 
-        encrypted = FieldCipher(self.settings.field_encryption_key).encrypt(api_key)
+        encrypted = FieldCipher.from_settings(self.settings).encrypt(api_key)
         connection = db.scalar(
             select(BumpaConnection).where(BumpaConnection.tenant_id == saga.tenant_id)
         )
@@ -781,7 +781,7 @@ class OnboardingService:
                     profile_name=_local_profile_name(tenant),
                     provider="local",
                     api_internal_url="local://agent",
-                    encrypted_api_key=FieldCipher(self.settings.field_encryption_key).encrypt(
+                    encrypted_api_key=FieldCipher.from_settings(self.settings).encrypt(
                         local_profile_key()
                     ),
                     status="active",
@@ -1072,7 +1072,7 @@ class OnboardingService:
     def _key_hash(self, actor_user_id: str, idempotency_key: str) -> str:
         return secret_hash(
             f"onboarding:v1:{actor_user_id}:{idempotency_key}",
-            self.settings.field_encryption_key,
+            self.settings.onboarding_integrity_key,
         )
 
     def _fingerprint(
@@ -1093,7 +1093,7 @@ class OnboardingService:
         )
         return secret_hash(
             f"onboarding-fingerprint:v1:{encoded}",
-            self.settings.field_encryption_key,
+            self.settings.onboarding_integrity_key,
         )
 
     @staticmethod

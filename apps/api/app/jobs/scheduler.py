@@ -53,7 +53,8 @@ def run_cycle(
 
 
 def _ensure_daily_maintenance(session: Session) -> None:
-    if get_settings().app_env != "production":
+    settings = get_settings()
+    if settings.app_env != "production":
         return
     day = utcnow().date().isoformat()
     enqueue_job(
@@ -61,6 +62,13 @@ def _ensure_daily_maintenance(session: Session) -> None:
         kind="research.cleanup_expired_artifacts",
         payload={"limit": 1000},
         idempotency_key=f"research-retention:{day}",
+        max_attempts=3,
+    )
+    enqueue_job(
+        session,
+        kind="system.cleanup_operational_history",
+        payload={"limit": settings.operational_retention_batch_size},
+        idempotency_key=f"operational-retention:{day}",
         max_attempts=3,
     )
 

@@ -97,6 +97,28 @@ def service() -> OnboardingService:
     return OnboardingService(settings, readiness_checker=ready)
 
 
+def test_field_encryption_rotation_does_not_change_onboarding_command_identity(
+    service: OnboardingService,
+) -> None:
+    actor_id = "operator-stable-identity"
+    idempotency_key = "stable-command-key"
+    before = service._key_hash(actor_id, idempotency_key)
+
+    rotated_field_cipher = OnboardingService(
+        service.settings.model_copy(
+            update={"field_encryption_key": "rotated-field-key-" + "x" * 32}
+        )
+    )
+    assert rotated_field_cipher._key_hash(actor_id, idempotency_key) == before
+
+    rotated_integrity_key = OnboardingService(
+        service.settings.model_copy(
+            update={"onboarding_integrity_key": "rotated-integrity-" + "y" * 32}
+        )
+    )
+    assert rotated_integrity_key._key_hash(actor_id, idempotency_key) != before
+
+
 def _operator(db: Session) -> User:
     operator = db.scalar(select(User).where(User.primary_phone_e164 == OPERATOR_PHONE))
     assert operator is not None

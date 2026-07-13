@@ -186,13 +186,16 @@ def test_redis_health_probe_uses_a_bounded_non_blocking_client(
     }
 
 
-def test_scheduler_enqueues_one_daily_research_retention_job(
+def test_scheduler_enqueues_one_durable_job_per_daily_retention_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         scheduler,
         "get_settings",
-        lambda: SimpleNamespace(app_env="production"),
+        lambda: SimpleNamespace(
+            app_env="production",
+            operational_retention_batch_size=500,
+        ),
     )
     with SessionLocal() as session:
         scheduler._ensure_daily_maintenance(session)
@@ -205,6 +208,17 @@ def test_scheduler_enqueues_one_daily_research_retention_job(
         assert len(jobs) == 1
         assert jobs[0].payload == {"limit": 1000}
         assert session.scalar(select(JobOutbox).where(JobOutbox.job_id == jobs[0].id)) is not None
+        operational_jobs = list(
+            session.scalars(
+                select(AsyncJob).where(AsyncJob.kind == "system.cleanup_operational_history")
+            )
+        )
+        assert len(operational_jobs) == 1
+        assert operational_jobs[0].payload == {"limit": 500}
+        assert (
+            session.scalar(select(JobOutbox).where(JobOutbox.job_id == operational_jobs[0].id))
+            is not None
+        )
         session.rollback()
 
 

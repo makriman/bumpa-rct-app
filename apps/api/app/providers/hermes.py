@@ -388,7 +388,7 @@ class HermesClient:
 def endpoint_for(profile: HermesProfile, settings: Settings) -> HermesEndpoint:
     if profile.provider != "hermes" or profile.api_port is None:
         raise HermesProfileError("Hermes profile coordinates are incomplete")
-    api_key = FieldCipher(settings.field_encryption_key).decrypt(profile.encrypted_api_key)
+    api_key = FieldCipher.from_settings(settings).decrypt(profile.encrypted_api_key)
     return HermesEndpoint(
         profile_name=profile.profile_name,
         api_url=profile.api_internal_url,
@@ -441,7 +441,7 @@ def reserve_profile(db: Session, tenant: Tenant, settings: Settings) -> HermesPr
         provider="hermes",
         api_internal_url=(f"{settings.hermes_base_internal_host.rstrip('/')}:{port}/v1"),
         api_port=port,
-        encrypted_api_key=FieldCipher(settings.field_encryption_key).encrypt(api_key),
+        encrypted_api_key=FieldCipher.from_settings(settings).encrypt(api_key),
         status="provisioning",
     )
     db.add(profile)

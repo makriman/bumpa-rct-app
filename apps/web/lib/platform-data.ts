@@ -399,7 +399,7 @@ export type Taxonomy = {
 export type Report = {
   id: string;
   report_type: string;
-  artifact_kind?: "report" | "export";
+  artifact_kind: "report" | "export";
   status: string;
   title: string | null;
   summary: string | null;
@@ -407,9 +407,16 @@ export type Report = {
   finished_at: string | null;
 };
 
+export type McpProvider =
+  | "google_drive"
+  | "google_sheets"
+  | "gmail"
+  | "calendar"
+  | "meta_ads";
+
 export type McpConnection = {
   id: string;
-  provider: string;
+  provider: McpProvider;
   status: string;
   scopes: string[];
   read_only: boolean;
@@ -427,7 +434,7 @@ export type McpRegistryTool = {
 };
 
 export type McpRegistryItem = {
-  provider: string;
+  provider: McpProvider;
   name: string;
   enabled: boolean;
   default_mode: "read_only";

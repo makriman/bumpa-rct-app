@@ -189,7 +189,7 @@ if not isinstance(stores, list) or len(stores) != 5:
 
 with SessionLocal() as db:
     set_security_context(db, privileged=True)
-    cipher = FieldCipher(get_settings().field_encryption_key)
+    cipher = FieldCipher.from_settings(get_settings())
     operator = db.scalar(select(User).where(
         User.primary_phone_e164 == expected.get("operator_phone"),
         User.status == "active",

@@ -37,10 +37,12 @@ Five mapped durable Bumpa jobs reached correlated terminal runs with orders
 available. Stores 1–4 returned accepted-partial 8/10 analytics datasets; degraded
 store 5 returned 7/10 because `products.overview` timed out/returned HTTP 504.
 All five mapped Hermes profiles passed health and completed an explicitly authorized
-live Claude request, but cross-profile attack and recovery canaries remain open.
-The configured Meta test WABA is subscribed to the app and its sender phone-number
-ID is validated, but the WABA has zero authentication templates. Both
-template-create paths were denied with Graph code
+live Claude request. Forty foreign-profile gateway/control attempts were rejected,
+and the audited restart plus post-restart completion passed. Read-only Graph checks
+confirm that the configured Meta test WABA and phone-number ID pair with
+`+15550772716`; the sender reports `PENDING` and has five approved
+non-authentication templates but zero authentication templates. Both
+authentication-template create paths were denied with Graph code
 `10`/subcode `2388185`; the lane remains reply-only with
 `supports_otp=false`, and no outbound message was sent.
 
@@ -50,10 +52,9 @@ completed its planned quiesce at 18:41:11 UTC. All eight services and API 200
 recovered by 18:41:17; a 10m35s stability audit through 18:49:27 found no unhealthy
 service, restart, OOM kill or severe-log match. Backup and disk-usage timers are
 active. Provider selectors and valid credentials do not by themselves authorize
-real tenant traffic. Complete Bumpa coverage/reconciliation, Meta authentication
-template and outbound-delivery evidence, Hermes cross-profile/recovery canaries,
-off-host durability, a real alert destination and privacy/retention approval remain
-open gates.
+real tenant traffic. Complete Bumpa provider coverage, Meta authentication template
+and outbound-delivery evidence, off-host durability, a real alert destination and
+privacy/retention approval remain open gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { AppIcon } from "@/components/app-icon";
 import { AppShell } from "@/components/app-shell";
 import { LiveDataBanner } from "@/components/live-data-banner";
 import { Badge, Modal, PageHeader, StatePanel, Toast } from "@/components/ui";
@@ -141,7 +142,9 @@ export default function WhatsAppPage() {
         <div className="grid">
           {numbers.data.map((number) => (
             <section className="card connection-card" key={number.id}>
-              <div className="connection-icon">◌</div>
+              <div className="connection-icon">
+                <AppIcon name="chat" size={22} />
+              </div>
               <div className="connection-body">
                 <strong>{number.label || "Approved team number"}</strong>
                 <p>

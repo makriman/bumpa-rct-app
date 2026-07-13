@@ -10,6 +10,7 @@ import {
   userNav,
   type NavGroup,
 } from "@/lib/navigation";
+import { AppIcon } from "./app-icon";
 import { Brand } from "./ui";
 
 type Surface = "user" | "admin" | "research";
@@ -240,7 +241,7 @@ export function AppShell({
             aria-label="Close navigation panel"
             onClick={() => setMenuOpen(false)}
           >
-            ×
+            <AppIcon name="close" />
           </button>
         </div>
         {nav.map((group) => (
@@ -261,7 +262,7 @@ export function AppShell({
                     onClick={() => setMenuOpen(false)}
                   >
                     <span className="nav-icon" aria-hidden="true">
-                      {item.icon}
+                      <AppIcon name={item.icon} />
                     </span>
                     {item.label}
                   </Link>
@@ -279,7 +280,7 @@ export function AppShell({
               onClick={() => setMenuOpen(false)}
             >
               <span className="workspace-switch-icon" aria-hidden="true">
-                ↙
+                <AppIcon name="external" />
               </span>
               <span>
                 <strong>My tenant workspace</strong>
@@ -295,7 +296,7 @@ export function AppShell({
               onClick={() => setMenuOpen(false)}
             >
               <span className="workspace-switch-icon" aria-hidden="true">
-                ↗
+                <AppIcon name="external" />
               </span>
               <span>
                 <strong>Platform administration</strong>
@@ -329,7 +330,7 @@ export function AppShell({
             onClick={() => void handleLogout()}
           >
             <span className="nav-icon" aria-hidden="true">
-              ↪
+              <AppIcon name="logout" />
             </span>
             {logoutPending ? "Logging out…" : "Log out"}
           </button>
@@ -337,7 +338,7 @@ export function AppShell({
       </aside>
       <div ref={appMainRef} className="app-main">
         <header className="topbar">
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div className="topbar-heading">
             <button
               ref={menuButtonRef}
               className="icon-button mobile-menu-button"
@@ -346,7 +347,7 @@ export function AppShell({
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen(true)}
             >
-              ☰
+              <AppIcon name="menu" />
             </button>
             <span className="topbar-title">{title}</span>
           </div>
@@ -359,7 +360,7 @@ export function AppShell({
                   : "DEMO DATA"}
             </span>
             <button className="icon-button" aria-label="Notifications">
-              ◔
+              <AppIcon name="bell" />
             </button>
             <span className="avatar">
               {displayName

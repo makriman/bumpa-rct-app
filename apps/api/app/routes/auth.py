@@ -1,7 +1,6 @@
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -17,7 +16,6 @@ from app.core.security import (
     verify_otp,
 )
 from app.core.time import utcnow
-from app.db.models import PlatformRole, TenantMembership
 from app.db.session import get_db, set_security_context
 from app.providers.diagnostics import provider_failure_log_extra
 from app.providers.local import LocalMessagingProvider
@@ -178,13 +176,10 @@ def logout_other_sessions(
 
 
 @router.get("/me")
-def me(principal: Principal = Depends(get_principal), db: Session = Depends(get_db)) -> dict:
-    memberships = db.scalars(
-        select(TenantMembership).where(TenantMembership.user_id == principal.user.id)
-    ).all()
-    roles = db.scalars(
-        select(PlatformRole.role).where(PlatformRole.user_id == principal.user.id)
-    ).all()
+def me(principal: Principal = Depends(get_principal)) -> dict:
+    # Authentication resolves this complete user-owned snapshot while the session
+    # is privileged, before ordinary users are narrowed to one tenant by RLS.
+    # Re-querying here would silently hide their other authorized memberships.
     return {
         "user": {
             "id": principal.user.id,
@@ -192,10 +187,10 @@ def me(principal: Principal = Depends(get_principal), db: Session = Depends(get_
             "email": principal.user.email,
             "phone_e164": principal.user.primary_phone_e164,
         },
-        "platform_roles": list(roles),
+        "platform_roles": sorted(principal.platform_roles),
         "memberships": [
             {"id": item.id, "tenant_id": item.tenant_id, "role": item.role, "status": item.status}
-            for item in memberships
+            for item in principal.memberships
         ],
         "current_tenant_id": principal.tenant.id if principal.tenant else None,
     }

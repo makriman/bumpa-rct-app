@@ -255,7 +255,16 @@ def mask_phone(value: str) -> str:
 
 def _bumpa_status(connection: BumpaConnection | None) -> BumpaConnectionStatusView:
     if connection is None:
-        return BumpaConnectionStatusView(connected=False, status="not_connected")
+        return BumpaConnectionStatusView(
+            connected=False,
+            status="not_connected",
+            scope_type=None,
+            scope_id_last4=None,
+            provider=None,
+            last_successful_sync_at=None,
+            last_failed_sync_at=None,
+            last_error=None,
+        )
     return BumpaConnectionStatusView(
         connected=True,
         status=connection.status,
@@ -270,7 +279,13 @@ def _bumpa_status(connection: BumpaConnection | None) -> BumpaConnectionStatusVi
 
 def _hermes_status(profile: HermesProfile | None) -> HermesProfileStatusView:
     if profile is None:
-        return HermesProfileStatusView(provisioned=False, status="not_provisioned")
+        return HermesProfileStatusView(
+            provisioned=False,
+            profile_name=None,
+            provider=None,
+            status="not_provisioned",
+            api_port=None,
+        )
     return HermesProfileStatusView(
         provisioned=True,
         profile_name=profile.profile_name,

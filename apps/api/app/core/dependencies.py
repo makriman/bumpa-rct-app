@@ -20,6 +20,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 class Principal:
     user: User
     platform_roles: frozenset[str]
+    memberships: tuple[TenantMembership, ...]
     membership: TenantMembership | None
     tenant: Tenant | None
 
@@ -112,25 +113,26 @@ def get_principal(
     platform_roles = frozenset(
         db.scalars(select(PlatformRole.role).where(PlatformRole.user_id == user.id)).all()
     )
-    memberships = list(
+    membership_snapshot = tuple(
         db.scalars(
-            select(TenantMembership).where(
-                TenantMembership.user_id == user.id,
-                TenantMembership.status == "active",
-            )
+            select(TenantMembership)
+            .where(TenantMembership.user_id == user.id)
+            .order_by(TenantMembership.created_at, TenantMembership.id)
         ).all()
     )
+    active_memberships = tuple(item for item in membership_snapshot if item.status == "active")
     membership: TenantMembership | None = None
     if requested_tenant_id:
-        membership = next((m for m in memberships if m.tenant_id == requested_tenant_id), None)
+        membership = next(
+            (item for item in active_memberships if item.tenant_id == requested_tenant_id),
+            None,
+        )
         if not membership and not platform_roles.intersection(
             {"operator", "researcher", "superadmin"}
         ):
             raise HTTPException(status_code=403, detail="Tenant access denied")
-    elif len(memberships) == 1:
-        membership = memberships[0]
-    elif memberships:
-        membership = memberships[0]
+    elif active_memberships:
+        membership = active_memberships[0]
     selected_tenant_id = requested_tenant_id or (membership.tenant_id if membership else None)
     tenant = db.get(Tenant, selected_tenant_id) if selected_tenant_id else None
     if (
@@ -141,7 +143,13 @@ def get_principal(
         raise HTTPException(status_code=403, detail="Tenant is not active")
     if not platform_roles.intersection({"operator", "researcher", "superadmin"}):
         set_security_context(db, tenant_id=tenant.id if tenant else None)
-    return Principal(user, platform_roles, membership, tenant)
+    return Principal(
+        user=user,
+        platform_roles=platform_roles,
+        memberships=membership_snapshot,
+        membership=membership,
+        tenant=tenant,
+    )
 
 
 def require_tenant(

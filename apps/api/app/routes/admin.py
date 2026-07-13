@@ -405,7 +405,7 @@ def connect_bumpa(
                 status_code=422, detail="Bumpa connection verification failed"
             ) from exc
     connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
-    encrypted = FieldCipher(settings.field_encryption_key).encrypt(payload.api_key)
+    encrypted = FieldCipher.from_settings(settings).encrypt(payload.api_key)
     if connection:
         connection.encrypted_api_key = encrypted
         connection.scope_type = payload.scope_type
@@ -650,7 +650,7 @@ def create_profile(
         profile_name=f"tenant_{tenant.slug.replace('-', '_')}_{tenant.id[:8]}",
         provider="local",
         api_internal_url="local://agent",
-        encrypted_api_key=FieldCipher(settings.field_encryption_key).encrypt(local_profile_key()),
+        encrypted_api_key=FieldCipher.from_settings(settings).encrypt(local_profile_key()),
     )
     db.add(profile)
     audit(

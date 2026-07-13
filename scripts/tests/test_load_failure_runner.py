@@ -70,6 +70,7 @@ class LoadFailureRunnerTests(unittest.TestCase):
             self.runner.SYNTHETIC_COMPOSE_ENV["DATABASE_URL"],
         )
         self.assertEqual(project.environment["REDIS_URL"], "redis://redis:6379/0")
+        self.assertEqual(project.environment["FIELD_ENCRYPTION_OLD_KEYS"], "{}")
         self.assertEqual(project.environment["META_SYSTEM_USER_ACCESS_TOKEN"], "")
         self.assertEqual(project.environment["META_SYSTEM_USER_ACCESS_TOKEN_FILE"], "")
         self.assertNotIn("live.example", repr(project.environment))

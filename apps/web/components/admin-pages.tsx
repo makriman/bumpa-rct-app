@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import { AppIcon } from "@/components/app-icon";
 import { apiRequest } from "@/lib/api";
 import {
   type AdminExport,
@@ -42,6 +43,7 @@ import {
   Metric,
   Modal,
   PageHeader,
+  ScrollableTable,
   StatePanel,
   Toast,
 } from "./ui";
@@ -288,7 +290,7 @@ export function AdminOverview() {
               </Link>
             </div>
             {tenants.length ? (
-              <div className="table-wrap">
+              <ScrollableTable label="Tenant health">
                 <table className="data-table">
                   <thead>
                     <tr>
@@ -337,7 +339,7 @@ export function AdminOverview() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </ScrollableTable>
             ) : (
               <p className="table-secondary">No tenants have been onboarded.</p>
             )}
@@ -409,7 +411,7 @@ export function TenantList() {
             </select>
           </Filters>
           {rows.length ? (
-            <section className="card table-wrap">
+            <ScrollableTable className="card" label="Tenant directory">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -456,7 +458,7 @@ export function TenantList() {
                   ))}
                 </tbody>
               </table>
-            </section>
+            </ScrollableTable>
           ) : (
             <StatePanel
               type="empty"
@@ -763,7 +765,13 @@ export function TenantDetail({ id }: { id: string }) {
               }
               onClick={() => void triggerSync()}
             >
-              {syncing ? "Queueing…" : "↻ Trigger sync"}
+              {syncing ? (
+                "Queueing…"
+              ) : (
+                <>
+                  <AppIcon name="refresh" size={16} /> Trigger sync
+                </>
+              )}
             </button>
             <button
               className="button button-danger"
@@ -924,7 +932,7 @@ export function TenantDetail({ id }: { id: string }) {
                   onRetry={operations.reload}
                 />
               ) : operations.data?.people.length ? (
-                <div className="table-wrap">
+                <ScrollableTable label="Tenant people and approved numbers">
                   <table className="data-table">
                     <thead>
                       <tr>
@@ -967,7 +975,7 @@ export function TenantDetail({ id }: { id: string }) {
                       })}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               ) : (
                 <p className="table-secondary">
                   No tenant members were returned.
@@ -1638,7 +1646,10 @@ export function UserList() {
         <>
           <Filters search={search} setSearch={setSearch} />
           {rows.length ? (
-            <section className="card table-wrap">
+            <ScrollableTable
+              className="card"
+              label="Platform administrator directory"
+            >
               <table className="data-table admin-directory-table">
                 <thead>
                   <tr>
@@ -1734,7 +1745,7 @@ export function UserList() {
                   })}
                 </tbody>
               </table>
-            </section>
+            </ScrollableTable>
           ) : (
             <StatePanel
               type="empty"
@@ -1840,7 +1851,7 @@ export function UserList() {
           </div>
           <div className="admin-grant-summary" aria-label="Access to grant">
             <span className="admin-grant-icon" aria-hidden="true">
-              ◎
+              <AppIcon name="shield" size={20} />
             </span>
             <span>
               <strong>Platform operator</strong>
@@ -1988,7 +1999,13 @@ export function SyncList() {
               disabled={!selectedTenant || tenants.source !== "live" || syncing}
               onClick={() => void queueSync()}
             >
-              {syncing ? "Queueing…" : "↻ Trigger sync"}
+              {syncing ? (
+                "Queueing…"
+              ) : (
+                <>
+                  <AppIcon name="refresh" size={16} /> Trigger sync
+                </>
+              )}
             </button>
           </div>
         }
@@ -2041,7 +2058,11 @@ export function SyncList() {
               )}
             />
           </div>
-          <section className="card table-wrap" style={{ marginTop: 18 }}>
+          <ScrollableTable
+            className="card"
+            label="Bumpa sync runs"
+            style={{ marginTop: 18 }}
+          >
             <table className="data-table">
               <thead>
                 <tr>
@@ -2083,7 +2104,7 @@ export function SyncList() {
                 ))}
               </tbody>
             </table>
-          </section>
+          </ScrollableTable>
         </>
       )}
       {toast && <Toast message={toast} onClose={() => setToast("")} />}
@@ -2440,7 +2461,7 @@ export function ProviderFailures() {
             onRetry={whatsapp.reload}
           />
         ) : whatsappRows.length ? (
-          <div className="card table-wrap">
+          <ScrollableTable className="card" label="WhatsApp delivery failures">
             <table className="data-table">
               <thead>
                 <tr>
@@ -2467,7 +2488,7 @@ export function ProviderFailures() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         ) : (
           <StatePanel
             type="empty"
@@ -2496,7 +2517,7 @@ export function ProviderFailures() {
             onRetry={hermes.reload}
           />
         ) : hermesRows.length ? (
-          <div className="card table-wrap">
+          <ScrollableTable className="card" label="Hermes call errors">
             <table className="data-table">
               <thead>
                 <tr>
@@ -2529,7 +2550,7 @@ export function ProviderFailures() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
         ) : (
           <StatePanel
             type="empty"
@@ -2673,7 +2694,11 @@ export function UsageList() {
               )}
             />
           </div>
-          <section className="card table-wrap" style={{ marginTop: 18 }}>
+          <ScrollableTable
+            className="card"
+            label="Usage by tenant"
+            style={{ marginTop: 18 }}
+          >
             <table className="data-table">
               <thead>
                 <tr>
@@ -2699,7 +2724,7 @@ export function UsageList() {
                 ))}
               </tbody>
             </table>
-          </section>
+          </ScrollableTable>
           <div className="alert alert-info">
             The current API records event names and timestamps. Token cost and
             active-user metrics are intentionally omitted because the API does

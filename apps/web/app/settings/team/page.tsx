@@ -8,6 +8,7 @@ import {
   Filters,
   Modal,
   PageHeader,
+  ScrollableTable,
   StatePanel,
   Toast,
 } from "@/components/ui";
@@ -161,7 +162,7 @@ export default function TeamPage() {
             </select>
           </Filters>
           {rows.length ? (
-            <section className="card table-wrap">
+            <ScrollableTable className="card" label="Workspace team members">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -227,7 +228,7 @@ export default function TeamPage() {
                   ))}
                 </tbody>
               </table>
-            </section>
+            </ScrollableTable>
           ) : (
             <StatePanel
               type="empty"

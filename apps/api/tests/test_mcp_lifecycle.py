@@ -345,3 +345,39 @@ def test_oauth_exchange_is_fixed_origin_bounded_and_sanitized() -> None:
             verifier="v" * 64,
             transport=chunked_oversized,
         )
+
+
+def test_oauth_state_remains_readable_during_old_key_ttl_grace() -> None:
+    old_secret = "old-oauth-field-key-material-" + "o" * 24
+    new_secret = "new-oauth-field-key-material-" + "n" * 24
+    old_writer = Settings(
+        app_env="test",
+        field_encryption_key=old_secret,
+        field_encryption_key_id="old-2026-01",
+        field_encryption_write_version="v2",
+        mcp_google_oauth_enabled=True,
+        google_oauth_client_id="google-client-id",
+        google_oauth_client_secret=secrets.token_urlsafe(24),
+    )
+    authorization_url, _expires = build_authorization_url(
+        settings=old_writer,
+        connection_id="connection-id",
+        tenant_id="tenant-id",
+        user_id="user-id",
+        provider="google_drive",
+        read_only=True,
+    )
+    state = parse_qs(urlsplit(authorization_url).query)["state"][0]
+
+    during_grace = old_writer.model_copy(
+        update={
+            "field_encryption_key": new_secret,
+            "field_encryption_key_id": "current-2026-07",
+            "field_encryption_old_keys": {"old-2026-01": old_secret},
+        }
+    )
+    assert decode_oauth_state(state, during_grace).connection_id == "connection-id"
+
+    after_grace = during_grace.model_copy(update={"field_encryption_old_keys": {}})
+    with pytest.raises(McpOAuthError, match="invalid or expired"):
+        decode_oauth_state(state, after_grace)

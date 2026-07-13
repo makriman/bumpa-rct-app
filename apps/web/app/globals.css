@@ -16,8 +16,9 @@
   --info: #3974a4;
   --shadow: 0 18px 50px rgba(27, 47, 38, 0.08);
   --radius: 18px;
-  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system,
+  --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system,
     BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: "Newsreader Variable", Georgia, "Times New Roman", serif;
 }
 
 * {
@@ -214,7 +215,7 @@ a {
 .hero h1,
 .display-title {
   margin: 18px 0;
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-size: clamp(3rem, 6vw, 5.6rem);
   line-height: 0.96;
   font-weight: 600;
@@ -349,7 +350,7 @@ a {
   margin-bottom: 38px;
 }
 .section-heading h2 {
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-size: clamp(2.2rem, 4vw, 3.6rem);
   line-height: 1.02;
   letter-spacing: -0.04em;
@@ -784,12 +785,22 @@ a {
   z-index: 30;
 }
 .topbar-title {
+  display: block;
+  min-width: 0;
   font-weight: 850;
+}
+.topbar-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
 }
 .topbar-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 .mobile-menu-button {
   display: none;
@@ -971,6 +982,10 @@ a {
   width: 100%;
   overflow-x: auto;
 }
+.table-wrap:focus-visible {
+  outline: 3px solid var(--forest);
+  outline-offset: 3px;
+}
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -1092,12 +1107,29 @@ a {
   min-height: 42px;
 }
 .search::before {
-  content: "⌕";
+  content: "";
   position: absolute;
   left: 13px;
-  top: 8px;
+  top: 12px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--ink-soft);
+  border-radius: 50%;
+  box-sizing: border-box;
+  z-index: 1;
+}
+.search::after {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 23px;
+  width: 7px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ink-soft);
+  transform: rotate(45deg);
+  transform-origin: left center;
   color: var(--ink-soft);
-  font-size: 1.1rem;
   z-index: 1;
 }
 .filter-select {
@@ -1337,6 +1369,9 @@ a {
   text-align: right;
 }
 .source-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin-top: 9px;
   padding: 10px 12px;
   background: #f2f5ed;
@@ -1847,7 +1882,8 @@ a {
     font-size: 1.55rem;
   }
   .topbar-title {
-    max-width: 145px;
+    max-width: 100%;
+    font-size: 0.9rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

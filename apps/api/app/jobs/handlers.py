@@ -12,8 +12,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.crypto import FieldCipher
 from app.db.models import AsyncJob, BumpaConnection, ResearchReport
-from app.jobs.runtime import JobResult, PermanentJobError, register_handler
+from app.jobs.runtime import JobResult, PermanentJobError, enqueue_job, register_handler
 from app.providers.bumpa import BumpaProviderError
 from app.providers.local import LocalArtifactStore
 from app.services.bumpa import run_sync
@@ -21,6 +22,7 @@ from app.services.operational_alerts import (
     check_hermes_profile_health,
     deliver_operational_alert,
 )
+from app.services.operational_retention import cleanup_operational_history
 from app.services.proactive_insights import deliver_proactive_insight
 from app.services.reports import (
     cleanup_expired_report_artifacts,
@@ -97,7 +99,7 @@ def bumpa_sync_handler(session: Session, job: AsyncJob) -> JobResult:
             connection=connection,
             date_from=date_from,
             date_to=date_to,
-            field_encryption_key=settings.field_encryption_key,
+            field_cipher=FieldCipher.from_settings(settings),
             runtime_backend=settings.bumpa_backend,
         )
     except HTTPException as exc:
@@ -134,7 +136,7 @@ def research_report_handler(session: Session, job: AsyncJob) -> JobResult:
         LocalArtifactStore(settings.artifact_root),
         report,
         formats,
-        pseudonym_secret=settings.field_encryption_key,
+        pseudonym_secret=settings.research_pseudonym_key,
     )
     return {"report_id": result.id, "status": result.status, "formats": formats}
 
@@ -150,6 +152,38 @@ def research_retention_handler(session: Session, job: AsyncJob) -> JobResult:
         settings.artifact_root,
         limit=raw_limit,
     )
+
+
+@register_handler("system.cleanup_operational_history")
+def operational_retention_handler(session: Session, job: AsyncJob) -> JobResult:
+    raw_limit = job.payload.get("limit")
+    if not isinstance(raw_limit, int) or isinstance(raw_limit, bool) or not 1 <= raw_limit <= 1000:
+        raise PermanentJobError("Operational retention job limit is invalid")
+    settings = get_settings()
+    result = cleanup_operational_history(
+        session,
+        audit_log_retention_days=settings.audit_log_retention_days,
+        system_error_retention_days=settings.system_error_retention_days,
+        limit=raw_limit,
+    )
+    continuation_enqueued = False
+    if raw_limit in result.values():
+        # One bounded job never monopolizes the worker. If a table filled the
+        # batch, enqueue a durable continuation at the tail of the same queue;
+        # other work can interleave while an arbitrary backlog still drains to
+        # the configured retention boundary.
+        _, continuation_enqueued = enqueue_job(
+            session,
+            kind="system.cleanup_operational_history",
+            payload={"limit": raw_limit},
+            idempotency_key=f"operational-retention:continuation:{job.id}",
+            max_attempts=3,
+        )
+    return {
+        "audit_logs_deleted": result["audit_logs_deleted"],
+        "system_errors_deleted": result["system_errors_deleted"],
+        "continuation_enqueued": continuation_enqueued,
+    }
 
 
 def _required_string(payload: dict[str, Any], key: str) -> str:

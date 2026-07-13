@@ -27,20 +27,20 @@ class TenantPhoneView(BaseModel):
 class BumpaConnectionStatusView(BaseModel):
     connected: bool
     status: str
-    scope_type: str | None = None
-    scope_id_last4: str | None = None
-    provider: str | None = None
-    last_successful_sync_at: datetime | None = None
-    last_failed_sync_at: datetime | None = None
-    last_error: str | None = None
+    scope_type: str | None
+    scope_id_last4: str | None
+    provider: str | None
+    last_successful_sync_at: datetime | None
+    last_failed_sync_at: datetime | None
+    last_error: str | None
 
 
 class HermesProfileStatusView(BaseModel):
     provisioned: bool
-    profile_name: str | None = None
-    provider: str | None = None
+    profile_name: str | None
+    provider: str | None
     status: str
-    api_port: int | None = None
+    api_port: int | None
 
 
 class TenantOperationsView(BaseModel):

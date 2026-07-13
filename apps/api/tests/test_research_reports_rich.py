@@ -230,7 +230,7 @@ def test_successful_report_retry_verifies_integrity_and_rebuilds_corruption(
             store,
             report,
             ["jsonl"],
-            pseudonym_secret=settings.field_encryption_key,
+            pseudonym_secret=settings.research_pseudonym_key,
         )
         assert (
             db.scalar(
@@ -248,7 +248,7 @@ def test_successful_report_retry_verifies_integrity_and_rebuilds_corruption(
             store,
             report,
             ["jsonl"],
-            pseudonym_secret=settings.field_encryption_key,
+            pseudonym_secret=settings.research_pseudonym_key,
         )
         rebuilt = db.scalar(select(Artifact).where(Artifact.report_id == report_id))
         assert rebuilt is not None
@@ -284,7 +284,7 @@ def test_multiformat_generation_failure_leaves_no_partial_package(tmp_path: Path
                 FailingStore(tmp_path),
                 report,
                 ["pdf", "csv"],
-                pseudonym_secret=settings.field_encryption_key,
+                pseudonym_secret=settings.research_pseudonym_key,
             )
         db.refresh(report)
         assert report.status == "failed"

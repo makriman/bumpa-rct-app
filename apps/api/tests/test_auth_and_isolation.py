@@ -2,8 +2,10 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.db.models import OtpSession, PhoneIdentity, Tenant, User
+from app.core.dependencies import Principal
+from app.db.models import OtpSession, PhoneIdentity, Tenant, TenantMembership, User
 from app.db.session import SessionLocal
+from app.routes.auth import me
 from tests.conftest import auth_headers
 
 
@@ -14,6 +16,46 @@ def test_health_and_local_otp_login(client: TestClient) -> None:
     assert me.status_code == 200
     assert me.json()["user"]["name"] == "Ada Owner"
     assert me.json()["memberships"][0]["role"] == "owner"
+
+
+def test_me_returns_complete_privileged_membership_snapshot() -> None:
+    user = User(
+        id="user-multi-tenant",
+        name="Multi Store Teammate",
+        email="multi-store@example.test",
+        primary_phone_e164="+2348111111199",
+        status="active",
+    )
+    current_tenant = Tenant(id="tenant-one", slug="tenant-one", name="Tenant One")
+    first = TenantMembership(
+        id="membership-one",
+        tenant_id=current_tenant.id,
+        user_id=user.id,
+        role="admin",
+        status="active",
+    )
+    second = TenantMembership(
+        id="membership-two",
+        tenant_id="tenant-two",
+        user_id=user.id,
+        role="member",
+        status="active",
+    )
+    principal = Principal(
+        user=user,
+        platform_roles=frozenset(),
+        memberships=(first, second),
+        membership=first,
+        tenant=current_tenant,
+    )
+
+    payload = me(principal)
+
+    assert payload["current_tenant_id"] == current_tenant.id
+    assert [item["tenant_id"] for item in payload["memberships"]] == [
+        "tenant-one",
+        "tenant-two",
+    ]
 
 
 @pytest.mark.parametrize(

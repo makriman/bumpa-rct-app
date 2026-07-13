@@ -239,7 +239,7 @@ def build_authorization_url(
         verifier=verifier,
         expires_at=expires_at,
     )
-    encrypted_state = FieldCipher(settings.field_encryption_key).encrypt(
+    encrypted_state = FieldCipher.from_settings(settings).encrypt(
         json.dumps(state.__dict__, separators=(",", ":"), sort_keys=True)
     )
     parameters = {
@@ -267,7 +267,7 @@ def decode_oauth_state(value: str, settings: Settings) -> OAuthState:
     if not value or len(value) > 8192:
         raise McpOAuthError("OAuth state is invalid or expired")
     try:
-        payload = json.loads(FieldCipher(settings.field_encryption_key).decrypt(value))
+        payload = json.loads(FieldCipher.from_settings(settings).decrypt(value))
         state = OAuthState(
             connection_id=str(payload["connection_id"]),
             tenant_id=str(payload["tenant_id"]),
@@ -377,9 +377,7 @@ def revoke_oauth_token(
     if not encrypted_credentials:
         return True
     try:
-        bundle = json.loads(
-            FieldCipher(settings.field_encryption_key).decrypt(encrypted_credentials)
-        )
+        bundle = json.loads(FieldCipher.from_settings(settings).decrypt(encrypted_credentials))
         access_token = bundle["access_token"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
