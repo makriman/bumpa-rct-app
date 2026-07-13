@@ -385,6 +385,16 @@ freshness and chat context until a current writer records a new evidenced run.
 The 0007 downgrade refuses while any legacy row remains; it never fabricates
 completion evidence merely to satisfy the older constraint.
 
+Migration `0008_bumpa_dataset_failures` keeps that hybrid rollback boundary
+forward-compatible while adding typed evidence for provider calls that received
+no HTTP response. `http_status` is nullable only when `failure_kind` explicitly
+records `timeout` or `transport`; HTTP gateway failures retain their real status.
+A pre-0008 writer may continue omitting the nullable `failure_kind` for HTTP
+responses. The downgrade refuses while status-less evidence exists instead of
+inventing an HTTP status. A hybrid rollback therefore retains the target
+operations checkout and schema 0008 while the prior application image continues
+writing its older HTTP-only raw-response shape.
+
 ## GitHub controls before launch
 
 Enable secret scanning and push protection, Dependabot security updates, private

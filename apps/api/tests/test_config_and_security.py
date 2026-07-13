@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -216,6 +219,59 @@ def test_security_invalid_inputs_lockout_token_revocation_and_helpers() -> None:
         FieldCipher("key").decrypt("v2.invalid")
     record = logging.LogRecord("test", logging.INFO, __file__, 1, "hello", (), None)
     assert '"message": "hello"' in JsonFormatter().format(record)
+
+
+def test_json_formatter_preserves_known_methods_and_rejects_caller_text() -> None:
+    valid = logging.LogRecord("http", logging.INFO, __file__, 1, "request", (), None)
+    valid.method = "POST"
+    assert json.loads(JsonFormatter().format(valid))["method"] == "POST"
+
+    canary = "OTP123456BEARERTOKEN"
+    attacker_controlled = logging.LogRecord("http", logging.INFO, __file__, 1, "request", (), None)
+    attacker_controlled.method = canary
+    serialized = JsonFormatter().format(attacker_controlled)
+
+    assert json.loads(serialized)["method"] == "OTHER"
+    assert canary not in serialized
+
+
+def test_uvicorn_configured_before_app_import_cannot_emit_exception_secrets() -> None:
+    exception_canary = "OTP123456-BEARER-EXCEPTION-MUST-NOT-LOG"
+    cause_canary = "RAW-CAUSE-AND-RESPONSE-MUST-NOT-LOG"
+    query_canary = "QUERY-API-KEY-MUST-NOT-LOG"
+    script = f"""
+import logging
+import uvicorn
+
+uvicorn.Config("app.main:app", access_log=True).configure_logging()
+import app.main  # noqa: F401,E402
+
+try:
+    try:
+        raise ValueError({cause_canary!r})
+    except ValueError as cause:
+        raise RuntimeError({exception_canary!r}) from cause
+except RuntimeError:
+    logging.getLogger("uvicorn.error").exception("uvicorn_unhandled_exception")
+
+logging.getLogger("uvicorn.access").info("GET /?token={query_canary} HTTP/1.1")
+"""
+    completed = subprocess.run(  # noqa: S603 - fixed interpreter and in-test script.
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    lines = completed.stderr.splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["logger"] == "uvicorn.error"
+    assert payload["message"] == "uvicorn_unhandled_exception"
+    assert payload["exception_type"] == "RuntimeError"
+    assert payload["exception_frames"]
+    for canary in (exception_canary, cause_canary, query_canary):
+        assert canary not in completed.stderr
 
 
 def test_initial_migration_is_explicit_and_enables_postgres_rls() -> None:

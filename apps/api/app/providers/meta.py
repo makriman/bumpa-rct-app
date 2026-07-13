@@ -3,9 +3,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+from app.providers.diagnostics import (
+    ProviderFailureCategory,
+    normalise_provider_code,
+    provider_request_id_hash,
+)
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -30,11 +36,11 @@ class MetaProviderError(RuntimeError):
 
     def __init__(
         self,
-        category: Literal["transport", "timeout", "rate_limited", "provider", "invalid_response"],
+        category: ProviderFailureCategory,
         *,
         retryable: bool,
         http_status: int | None = None,
-        provider_code: str | None = None,
+        provider_code: object = None,
         request_id: str | None = None,
         retry_after_seconds: int | None = None,
     ) -> None:
@@ -42,8 +48,8 @@ class MetaProviderError(RuntimeError):
         self.category = category
         self.retryable = retryable
         self.http_status = http_status
-        self.provider_code = provider_code
-        self.request_id = request_id
+        self.provider_code = normalise_provider_code(provider_code)
+        self.request_id_hash = provider_request_id_hash(request_id)
         self.retry_after_seconds = retry_after_seconds
 
 
@@ -188,10 +194,7 @@ class MetaWhatsAppClient:
                     if not response.is_success:
                         provider_error = data.get("error") if isinstance(data, dict) else None
                         code = (
-                            str(provider_error.get("code"))
-                            if isinstance(provider_error, dict)
-                            and provider_error.get("code") is not None
-                            else None
+                            provider_error.get("code") if isinstance(provider_error, dict) else None
                         )
                         retryable = (
                             response.status_code in {408, 425, 429} or response.status_code >= 500

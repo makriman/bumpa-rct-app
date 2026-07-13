@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from time import monotonic
-from uuid import uuid4
+from uuid import RFC_4122, UUID, uuid4
 
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -37,6 +37,20 @@ def _safe_route_template(request: Request) -> str:
     route = request.scope.get("route")
     path_template = getattr(route, "path", "<unmatched>")
     return path_template if isinstance(path_template, str) else "<unmatched>"
+
+
+def _request_correlation_id(value: str | None) -> str:
+    """Preserve only canonical RFC 4122 UUIDv4 IDs across trusted service hops."""
+
+    if value is not None:
+        try:
+            parsed = UUID(value)
+        except ValueError:
+            pass
+        else:
+            if parsed.version == 4 and parsed.variant == RFC_4122 and str(parsed) == value:
+                return value
+    return str(uuid4())
 
 
 @asynccontextmanager
@@ -71,7 +85,10 @@ def create_app() -> FastAPI:
 
     @application.middleware("http")
     async def request_context(request: Request, call_next):  # type: ignore[no-untyped-def]
-        correlation_id = request.headers.get("x-correlation-id") or str(uuid4())
+        # Correlation metadata is emitted on every log line. Preserve a canonical
+        # service-hop UUIDv4, but replace all other caller-controlled values so a
+        # phone, OTP, token, or noncanonical identifier cannot enter logs.
+        correlation_id = _request_correlation_id(request.headers.get("x-correlation-id"))
         token = correlation_id_var.set(correlation_id)
         started = monotonic()
         try:

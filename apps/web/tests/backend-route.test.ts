@@ -12,12 +12,14 @@ function context(...path: string[]) {
 
 describe("same-origin backend proxy", () => {
   it("preserves the security and observability headers required by the API", async () => {
+    const correlationId = "550e8400-e29b-41d4-a716-446655440000";
     const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ status: "queued" }), {
         status: 202,
         headers: {
           "content-type": "application/json",
           "retry-after": "3",
+          "x-correlation-id": correlationId,
         },
       }),
     );
@@ -30,7 +32,7 @@ describe("same-origin backend proxy", () => {
           cookie: "bb_session=signed",
           origin: "https://bumpabestie.example",
           referer: "https://bumpabestie.example/settings/bumpa",
-          "x-correlation-id": "correlation-live",
+          "x-correlation-id": correlationId,
           "x-forwarded-for": "203.0.113.9",
           "x-real-ip": "203.0.113.9",
           "idempotency-key": "sync-019f",
@@ -46,7 +48,7 @@ describe("same-origin backend proxy", () => {
     const response = await POST(request, context("bumpa", "sync", "latest"));
 
     expect(response.status).toBe(202);
-    expect(response.headers.get("x-correlation-id")).toBe("correlation-live");
+    expect(response.headers.get("x-correlation-id")).toBe(correlationId);
     expect(response.headers.get("retry-after")).toBe("3");
     const [url, init] = upstream.mock.calls[0];
     expect(String(url)).toBe(
@@ -60,7 +62,7 @@ describe("same-origin backend proxy", () => {
     );
     expect(headers.get("x-forwarded-for")).toBe("203.0.113.9");
     expect(headers.get("x-real-ip")).toBe("203.0.113.9");
-    expect(headers.get("x-correlation-id")).toBe("correlation-live");
+    expect(headers.get("x-correlation-id")).toBe(correlationId);
     expect(headers.get("idempotency-key")).toBe("sync-019f");
     expect(headers.get("x-tenant-id")).toBe("tenant-live");
     expect(headers.get("x-access-reason")).toBe(
@@ -69,6 +71,46 @@ describe("same-origin backend proxy", () => {
     expect(headers.has("authorization")).toBe(false);
     expect(headers.has("connection")).toBe(false);
     expect(headers.has("x-internal-secret")).toBe(false);
+  });
+
+  it("replaces secret-shaped IDs and returns the API's validated correlation ID", async () => {
+    const phoneCanary = "+2348000000000";
+    const otpCanary = "123456";
+    const untrustedCorrelation = [
+      phoneCanary,
+      otpCanary,
+      "bearer",
+      "token",
+    ].join("-");
+    const returnedCorrelation = "8f14e45f-ea8b-4c6d-a321-9d4e5f6a7b8c";
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Rejected" }), {
+        status: 403,
+        headers: {
+          "content-type": "application/json",
+          "x-correlation-id": returnedCorrelation,
+        },
+      }),
+    );
+    const request = new NextRequest(
+      "https://bumpabestie.example/api/backend/auth/me",
+      {
+        method: "POST",
+        headers: { "x-correlation-id": untrustedCorrelation },
+      },
+    );
+
+    const response = await POST(request, context("auth", "me"));
+
+    const forwarded = new Headers(upstream.mock.calls[0][1]?.headers).get(
+      "x-correlation-id",
+    );
+    expect(forwarded).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(forwarded).not.toBe(untrustedCorrelation);
+    expect(response.headers.get("x-correlation-id")).toBe(returnedCorrelation);
+    expect(response.headers.get("x-correlation-id")).not.toBe(forwarded);
   });
 
   it("rejects oversized bodies before contacting the API", async () => {

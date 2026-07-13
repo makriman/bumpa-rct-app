@@ -77,9 +77,25 @@ jobs:
         run: |
           uv run alembic upgrade 0005_platform_roles
           uv run python scripts/verify_postgres_rls.py --seed-sync-compat
+          uv run alembic upgrade 0007_legacy_sync_writer
+          uv run python scripts/verify_postgres_rls.py --seed-bumpa-raw-compat
       - name: Migrate database to head
         working-directory: apps/api
         run: uv run alembic upgrade head
+      - name: Verify Bumpa raw-response migration compatibility
+        working-directory: apps/api
+        run: |
+          uv run python scripts/verify_postgres_rls.py --verify-bumpa-raw-compat
+          if uv run alembic downgrade 0007_legacy_sync_writer; then
+            echo "0008 downgrade unexpectedly accepted status-less evidence" >&2
+            exit 1
+          fi
+          uv run python scripts/verify_postgres_rls.py --remove-statusless-bumpa-raw
+          uv run alembic downgrade 0007_legacy_sync_writer
+          uv run python scripts/verify_postgres_rls.py --verify-bumpa-raw-downgrade
+          uv run alembic upgrade head
+          uv run python scripts/verify_postgres_rls.py --verify-bumpa-raw-compat
+          uv run python scripts/verify_postgres_rls.py --verify-bumpa-sync-atomicity
       - name: Verify PostgreSQL tenant RLS
         working-directory: apps/api
         run: uv run python scripts/verify_postgres_rls.py

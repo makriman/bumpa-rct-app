@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { correlationIdOrNew } from "@/lib/correlation";
+
 const PROTECTED_USER = ["/chat", "/profile", "/settings"];
 const PUBLIC_PATHS = new Set([
   "/login",
@@ -27,8 +29,9 @@ async function authorizeSession(
     const response = await fetch(`${apiBase}/v1/auth/me`, {
       headers: {
         cookie: request.headers.get("cookie") ?? "",
-        "x-correlation-id":
-          request.headers.get("x-correlation-id") ?? crypto.randomUUID(),
+        "x-correlation-id": correlationIdOrNew(
+          request.headers.get("x-correlation-id"),
+        ),
       },
       cache: "no-store",
     });

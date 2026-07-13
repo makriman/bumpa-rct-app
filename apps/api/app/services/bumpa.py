@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 
 from fastapi import HTTPException
@@ -20,9 +21,15 @@ from app.db.models import (
     BumpaSyncRun,
 )
 from app.providers.bumpa import BumpaClient, BumpaProviderError, BumpaSyncResult
-from app.providers.contracts import BumpaSnapshot, ProviderDataset
+from app.providers.contracts import BumpaSnapshot, ProviderDataset, ProviderOrder
+from app.providers.diagnostics import (
+    ProviderFailureCategory,
+    provider_failure_log_extra,
+)
 from app.providers.local import LocalCommerceProvider
 from app.providers.redaction import redact_order_payload
+
+logger = logging.getLogger("bumpabestie.providers")
 
 EXPECTED_SYNC_DATASETS = frozenset(
     {
@@ -61,6 +68,16 @@ class SyncCompletion:
     advances_freshness: bool
 
 
+@dataclass(frozen=True)
+class StagedSync:
+    live_result: BumpaSyncResult | None
+    completion: SyncCompletion
+    dataset_results: dict[str, str]
+    orders_availability: str
+    orders_error: str | None
+    orders_count: int | None
+
+
 def run_sync(
     db: Session,
     *,
@@ -71,169 +88,84 @@ def run_sync(
     field_encryption_key: str | None = None,
     runtime_backend: str | None = None,
 ) -> BumpaSyncRun:
+    selected_connection_boundary = (
+        connection.tenant_id,
+        connection.status,
+        connection.provider,
+        connection.encrypted_api_key,
+        connection.scope_type,
+        connection.scope_id,
+    )
+    # Serialize a connection before creating observable sync state. The run and
+    # every canonical side effect live in the same transaction, so a killed
+    # worker rolls them back instead of leaving a permanent `running` row.
+    db.refresh(connection, with_for_update=True)
+    refreshed_connection_boundary = (
+        connection.tenant_id,
+        connection.status,
+        connection.provider,
+        connection.encrypted_api_key,
+        connection.scope_type,
+        connection.scope_id,
+    )
+    if (
+        refreshed_connection_boundary != selected_connection_boundary
+        or connection.tenant_id != tenant_id
+        or connection.status != "active"
+    ):
+        raise HTTPException(status_code=409, detail="Bumpa connection changed before sync started")
+    failure_publication_boundary = _connection_failure_publication_boundary(connection)
+    run_started_at = utcnow()
     run = BumpaSyncRun(
         tenant_id=tenant_id,
         bumpa_connection_id=connection.id,
         status="running",
         requested_from=date_from,
         requested_to=date_to,
-        started_at=utcnow(),
+        started_at=run_started_at,
     )
     db.add(run)
-    db.commit()
-    db.refresh(run)
+    db.flush()
+    run_id = run.id
+    publication_completed = False
     try:
-        live_result: BumpaSyncResult | None = None
-        snapshot: BumpaSnapshot | BumpaSyncResult
-        if connection.provider == "local":
-            snapshot = LocalCommerceProvider(tenant_id).sync(date_from, date_to)
-        elif connection.provider == "bumpa":
-            if runtime_backend != "bumpa":
-                raise HTTPException(status_code=503, detail="Bumpa integration is not enabled")
-            if not field_encryption_key:
-                raise HTTPException(
-                    status_code=503, detail="Bumpa credential decryption is unavailable"
-                )
-            api_key = FieldCipher(field_encryption_key).decrypt(connection.encrypted_api_key)
-            with BumpaClient(api_key, connection.scope_type, connection.scope_id) as provider:
-                live_result = provider.sync(date_from, date_to)
-            snapshot = live_result
-        else:
-            raise HTTPException(
-                status_code=503,
-                detail="Bumpa provider is not configured",
+        # The run and connection lock belong to the outer transaction. Provider,
+        # evidence, and canonical publication happen inside a savepoint so an
+        # ordinary data failure can roll back without releasing serialization to
+        # a queued sync before this run's terminal audit and health commit.
+        with db.begin_nested():
+            staged = _stage_sync_publication(
+                db,
+                tenant_id=tenant_id,
+                connection=connection,
+                run_id=run.id,
+                date_from=date_from,
+                date_to=date_to,
+                field_encryption_key=field_encryption_key,
+                runtime_backend=runtime_backend,
             )
-        results: dict[str, str] = {}
-        for dataset in snapshot.datasets:
-            key = f"{dataset.resource}.{dataset.dataset}"
-            results[key] = dataset.availability
-            db.add(
-                BumpaMetricSnapshot(
-                    tenant_id=tenant_id,
-                    sync_run_id=run.id,
-                    metric_key=key,
-                    metric_title=dataset.title,
-                    value_decimal=dataset.value,
-                    currency_code="NGN",
-                    requested_from=date_from,
-                    requested_to=date_to,
-                    availability=dataset.availability,
-                )
-            )
-            if live_result is None:
-                db.add(
-                    BumpaRawResponse(
-                        tenant_id=tenant_id,
-                        sync_run_id=run.id,
-                        resource=dataset.resource,
-                        dataset=dataset.dataset,
-                        http_status=200,
-                        availability=dataset.availability,
-                        error_message=dataset.error,
-                        payload=dataset.payload,
-                    )
-                )
-        if live_result is not None:
-            for response in live_result.responses:
-                payload = (
-                    redact_order_payload(response.payload)
-                    if response.resource == "orders"
-                    else response.payload
-                )
-                db.add(
-                    BumpaRawResponse(
-                        tenant_id=tenant_id,
-                        sync_run_id=run.id,
-                        resource=response.resource,
-                        dataset=response.dataset,
-                        http_status=response.status_code,
-                        availability=response.availability,
-                        error_message=response.error,
-                        payload=payload,
-                    )
-                )
-        for order in snapshot.orders:
-            existing = db.scalar(
-                select(BumpaOrder).where(
-                    BumpaOrder.tenant_id == tenant_id,
-                    BumpaOrder.bumpa_order_id == order.order_id,
-                )
-            )
-            values = {
-                "order_number": order.order_number,
-                "status": order.status,
-                "payment_status": order.payment_status,
-                "currency_code": order.currency_code,
-                "total_amount": order.total_amount,
-                "order_date": order.order_date,
-                "raw_payload": order.payload,
-                "shipping_status": _text(order.payload, "shipping_status"),
-                "channel": _text(order.payload, "channel", "sales_channel"),
-                "origin": _text(order.payload, "origin"),
-                "subtotal_amount": _money(order.payload, "subtotal_amount", "subtotal"),
-                "tax_amount": _money(order.payload, "tax_amount", "tax"),
-                "shipping_amount": _money(order.payload, "shipping_amount", "shipping_fee"),
-                "amount_paid": _money(order.payload, "amount_paid", "paid_amount"),
-                "amount_due": _money(order.payload, "amount_due", "due_amount"),
-                "created_at_source": _source_datetime(order.payload, "created_at"),
-                "updated_at_source": _source_datetime(order.payload, "updated_at"),
-            }
-            if existing:
-                for name, value in values.items():
-                    setattr(existing, name, value)
-            else:
-                existing = BumpaOrder(
-                    tenant_id=tenant_id,
-                    bumpa_order_id=order.order_id,
-                    **values,
-                )
-                db.add(existing)
             db.flush()
-            _replace_order_items(db, tenant_id, existing, order.payload)
-            if live_result is None:
-                db.add(
-                    BumpaRawResponse(
-                        tenant_id=tenant_id,
-                        sync_run_id=run.id,
-                        resource="orders",
-                        dataset=None,
-                        http_status=200,
-                        availability="available",
-                        payload=redact_order_payload(order.payload),
-                    )
-                )
-        orders_availability = (
-            live_result.orders_availability if live_result is not None else "available"
-        )
-        orders_error = live_result.orders_error if live_result is not None else None
-        completion = classify_sync_completion(
-            snapshot.datasets,
-            orders_availability=orders_availability,
-            orders_error=orders_error,
-        )
-        run.status = completion.status
-        run.completion_quality = completion.quality
-        run.partial_reason = completion.partial_reason
-        run.orders_availability = orders_availability
-        run.orders_count = (
-            len(snapshot.orders)
-            if orders_availability == "available" and orders_error is None
-            else None
-        )
-        run.dataset_results = results
-        if live_result is not None:
-            run.rate_limit_limit = live_result.rate_limit_limit
-            run.rate_limit_remaining = live_result.rate_limit_remaining
+        publication_completed = True
+        run.status = staged.completion.status
+        run.completion_quality = staged.completion.quality
+        run.partial_reason = staged.completion.partial_reason
+        run.orders_availability = staged.orders_availability
+        run.orders_count = staged.orders_count
+        run.dataset_results = staged.dataset_results
+        if staged.live_result is not None:
+            run.rate_limit_limit = staged.live_result.rate_limit_limit
+            run.rate_limit_remaining = staged.live_result.rate_limit_remaining
         completed_at = utcnow()
         run.finished_at = completed_at
-        if completion.advances_freshness:
+        if staged.completion.advances_freshness:
             connection.last_successful_sync_at = completed_at
             connection.last_error = None
         else:
             connection.last_failed_sync_at = completed_at
             connection.last_error = "Some Bumpa datasets or orders were unavailable"
         db.commit()
-        db.refresh(run)
+        if staged.completion.quality == "degraded" and staged.live_result is not None:
+            _log_degraded_bumpa_sync(run, staged.live_result)
         return run
     except HTTPException:
         run.status = "failed"
@@ -246,7 +178,6 @@ def run_sync(
         db.commit()
         raise
     except BumpaProviderError as exc:
-        db.rollback()
         run.status = "failed"
         run.completion_quality = "failed"
         run.partial_reason = None
@@ -255,19 +186,282 @@ def run_sync(
         connection.last_failed_sync_at = utcnow()
         connection.last_error = run.error
         db.commit()
+        logger.warning(
+            "bumpa_sync_provider_failed",
+            extra=provider_failure_log_extra(
+                provider="bumpa",
+                operation="sync",
+                category=exc.failure_kind,
+                retryable=exc.retryable,
+                http_status=exc.status_code,
+                request_id_hash=exc.request_id_hash,
+                retry_after_seconds=exc.retry_after_seconds,
+                sync_run_id=run.id,
+            ),
+        )
         status_code = 503 if exc.retryable else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     except Exception as exc:
-        db.rollback()
-        run.status = "failed"
-        run.completion_quality = "failed"
-        run.partial_reason = None
-        run.error = "Commerce sync failed"
-        run.finished_at = utcnow()
-        connection.last_failed_sync_at = utcnow()
-        connection.last_error = run.error
-        db.commit()
+        failed_at = utcnow()
+        if not publication_completed:
+            _terminalize_generic_failure(run, connection, failed_at)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                recovered = _recover_generic_failure_after_outer_rollback(
+                    db,
+                    tenant_id=tenant_id,
+                    connection=connection,
+                    run_id=run_id,
+                    run_started_at=run_started_at,
+                    failed_at=failed_at,
+                    date_from=date_from,
+                    date_to=date_to,
+                    failure_publication_boundary=failure_publication_boundary,
+                )
+                if recovered.status != "failed":
+                    return recovered
+        else:
+            # A failure while publishing the outer transaction has an ambiguous
+            # commit outcome. Roll back locally, then inspect by run identity: a
+            # terminal row proves the commit landed; otherwise persist only the
+            # sanitized failure audit in a fresh fenced transaction.
+            db.rollback()
+            recovered = _recover_generic_failure_after_outer_rollback(
+                db,
+                tenant_id=tenant_id,
+                connection=connection,
+                run_id=run_id,
+                run_started_at=run_started_at,
+                failed_at=failed_at,
+                date_from=date_from,
+                date_to=date_to,
+                failure_publication_boundary=failure_publication_boundary,
+            )
+            if recovered.status != "failed":
+                return recovered
         raise HTTPException(status_code=502, detail="Commerce sync failed") from exc
+
+
+def _stage_sync_publication(
+    db: Session,
+    *,
+    tenant_id: str,
+    connection: BumpaConnection,
+    run_id: str,
+    date_from: date,
+    date_to: date,
+    field_encryption_key: str | None,
+    runtime_backend: str | None,
+) -> StagedSync:
+    """Pull and stage one publication inside the caller's nested transaction."""
+
+    live_result: BumpaSyncResult | None = None
+    snapshot: BumpaSnapshot | BumpaSyncResult
+    if connection.provider == "local":
+        snapshot = LocalCommerceProvider(tenant_id).sync(date_from, date_to)
+    elif connection.provider == "bumpa":
+        if runtime_backend != "bumpa":
+            raise HTTPException(status_code=503, detail="Bumpa integration is not enabled")
+        if not field_encryption_key:
+            raise HTTPException(
+                status_code=503, detail="Bumpa credential decryption is unavailable"
+            )
+        api_key = FieldCipher(field_encryption_key).decrypt(connection.encrypted_api_key)
+        with BumpaClient(api_key, connection.scope_type, connection.scope_id) as provider:
+            live_result = provider.sync(date_from, date_to)
+        snapshot = live_result
+    else:
+        raise HTTPException(
+            status_code=503,
+            detail="Bumpa provider is not configured",
+        )
+
+    orders_availability = (
+        live_result.orders_availability if live_result is not None else "available"
+    )
+    orders_error = live_result.orders_error if live_result is not None else None
+    completion = classify_sync_completion(
+        snapshot.datasets,
+        orders_availability=orders_availability,
+        orders_error=orders_error,
+    )
+    results: dict[str, str] = {}
+    for dataset in snapshot.datasets:
+        key = f"{dataset.resource}.{dataset.dataset}"
+        results[key] = dataset.availability
+        db.add(
+            BumpaMetricSnapshot(
+                tenant_id=tenant_id,
+                sync_run_id=run_id,
+                metric_key=key,
+                metric_title=dataset.title,
+                value_decimal=dataset.value,
+                currency_code="NGN",
+                requested_from=date_from,
+                requested_to=date_to,
+                availability=dataset.availability,
+            )
+        )
+        if live_result is None:
+            db.add(
+                BumpaRawResponse(
+                    tenant_id=tenant_id,
+                    sync_run_id=run_id,
+                    resource=dataset.resource,
+                    dataset=dataset.dataset,
+                    http_status=200,
+                    availability=dataset.availability,
+                    error_message=dataset.error,
+                    payload=dataset.payload,
+                )
+            )
+    if live_result is not None:
+        for response in live_result.responses:
+            payload = (
+                redact_order_payload(response.payload)
+                if response.resource == "orders"
+                else response.payload
+            )
+            db.add(
+                BumpaRawResponse(
+                    tenant_id=tenant_id,
+                    sync_run_id=run_id,
+                    resource=response.resource,
+                    dataset=response.dataset,
+                    http_status=response.status_code,
+                    availability=response.availability,
+                    failure_kind=response.failure_kind,
+                    error_message=response.error,
+                    payload=payload,
+                )
+            )
+
+    # Raw responses and run-scoped metric evidence are retained for a degraded
+    # pull, but canonical commerce rows represent the latest usable boundary and
+    # must not move ahead of the evidenced freshness timestamp.
+    if completion.advances_freshness:
+        _promote_orders(
+            db,
+            tenant_id,
+            run_id,
+            snapshot.orders,
+            record_raw_responses=live_result is None,
+        )
+    return StagedSync(
+        live_result=live_result,
+        completion=completion,
+        dataset_results=results,
+        orders_availability=orders_availability,
+        orders_error=orders_error,
+        orders_count=(
+            len(snapshot.orders)
+            if orders_availability == "available" and orders_error is None
+            else None
+        ),
+    )
+
+
+def _terminalize_generic_failure(
+    run: BumpaSyncRun,
+    connection: BumpaConnection,
+    failed_at: datetime,
+) -> None:
+    run.status = "failed"
+    run.completion_quality = "failed"
+    run.partial_reason = None
+    run.error = "Commerce sync failed"
+    run.finished_at = failed_at
+    connection.last_failed_sync_at = failed_at
+    connection.last_error = run.error
+
+
+def _recover_generic_failure_after_outer_rollback(
+    db: Session,
+    *,
+    tenant_id: str,
+    connection: BumpaConnection,
+    run_id: str,
+    run_started_at: datetime,
+    failed_at: datetime,
+    date_from: date,
+    date_to: date,
+    failure_publication_boundary: tuple[object, ...],
+) -> BumpaSyncRun:
+    """Resolve an ambiguous outer commit without duplicating a landed run."""
+
+    db.refresh(connection, with_for_update=True)
+    existing = db.scalar(
+        select(BumpaSyncRun)
+        .where(BumpaSyncRun.id == run_id)
+        .execution_options(populate_existing=True)
+    )
+    if existing is not None:
+        db.commit()
+        return existing
+
+    failed_run = BumpaSyncRun(
+        id=run_id,
+        tenant_id=tenant_id,
+        bumpa_connection_id=connection.id,
+        status="failed",
+        completion_quality="failed",
+        requested_from=date_from,
+        requested_to=date_to,
+        started_at=run_started_at,
+        finished_at=failed_at,
+        error="Commerce sync failed",
+    )
+    db.add(failed_run)
+    if _connection_failure_publication_boundary(connection) == failure_publication_boundary:
+        connection.last_failed_sync_at = failed_at
+        connection.last_error = failed_run.error
+    db.commit()
+    return failed_run
+
+
+def _log_degraded_bumpa_sync(run: BumpaSyncRun, result: BumpaSyncResult) -> None:
+    """Emit one aggregate, sanitized warning after degraded evidence commits."""
+
+    failure = next(
+        (response for response in result.responses if response.failure_kind is not None),
+        None,
+    )
+    category: ProviderFailureCategory = "provider"
+    if failure is not None and failure.failure_kind == "timeout":
+        category = "timeout"
+    elif failure is not None and failure.failure_kind == "transport":
+        category = "transport"
+    logger.warning(
+        "bumpa_sync_degraded",
+        extra=provider_failure_log_extra(
+            provider="bumpa",
+            operation="sync",
+            category=category,
+            retryable=failure.retryable if failure is not None else False,
+            http_status=failure.status_code if failure is not None else None,
+            request_id_hash=(failure.request_id_hash if failure is not None else None),
+            retry_after_seconds=(failure.retry_after_seconds if failure is not None else None),
+            sync_run_id=run.id,
+        ),
+    )
+
+
+def _connection_failure_publication_boundary(connection: BumpaConnection) -> tuple[object, ...]:
+    """Return committed connection state that fences stale failure publication."""
+
+    return (
+        connection.updated_at,
+        connection.status,
+        connection.provider,
+        connection.encrypted_api_key,
+        connection.scope_type,
+        connection.scope_id,
+        connection.last_successful_sync_at,
+        connection.last_failed_sync_at,
+        connection.last_error,
+    )
 
 
 def classify_sync_completion(
@@ -343,6 +537,66 @@ def clear_tenant_commerce(db: Session, tenant_id: str) -> None:
     db.execute(delete(BumpaOrder).where(BumpaOrder.tenant_id == tenant_id))
     db.execute(delete(BumpaMetricSnapshot).where(BumpaMetricSnapshot.tenant_id == tenant_id))
     db.commit()
+
+
+def _promote_orders(
+    db: Session,
+    tenant_id: str,
+    sync_run_id: str,
+    orders: Sequence[ProviderOrder],
+    *,
+    record_raw_responses: bool,
+) -> None:
+    for order in orders:
+        existing = db.scalar(
+            select(BumpaOrder).where(
+                BumpaOrder.tenant_id == tenant_id,
+                BumpaOrder.bumpa_order_id == order.order_id,
+            )
+        )
+        values = {
+            "order_number": order.order_number,
+            "status": order.status,
+            "payment_status": order.payment_status,
+            "currency_code": order.currency_code,
+            "total_amount": order.total_amount,
+            "order_date": order.order_date,
+            "raw_payload": order.payload,
+            "shipping_status": _text(order.payload, "shipping_status"),
+            "channel": _text(order.payload, "channel", "sales_channel"),
+            "origin": _text(order.payload, "origin"),
+            "subtotal_amount": _money(order.payload, "subtotal_amount", "subtotal"),
+            "tax_amount": _money(order.payload, "tax_amount", "tax"),
+            "shipping_amount": _money(order.payload, "shipping_amount", "shipping_fee"),
+            "amount_paid": _money(order.payload, "amount_paid", "paid_amount"),
+            "amount_due": _money(order.payload, "amount_due", "due_amount"),
+            "created_at_source": _source_datetime(order.payload, "created_at"),
+            "updated_at_source": _source_datetime(order.payload, "updated_at"),
+        }
+        if existing:
+            for name, value in values.items():
+                setattr(existing, name, value)
+        else:
+            existing = BumpaOrder(
+                tenant_id=tenant_id,
+                bumpa_order_id=order.order_id,
+                **values,
+            )
+            db.add(existing)
+        db.flush()
+        _replace_order_items(db, tenant_id, existing, order.payload)
+        if record_raw_responses:
+            db.add(
+                BumpaRawResponse(
+                    tenant_id=tenant_id,
+                    sync_run_id=sync_run_id,
+                    resource="orders",
+                    dataset=None,
+                    http_status=200,
+                    availability="available",
+                    payload=redact_order_payload(order.payload),
+                )
+            )
 
 
 def _replace_order_items(
