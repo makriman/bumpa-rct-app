@@ -161,6 +161,35 @@ class BumpaSyncRun(IdMixin, Base):
             name="ck_bumpa_sync_runs_status",
         ),
         CheckConstraint(
+            "completion_quality IN "
+            "('pending', 'complete', 'accepted_partial', 'degraded', 'failed')",
+            name="ck_bumpa_sync_runs_completion_quality",
+        ),
+        CheckConstraint(
+            "partial_reason IS NULL OR partial_reason IN "
+            "('profit_not_calculable', 'dataset_unavailable', 'dataset_error', "
+            "'orders_unavailable', 'incomplete_dataset_set')",
+            name="ck_bumpa_sync_runs_partial_reason",
+        ),
+        CheckConstraint(
+            "(status IN ('queued', 'running') AND completion_quality = 'pending' "
+            "AND partial_reason IS NULL AND error IS NULL) OR "
+            "(status = 'success' AND completion_quality = 'complete' "
+            "AND partial_reason IS NULL AND error IS NULL) OR "
+            "(status = 'partial' AND completion_quality = 'accepted_partial' "
+            "AND partial_reason IS NOT NULL "
+            "AND partial_reason = 'profit_not_calculable' AND error IS NULL "
+            "AND orders_availability IS NOT NULL "
+            "AND orders_availability = 'available' AND orders_count IS NOT NULL) OR "
+            "(status = 'partial' AND completion_quality = 'degraded' "
+            "AND partial_reason IS NOT NULL "
+            "AND partial_reason IN ('dataset_unavailable', 'dataset_error', "
+            "'orders_unavailable', 'incomplete_dataset_set')) OR "
+            "(status = 'failed' AND completion_quality = 'failed' "
+            "AND partial_reason IS NULL)",
+            name="ck_bumpa_sync_runs_completion_state",
+        ),
+        CheckConstraint(
             "rate_limit_limit IS NULL OR rate_limit_limit >= 0",
             name="ck_bumpa_sync_runs_rate_limit_nonnegative",
         ),
@@ -173,6 +202,15 @@ class BumpaSyncRun(IdMixin, Base):
             "OR rate_limit_remaining <= rate_limit_limit",
             name="ck_bumpa_sync_runs_rate_remaining_within_limit",
         ),
+        CheckConstraint(
+            "orders_count IS NULL OR orders_count >= 0",
+            name="ck_bumpa_sync_runs_orders_count_nonnegative",
+        ),
+        CheckConstraint(
+            "orders_availability IS NULL OR orders_availability IN "
+            "('available', 'unavailable', 'error')",
+            name="ck_bumpa_sync_runs_orders_availability",
+        ),
     )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
@@ -180,6 +218,8 @@ class BumpaSyncRun(IdMixin, Base):
         ForeignKey("bumpa_connections.id", ondelete="CASCADE")
     )
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    completion_quality: Mapped[str] = mapped_column(String(24), default="pending")
+    partial_reason: Mapped[str | None] = mapped_column(String(40))
     requested_from: Mapped[date] = mapped_column(Date)
     requested_to: Mapped[date] = mapped_column(Date)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -187,6 +227,8 @@ class BumpaSyncRun(IdMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     rate_limit_limit: Mapped[int | None] = mapped_column(Integer)
     rate_limit_remaining: Mapped[int | None] = mapped_column(Integer)
+    orders_availability: Mapped[str | None] = mapped_column(String(24))
+    orders_count: Mapped[int | None] = mapped_column(Integer)
     dataset_results: Mapped[JsonDict] = mapped_column(JSON, default=dict)
 
 

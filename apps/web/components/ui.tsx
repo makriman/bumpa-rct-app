@@ -248,17 +248,19 @@ export function Modal({
 export function Toast({
   message,
   onClose,
+  tone = "success",
 }: {
   message: string;
   onClose: () => void;
+  tone?: "success" | "warning";
 }) {
   useEffect(() => {
     const timer = window.setTimeout(onClose, 3600);
     return () => window.clearTimeout(timer);
   }, [onClose]);
   return (
-    <div className="toast" role="status">
-      <span aria-hidden="true">✓</span>
+    <div className={`toast toast-${tone}`} role="status">
+      <span aria-hidden="true">{tone === "warning" ? "!" : "✓"}</span>
       <span>{message}</span>
       <button
         className="button button-ghost button-small"

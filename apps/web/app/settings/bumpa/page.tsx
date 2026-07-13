@@ -22,15 +22,76 @@ type TerminalSyncStatus = "success" | "partial" | "failed";
 type TerminalSyncRun = Omit<SyncRun, "status"> & {
   status: TerminalSyncStatus;
 };
+type SyncJobStatus =
+  | "pending"
+  | "queued"
+  | "running"
+  | "retry"
+  | "succeeded"
+  | "dead_letter"
+  | "cancelled";
+type SyncJobCorrelation = {
+  job_id: string;
+  status: SyncJobStatus;
+  sync_run_id?: string | null;
+};
 const terminalSyncStatuses = new Set<TerminalSyncStatus>([
   "success",
   "partial",
   "failed",
 ]);
+const activeSyncJobStatuses = new Set<SyncJobStatus>([
+  "pending",
+  "queued",
+  "running",
+  "retry",
+]);
 const syncPollDelaysMs = [1000, 2000, 4000, 8000, 12000, 15000, 18000];
 
 function isTerminalSyncStatus(status: string): status is TerminalSyncStatus {
   return terminalSyncStatuses.has(status as TerminalSyncStatus);
+}
+
+function isUsableProfitPartial(
+  run:
+    | Pick<SyncRun, "completion_quality" | "partial_reason" | "status">
+    | undefined,
+): boolean {
+  return (
+    run?.status === "partial" &&
+    run.completion_quality === "accepted_partial" &&
+    run.partial_reason === "profit_not_calculable"
+  );
+}
+
+function unavailableProfitLabel(
+  run: Pick<SyncRun, "dataset_results"> | undefined,
+): string {
+  const unavailableDatasets = Object.entries(run?.dataset_results ?? {})
+    .filter(([, availability]) => availability === "unavailable")
+    .map(([dataset]) => dataset);
+  const grossUnavailable = unavailableDatasets.some(
+    (dataset) =>
+      dataset === "gross_profit" || dataset.endsWith(".gross_profit"),
+  );
+  const netUnavailable = unavailableDatasets.some(
+    (dataset) => dataset === "net_profit" || dataset.endsWith(".net_profit"),
+  );
+  if (grossUnavailable && netUnavailable) return "Gross and net profit";
+  if (grossUnavailable) return "Gross profit";
+  if (netUnavailable) return "Net profit";
+  return "Profit metrics";
+}
+
+function profitLimitationMessage(
+  run: Pick<SyncRun, "dataset_results"> | undefined,
+): string {
+  const label = unavailableProfitLabel(run);
+  const verb =
+    label === "Gross and net profit" || label === "Profit metrics"
+      ? "are"
+      : "is";
+  return `${label} ${verb} unavailable because Bumpa cannot calculate ${verb === "are" ? "them" : "it"} for this store. All other data from this refresh is current.`;
 }
 
 function abortError(): Error {
@@ -66,6 +127,7 @@ export default function BumpaPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [toastTone, setToastTone] = useState<"success" | "warning">("success");
   const activePoll = useRef<AbortController | null>(null);
   useEffect(
     () => () => {
@@ -94,15 +156,18 @@ export default function BumpaPage() {
     (connection.data.provider === "bumpa" || localSimulator);
 
   const pollForTerminalRun = async (
-    knownRunIds: Set<string>,
+    jobId: string,
     signal: AbortSignal,
   ): Promise<TerminalSyncRun> => {
     let lastPollError: Error | null = null;
     for (const delayMs of syncPollDelaysMs) {
       await waitForPoll(delayMs, signal);
-      let nextRuns: SyncRun[];
+      let job: SyncJobCorrelation;
       try {
-        nextRuns = await apiRequest<SyncRun[]>("/bumpa/sync-runs", { signal });
+        job = await apiRequest<SyncJobCorrelation>(
+          `/bumpa/sync-jobs/${encodeURIComponent(jobId)}`,
+          { signal },
+        );
         lastPollError = null;
       } catch (reason) {
         if (reason instanceof Error && reason.name === "AbortError")
@@ -113,11 +178,50 @@ export default function BumpaPage() {
             : new Error("The sync status request failed.");
         continue;
       }
-      runs.replace(nextRuns);
-      const requestedRun = nextRuns.find((run) => !knownRunIds.has(run.id));
-      if (requestedRun && isTerminalSyncStatus(requestedRun.status)) {
-        return { ...requestedRun, status: requestedRun.status };
+      if (job.job_id !== jobId) {
+        throw new Error(
+          "The refresh status response did not match the requested job.",
+        );
       }
+      if (job.status === "dead_letter" || job.status === "cancelled") {
+        throw new Error(
+          `The Bumpa refresh job was ${job.status === "dead_letter" ? "stopped after repeated failures" : "cancelled"}. Please try again or contact support.`,
+        );
+      }
+      if (activeSyncJobStatuses.has(job.status)) continue;
+      if (job.status !== "succeeded") {
+        throw new Error("The Bumpa refresh returned an unknown job status.");
+      }
+      if (!job.sync_run_id) {
+        throw new Error(
+          "The Bumpa refresh completed without a correlated sync record.",
+        );
+      }
+      let nextRuns: SyncRun[];
+      try {
+        nextRuns = await apiRequest<SyncRun[]>("/bumpa/sync-runs", { signal });
+      } catch (reason) {
+        if (reason instanceof Error && reason.name === "AbortError")
+          throw reason;
+        lastPollError =
+          reason instanceof Error
+            ? reason
+            : new Error("The sync history request failed.");
+        continue;
+      }
+      runs.replace(nextRuns);
+      const requestedRun = nextRuns.find((run) => run.id === job.sync_run_id);
+      if (!requestedRun) {
+        throw new Error(
+          "The Bumpa refresh completed, but its exact sync record was not returned.",
+        );
+      }
+      if (!isTerminalSyncStatus(requestedRun.status)) {
+        throw new Error(
+          "The Bumpa refresh completed, but its correlated sync record is not terminal.",
+        );
+      }
+      return { ...requestedRun, status: requestedRun.status };
     }
     if (lastPollError) {
       throw new Error(
@@ -136,35 +240,54 @@ export default function BumpaPage() {
     setBusy(true);
     setError("");
     setToast("");
+    setToastTone("success");
     try {
       const accepted = await apiRequest<{
         status: "queued" | "success" | "partial" | "failed";
         job_id?: string;
         error?: string | null;
+        completion_quality?: SyncRun["completion_quality"];
+        partial_reason?: SyncRun["partial_reason"];
+        dataset_results?: SyncRun["dataset_results"];
       }>("/bumpa/sync/latest", {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
         signal: controller.signal,
       });
-      let finalStatus = accepted.status;
-      let finalError = accepted.error;
+      let finalResult = accepted;
       if (accepted.status === "queued") {
+        if (!accepted.job_id) {
+          throw new Error(
+            "The Bumpa refresh was queued without a trackable job identifier.",
+          );
+        }
         const completedRun = await pollForTerminalRun(
-          new Set((runs.data ?? []).map((run) => run.id)),
+          accepted.job_id,
           controller.signal,
         );
-        finalStatus = completedRun.status;
-        finalError = completedRun.error;
+        finalResult = completedRun;
       } else {
         await runs.reload();
       }
       await connection.reload();
-      if (finalStatus === "failed") {
-        setError(finalError || "Bumpa refresh failed. Please try again.");
-      } else if (finalStatus === "partial") {
-        setToast(
-          "Bumpa refresh completed with unavailable datasets. Review the latest run for details.",
+      if (finalResult.status === "failed") {
+        setError(
+          finalResult.error || "Bumpa refresh failed. Please try again.",
         );
+      } else if (finalResult.status === "partial") {
+        if (
+          finalResult.completion_quality === "accepted_partial" &&
+          finalResult.partial_reason === "profit_not_calculable"
+        ) {
+          setToast(
+            `Bumpa data refreshed. ${profitLimitationMessage(finalResult)}`,
+          );
+        } else {
+          setToastTone("warning");
+          setToast(
+            "Bumpa refresh completed, but some data could not be refreshed. Review the latest run for details.",
+          );
+        }
       } else {
         setToast("Bumpa refresh completed successfully.");
       }
@@ -183,6 +306,12 @@ export default function BumpaPage() {
     }
   };
   const latest = runs.data?.[0];
+  const usableProfitPartial = isUsableProfitPartial(latest);
+  const unavailableProfitMessage = usableProfitPartial
+    ? profitLimitationMessage(latest)
+    : "";
+  const degradedPartial =
+    latest?.status === "partial" && latest.completion_quality === "degraded";
   return (
     <AppShell surface="user" title="Bumpa connection">
       <PageHeader
@@ -277,10 +406,12 @@ export default function BumpaPage() {
                   `${titleCase(connection.data.scope_type)} · •••• ${connection.data.scope_id_last4 ?? "unknown"}`,
                 ],
                 [
-                  "Last successful sync",
+                  "Last data refresh",
                   formatDate(connection.data.last_successful_sync_at),
                 ],
-                ["Last error", connection.data.last_error ?? "None recorded"],
+                ...(connection.data.last_error
+                  ? [["Last error", connection.data.last_error]]
+                  : []),
               ].map(([label, value]) => (
                 <div className="detail-row" key={label}>
                   <span className="detail-label">{label}</span>
@@ -300,6 +431,36 @@ export default function BumpaPage() {
               </div>
               {latest ? (
                 <>
+                  {usableProfitPartial && (
+                    <div
+                      className="alert alert-info sync-quality-notice"
+                      role="status"
+                      aria-label="Bumpa data limitation"
+                    >
+                      <span aria-hidden="true">ⓘ</span>
+                      <div>
+                        <strong>Most data is current</strong>
+                        <p>{unavailableProfitMessage}</p>
+                      </div>
+                    </div>
+                  )}
+                  {degradedPartial && (
+                    <div
+                      className="alert alert-warning sync-quality-notice"
+                      role="status"
+                      aria-label="Bumpa data warning"
+                    >
+                      <span aria-hidden="true">!</span>
+                      <div>
+                        <strong>Some data needs attention</strong>
+                        <p>
+                          This refresh could not update every required dataset.
+                          Review dataset availability before relying on these
+                          figures.
+                        </p>
+                      </div>
+                    </div>
+                  )}
                   {Object.entries(latest.dataset_results ?? {}).map(
                     ([dataset, result]) => (
                       <div className="detail-row" key={dataset}>
@@ -364,7 +525,9 @@ export default function BumpaPage() {
           </Card>
         </>
       )}
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
+      {toast && (
+        <Toast message={toast} tone={toastTone} onClose={() => setToast("")} />
+      )}
     </AppShell>
   );
 }

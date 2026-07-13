@@ -222,9 +222,14 @@ def _fixture_pair(
                 tenant_id=tenant_id,
                 bumpa_connection_id=connection.id,
                 status="success",
+                completion_quality="complete",
+                partial_reason=None,
                 requested_from=date(2026, 1, 1),
                 requested_to=date(2026, 1, 1),
                 finished_at=now,
+                error=None,
+                orders_availability="available",
+                orders_count=0,
                 dataset_results={},
             )
         )

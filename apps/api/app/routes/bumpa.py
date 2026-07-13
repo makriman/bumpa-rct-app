@@ -155,8 +155,12 @@ def _run_view(row: BumpaSyncRun) -> dict:
     return {
         "id": row.id,
         "status": row.status,
+        "completion_quality": row.completion_quality,
+        "partial_reason": row.partial_reason,
         "requested_from": row.requested_from,
         "requested_to": row.requested_to,
+        "orders_availability": row.orders_availability,
+        "orders_count": row.orders_count,
         "dataset_results": row.dataset_results,
         "started_at": row.started_at,
         "finished_at": row.finished_at,

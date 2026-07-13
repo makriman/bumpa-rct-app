@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select
@@ -18,9 +20,45 @@ from app.db.models import (
     BumpaSyncRun,
 )
 from app.providers.bumpa import BumpaClient, BumpaProviderError, BumpaSyncResult
-from app.providers.contracts import BumpaSnapshot
+from app.providers.contracts import BumpaSnapshot, ProviderDataset
 from app.providers.local import LocalCommerceProvider
 from app.providers.redaction import redact_order_payload
+
+EXPECTED_SYNC_DATASETS = frozenset(
+    {
+        "sales.overview",
+        "sales.total_sales",
+        "sales.gross_profit",
+        "sales.net_profit",
+        "products.overview",
+        "products.products_sold",
+        "products.top_selling_products",
+        "products.least_selling_products",
+        "customers.overview",
+        "customers.top_customers_order",
+    }
+)
+ACCEPTED_UNAVAILABLE_PROFIT_ERRORS = {
+    "sales.gross_profit": "Gross profit cannot be calculated for this store",
+    "sales.net_profit": "Net profit cannot be calculated for this store",
+}
+
+SyncCompletionQuality = Literal["complete", "accepted_partial", "degraded"]
+SyncPartialReason = Literal[
+    "profit_not_calculable",
+    "dataset_unavailable",
+    "dataset_error",
+    "orders_unavailable",
+    "incomplete_dataset_set",
+]
+
+
+@dataclass(frozen=True)
+class SyncCompletion:
+    status: Literal["success", "partial"]
+    quality: SyncCompletionQuality
+    partial_reason: SyncPartialReason | None
+    advances_freshness: bool
 
 
 def run_sync(
@@ -65,7 +103,7 @@ def run_sync(
                 status_code=503,
                 detail="Bumpa provider is not configured",
             )
-        results: dict[str, Any] = {}
+        results: dict[str, str] = {}
         for dataset in snapshot.datasets:
             key = f"{dataset.resource}.{dataset.dataset}"
             results[key] = dataset.availability
@@ -167,28 +205,40 @@ def run_sync(
         orders_availability = (
             live_result.orders_availability if live_result is not None else "available"
         )
-        run.status = (
-            "partial"
-            if any(value != "available" for value in results.values())
-            or orders_availability != "available"
-            else "success"
+        orders_error = live_result.orders_error if live_result is not None else None
+        completion = classify_sync_completion(
+            snapshot.datasets,
+            orders_availability=orders_availability,
+            orders_error=orders_error,
+        )
+        run.status = completion.status
+        run.completion_quality = completion.quality
+        run.partial_reason = completion.partial_reason
+        run.orders_availability = orders_availability
+        run.orders_count = (
+            len(snapshot.orders)
+            if orders_availability == "available" and orders_error is None
+            else None
         )
         run.dataset_results = results
         if live_result is not None:
             run.rate_limit_limit = live_result.rate_limit_limit
             run.rate_limit_remaining = live_result.rate_limit_remaining
-        run.finished_at = utcnow()
-        if run.status == "success":
-            connection.last_successful_sync_at = utcnow()
+        completed_at = utcnow()
+        run.finished_at = completed_at
+        if completion.advances_freshness:
+            connection.last_successful_sync_at = completed_at
             connection.last_error = None
         else:
-            connection.last_failed_sync_at = utcnow()
+            connection.last_failed_sync_at = completed_at
             connection.last_error = "Some Bumpa datasets or orders were unavailable"
         db.commit()
         db.refresh(run)
         return run
     except HTTPException:
         run.status = "failed"
+        run.completion_quality = "failed"
+        run.partial_reason = None
         run.error = "Provider is not configured"
         run.finished_at = utcnow()
         connection.last_failed_sync_at = utcnow()
@@ -198,6 +248,8 @@ def run_sync(
     except BumpaProviderError as exc:
         db.rollback()
         run.status = "failed"
+        run.completion_quality = "failed"
+        run.partial_reason = None
         run.error = str(exc)
         run.finished_at = utcnow()
         connection.last_failed_sync_at = utcnow()
@@ -208,12 +260,83 @@ def run_sync(
     except Exception as exc:
         db.rollback()
         run.status = "failed"
+        run.completion_quality = "failed"
+        run.partial_reason = None
         run.error = "Commerce sync failed"
         run.finished_at = utcnow()
         connection.last_failed_sync_at = utcnow()
         connection.last_error = run.error
         db.commit()
         raise HTTPException(status_code=502, detail="Commerce sync failed") from exc
+
+
+def classify_sync_completion(
+    datasets: Sequence[ProviderDataset],
+    *,
+    orders_availability: str,
+    orders_error: str | None = None,
+) -> SyncCompletion:
+    """Classify a completed pull without overstating incomplete business data.
+
+    A store may legitimately be unable to calculate profit while every other
+    required dataset and its orders are current. That remains a visible partial
+    run, but it is safe to advance the connection's freshness timestamp. Any
+    missing required dataset, provider error, or unavailable required data does
+    not advance freshness.
+    """
+
+    keyed_datasets: dict[str, ProviderDataset] = {}
+    duplicate_dataset = False
+    for dataset in datasets:
+        key = f"{dataset.resource}.{dataset.dataset}"
+        duplicate_dataset = duplicate_dataset or key in keyed_datasets
+        keyed_datasets[key] = dataset
+
+    exact_dataset_set = (
+        not duplicate_dataset and frozenset(keyed_datasets) == EXPECTED_SYNC_DATASETS
+    )
+    if (
+        exact_dataset_set
+        and orders_availability == "available"
+        and orders_error is None
+        and all(
+            dataset.availability == "available" and dataset.error is None
+            for dataset in keyed_datasets.values()
+        )
+    ):
+        return SyncCompletion("success", "complete", None, True)
+
+    optional_unavailable = {
+        key
+        for key, dataset in keyed_datasets.items()
+        if dataset.availability == "unavailable" and key in ACCEPTED_UNAVAILABLE_PROFIT_ERRORS
+    }
+    accepted_profit_partial = (
+        exact_dataset_set
+        and orders_availability == "available"
+        and orders_error is None
+        and bool(optional_unavailable)
+        and all(
+            (dataset.availability == "available" and dataset.error is None)
+            or (
+                key in optional_unavailable
+                and dataset.error == ACCEPTED_UNAVAILABLE_PROFIT_ERRORS[key]
+            )
+            for key, dataset in keyed_datasets.items()
+        )
+    )
+    if accepted_profit_partial:
+        return SyncCompletion("partial", "accepted_partial", "profit_not_calculable", True)
+
+    if orders_availability != "available" or orders_error is not None:
+        partial_reason: SyncPartialReason = "orders_unavailable"
+    elif not exact_dataset_set:
+        partial_reason = "incomplete_dataset_set"
+    elif any(dataset.availability == "error" for dataset in keyed_datasets.values()):
+        partial_reason = "dataset_error"
+    else:
+        partial_reason = "dataset_unavailable"
+    return SyncCompletion("partial", "degraded", partial_reason, False)
 
 
 def clear_tenant_commerce(db: Session, tenant_id: str) -> None:

@@ -72,6 +72,10 @@ def bumpa_sync_handler(session: Session, job: AsyncJob) -> JobResult:
     return {
         "sync_run_id": result.id,
         "status": result.status,
+        "completion_quality": result.completion_quality,
+        "partial_reason": result.partial_reason,
+        "orders_availability": result.orders_availability,
+        "orders_count": result.orders_count,
         "requested_from": result.requested_from.isoformat(),
         "requested_to": result.requested_to.isoformat(),
     }

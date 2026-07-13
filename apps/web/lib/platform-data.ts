@@ -53,6 +53,19 @@ export type SyncRun = {
   id: string;
   tenant_id?: string;
   status: string;
+  completion_quality?:
+    | "pending"
+    | "complete"
+    | "accepted_partial"
+    | "degraded"
+    | "failed";
+  partial_reason?:
+    | "profit_not_calculable"
+    | "dataset_unavailable"
+    | "dataset_error"
+    | "orders_unavailable"
+    | "incomplete_dataset_set"
+    | null;
   requested_from?: string;
   requested_to?: string;
   dataset_results?: Record<string, unknown> | null;
