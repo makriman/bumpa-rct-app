@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
+from app.core.logging import JsonFormatter
 from app.db.models import WebhookEvent, WhatsappMessage
 from app.db.session import SessionLocal
 from app.jobs.runtime import PermanentJobError
@@ -92,7 +94,7 @@ def test_meta_errors_are_sanitized_and_classified() -> None:
     assert error.retryable is True
     assert error.http_status == 429
     assert error.provider_code == "4"
-    assert error.request_id == "request-rate"
+    assert error.request_id_hash == hashlib.sha256(b"request-rate").hexdigest()
     assert error.retry_after_seconds == 12
     assert secret_marker not in str(error)
     assert "t" * 40 not in str(error)
@@ -344,6 +346,140 @@ def test_meta_otp_route_returns_only_sanitized_provider_failure(
         app.dependency_overrides.pop(get_settings, None)
     assert response.status_code == 502
     assert response.json() == {"detail": "WhatsApp rejected OTP delivery"}
+
+
+def test_meta_otp_failure_log_is_typed_and_contains_no_request_secrets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.routes import auth
+
+    phone = "+2348787878787"
+    access_token = "meta-access-token-must-never-be-logged"
+    raw_body_marker = "raw-meta-response-body-must-never-be-logged"
+    caller_correlation = "123456-caller-token-must-never-be-logged"
+    raw_request_id = "meta-request-A1B2C3D4"
+    provider_error = MetaProviderError(
+        "rate_limited",
+        retryable=True,
+        http_status=429,
+        provider_code=131047,
+        request_id=raw_request_id,
+        retry_after_seconds=12,
+    )
+    provider_error.__cause__ = RuntimeError(raw_body_marker)
+
+    class FailingOtpProvider:
+        def __init__(self) -> None:
+            self.attempt: tuple[str, str] | None = None
+
+        def send_otp(self, phone_e164: str, code: str) -> str:
+            self.attempt = (phone_e164, code)
+            raise provider_error
+
+    class JsonCapture(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(JsonFormatter().format(record))
+
+    provider = FailingOtpProvider()
+    base = _meta_test_settings()
+    settings = Settings(
+        app_env="test",
+        database_url=base.database_url,
+        artifact_root=base.artifact_root,
+        whatsapp_backend="meta",
+        meta_app_secret="s" * 32,
+        meta_phone_number_id="3234567890",
+        meta_system_user_access_token=access_token,
+        expose_local_otp=True,
+        seed_demo_data=True,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(auth.MetaWhatsAppClient, "from_settings", lambda _settings: provider)
+    capture = JsonCapture()
+    provider_logger = logging.getLogger("bumpabestie.providers")
+    previous_disabled = provider_logger.disabled
+    previous_level = provider_logger.level
+    provider_logger.disabled = False
+    provider_logger.setLevel(logging.WARNING)
+    provider_logger.addHandler(capture)
+    try:
+        response = client.post(
+            "/v1/auth/request-otp",
+            json={"phone_e164": phone},
+            headers={"X-Correlation-ID": caller_correlation},
+        )
+    finally:
+        provider_logger.removeHandler(capture)
+        provider_logger.setLevel(previous_level)
+        provider_logger.disabled = previous_disabled
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 503
+    assert provider.attempt is not None
+    attempted_phone, attempted_otp = provider.attempt
+    assert attempted_phone == phone
+    assert len(capture.lines) == 1
+    payload = json.loads(capture.lines[0])
+    assert payload == {
+        "level": "WARNING",
+        "logger": "bumpabestie.providers",
+        "message": "meta_otp_delivery_failed",
+        "correlation_id": payload["correlation_id"],
+        "provider": "meta",
+        "provider_operation": "otp_delivery",
+        "provider_category": "rate_limited",
+        "provider_retryable": True,
+        "provider_http_status": 429,
+        "provider_code": "131047",
+        "provider_request_id_hash": hashlib.sha256(raw_request_id.encode()).hexdigest(),
+        "retry_after_seconds": 12,
+    }
+    serialized = capture.lines[0]
+    for secret in (
+        phone,
+        attempted_otp,
+        access_token,
+        raw_body_marker,
+        raw_request_id,
+        caller_correlation,
+    ):
+        assert secret not in serialized
+    assert "exception" not in payload
+
+
+def test_meta_diagnostics_drop_arbitrary_codes_and_oversized_request_ids() -> None:
+    error = MetaProviderError(
+        "provider",
+        retryable=False,
+        provider_code="100-private-response-detail",
+        request_id="x" * 513,
+    )
+
+    assert error.provider_code is None
+    assert error.request_id_hash is None
+
+
+@pytest.mark.parametrize(
+    "request_id",
+    [
+        "123456",
+        "2348787878787",
+        "+2348787878787",
+        "request-2348787878787",
+        "short",
+        "request-id-with-a-newline\nprivate",
+    ],
+)
+def test_meta_diagnostics_drop_low_entropy_or_phone_shaped_request_ids(
+    request_id: str,
+) -> None:
+    error = MetaProviderError("provider", retryable=False, request_id=request_id)
+
+    assert error.request_id_hash is None
 
 
 def test_meta_webhook_routes_unknown_sender_through_live_adapter(

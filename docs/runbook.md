@@ -358,6 +358,18 @@ correctness.
   under an approved retention decision.
 - After a container restart, verify revision/image digest, migration head,
   idempotency state, domain routes and the current provider modes.
+- At migration `0008_bumpa_dataset_failures`, a hybrid application rollback is
+  intentionally schema-forward: retain the target operations checkout and do not
+  down-migrate. Pre-0008 writers can still record HTTP responses, while current
+  writers use nullable HTTP status only with typed `timeout` or `transport`
+  evidence. A 0008 downgrade must stop if such status-less evidence exists.
+- Sync publication uses a connection row lock plus a nested savepoint, so a failed
+  publication records its terminal audit before a queued sync starts. If two
+  consecutive outer database commits both fail ambiguously while recovery commits
+  immediately become available, canonical data and run evidence still fail closed
+  and both failed audits are retained; the cached `last_failed_sync_at` may be the
+  older timestamp. Reconcile that cache from the newest terminal
+  `bumpa_sync_runs.finished_at` during the incident review.
 - Restarting Redis can discard wake-ups and heartbeats, but not authoritative jobs;
   verify scheduler redispatch and both worker/scheduler heartbeats after recovery.
 

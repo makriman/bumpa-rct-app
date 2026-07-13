@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  correlationIdOrNew,
+  isCanonicalCorrelationId,
+} from "@/lib/correlation";
 
 const configuredOrigin =
   process.env.INTERNAL_API_BASE_URL ??
@@ -65,8 +69,9 @@ async function proxy(
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
-  const correlationId =
-    request.headers.get("x-correlation-id") ?? crypto.randomUUID();
+  const correlationId = correlationIdOrNew(
+    request.headers.get("x-correlation-id"),
+  );
   headers.set("x-correlation-id", correlationId);
   const hasBody = !["GET", "HEAD"].includes(request.method);
   if (hasBody)
@@ -89,13 +94,19 @@ async function proxy(
       cache: "no-store",
       redirect: "manual",
     });
+    const upstreamCorrelationId = upstream.headers.get("x-correlation-id");
+    const responseCorrelationId = isCanonicalCorrelationId(
+      upstreamCorrelationId,
+    )
+      ? upstreamCorrelationId
+      : correlationId;
     const response = new NextResponse(await upstream.arrayBuffer(), {
       status: upstream.status,
       headers: {
         "content-type":
           upstream.headers.get("content-type") ?? "application/json",
         "cache-control": "no-store",
-        "x-correlation-id": correlationId,
+        "x-correlation-id": responseCorrelationId,
       },
     });
     const setCookie = upstream.headers.get("set-cookie");

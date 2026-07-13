@@ -249,8 +249,21 @@ class BumpaRawResponse(IdMixin, Base):
             name="ck_bumpa_raw_responses_availability",
         ),
         CheckConstraint(
-            "http_status BETWEEN 100 AND 599",
+            "http_status IS NULL OR http_status BETWEEN 100 AND 599",
             name="ck_bumpa_raw_responses_http_status",
+        ),
+        CheckConstraint(
+            "failure_kind IS NULL OR failure_kind IN ('timeout', 'transport', 'upstream_http')",
+            name="ck_bumpa_raw_responses_failure_kind",
+        ),
+        CheckConstraint(
+            "http_status IS NOT NULL OR "
+            "(failure_kind IS NOT NULL AND failure_kind IN ('timeout', 'transport'))",
+            name="ck_bumpa_raw_responses_status_evidence",
+        ),
+        CheckConstraint(
+            "failure_kind IS NULL OR availability = 'error'",
+            name="ck_bumpa_raw_responses_failure_availability",
         ),
     )
 
@@ -258,8 +271,9 @@ class BumpaRawResponse(IdMixin, Base):
     sync_run_id: Mapped[str] = mapped_column(ForeignKey("bumpa_sync_runs.id", ondelete="CASCADE"))
     resource: Mapped[str] = mapped_column(String(80))
     dataset: Mapped[str | None] = mapped_column(String(80))
-    http_status: Mapped[int] = mapped_column(Integer)
+    http_status: Mapped[int | None] = mapped_column(Integer)
     availability: Mapped[str] = mapped_column(String(24))
+    failure_kind: Mapped[str | None] = mapped_column(String(32))
     error_message: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[JsonDict] = mapped_column(JSON)
     pii_level: Mapped[str] = mapped_column(String(24), default="sensitive")

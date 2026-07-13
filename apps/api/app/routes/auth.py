@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,11 +17,13 @@ from app.core.security import (
 from app.core.time import utcnow
 from app.db.models import PlatformRole, TenantMembership
 from app.db.session import get_db
+from app.providers.diagnostics import provider_failure_log_extra
 from app.providers.local import LocalMessagingProvider
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
 from app.schemas import AuthResponse, MessageResponse, OtpRequest, OtpRequested, OtpVerify
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger("bumpabestie.providers")
 
 
 @router.post("/request-otp", response_model=OtpRequested, status_code=202)
@@ -45,6 +49,19 @@ def request_otp(
     except MetaProviderError as exc:
         otp.consumed_at = utcnow()
         db.commit()
+        logger.warning(
+            "meta_otp_delivery_failed",
+            extra=provider_failure_log_extra(
+                provider="meta",
+                operation="otp_delivery",
+                category=exc.category,
+                retryable=exc.retryable,
+                http_status=exc.http_status,
+                code=exc.provider_code,
+                request_id_hash=exc.request_id_hash,
+                retry_after_seconds=exc.retry_after_seconds,
+            ),
+        )
         raise HTTPException(
             status_code=503 if exc.retryable else 502,
             detail=(

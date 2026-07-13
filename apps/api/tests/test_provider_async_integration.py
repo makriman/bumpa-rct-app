@@ -737,7 +737,9 @@ def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budge
         assert statuses == ["retry", "retry", "dead_letter"]
         assert stored.status == "dead_letter"
         assert stored.attempts == stored.max_attempts == 3
-        assert calls == 9
+        # Each job attempt exhausts the first dataset's three-call budget, then
+        # makes one independent probe before classifying a widespread outage.
+        assert calls == 12
         assert sleeps == [1, 2] * 3
         assert private_detail not in (stored.last_error or "")
         assert "private-api-key" not in (stored.last_error or "")

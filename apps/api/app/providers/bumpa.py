@@ -5,11 +5,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
 from app.providers.contracts import ProviderDataset, ProviderOrder
+from app.providers.diagnostics import provider_request_id_hash
 from app.providers.redaction import parse_money
 
 BUMPA_BASE_URL = "https://api.getbumpa.com/api"
@@ -27,24 +28,52 @@ DATASETS: dict[str, tuple[str, ...]] = {
 }
 
 
+BumpaFailureKind = Literal[
+    "timeout",
+    "transport",
+    "rate_limited",
+    "authentication",
+    "provider",
+    "invalid_response",
+    "response_too_large",
+]
+DatasetFailureKind = Literal["timeout", "transport", "upstream_http"]
+
+
 class BumpaProviderError(RuntimeError):
     """Sanitized upstream error that never contains credentials or response bodies."""
 
-    def __init__(self, message: str, *, status_code: int | None = None, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+        failure_kind: BumpaFailureKind = "provider",
+        request_id_hash: str | None = None,
+        retry_after_seconds: float | None = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
         self.retryable = retryable
+        self.failure_kind = failure_kind
+        self.request_id_hash = request_id_hash
+        self.retry_after_seconds = retry_after_seconds
 
 
 @dataclass(frozen=True)
 class BumpaResponse:
     resource: str
     dataset: str | None
-    status_code: int
+    status_code: int | None
     payload: dict[str, Any]
     headers: dict[str, str]
     availability: str
     error: str | None
+    failure_kind: DatasetFailureKind | None = None
+    retryable: bool = False
+    request_id_hash: str | None = None
+    retry_after_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -111,21 +140,40 @@ class BumpaClient:
         return {self.scope_type: self.scope_id}
 
     def _request(
-        self, path: str, params: dict[str, str]
+        self,
+        path: str,
+        params: dict[str, str],
+        *,
+        max_attempts: int | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        for attempt in range(1, self._max_attempts + 1):
+        attempt_limit = self._max_attempts if max_attempts is None else max_attempts
+        if not 1 <= attempt_limit <= self._max_attempts:
+            raise ValueError("Invalid Bumpa request attempt limit")
+        for attempt in range(1, attempt_limit + 1):
             try:
                 response = self._client.get(path, params=params, headers=self._headers)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt == self._max_attempts:
+            except httpx.TimeoutException as exc:
+                if attempt == attempt_limit:
                     raise BumpaProviderError(
-                        "Bumpa is temporarily unreachable", retryable=True
+                        "Bumpa is temporarily unreachable",
+                        retryable=True,
+                        failure_kind="timeout",
+                    ) from exc
+                self._sleep(min(2 ** (attempt - 1), 4))
+                continue
+            except httpx.NetworkError as exc:
+                if attempt == attempt_limit:
+                    raise BumpaProviderError(
+                        "Bumpa is temporarily unreachable",
+                        retryable=True,
+                        failure_kind="transport",
                     ) from exc
                 self._sleep(min(2 ** (attempt - 1), 4))
                 continue
 
+            request_id_hash = provider_request_id_hash(response.headers.get("x-request-id"))
             retryable = response.status_code == 429 or response.status_code >= 500
-            if retryable and attempt < self._max_attempts:
+            if retryable and attempt < attempt_limit:
                 retry_after = _bounded_retry_after(response.headers.get("retry-after"))
                 self._sleep(retry_after if retry_after is not None else min(2 ** (attempt - 1), 4))
                 continue
@@ -139,6 +187,8 @@ class BumpaClient:
                     "Bumpa authentication failed",
                     status_code=response.status_code,
                     retryable=False,
+                    failure_kind="authentication",
+                    request_id_hash=request_id_hash,
                 )
             if retryable:
                 message = (
@@ -150,6 +200,9 @@ class BumpaClient:
                     message,
                     status_code=response.status_code,
                     retryable=True,
+                    failure_kind=("rate_limited" if response.status_code == 429 else "provider"),
+                    request_id_hash=request_id_hash,
+                    retry_after_seconds=_bounded_retry_after(response.headers.get("retry-after")),
                 )
 
             content_length = response.headers.get("content-length")
@@ -158,10 +211,20 @@ class BumpaClient:
                 and content_length.isdigit()
                 and int(content_length) > MAX_RESPONSE_BYTES
             ):
-                raise BumpaProviderError("Bumpa response exceeded the size limit")
+                raise BumpaProviderError(
+                    "Bumpa response exceeded the size limit",
+                    status_code=response.status_code,
+                    failure_kind="response_too_large",
+                    request_id_hash=request_id_hash,
+                )
             content = response.content
             if len(content) > MAX_RESPONSE_BYTES:
-                raise BumpaProviderError("Bumpa response exceeded the size limit")
+                raise BumpaProviderError(
+                    "Bumpa response exceeded the size limit",
+                    status_code=response.status_code,
+                    failure_kind="response_too_large",
+                    request_id_hash=request_id_hash,
+                )
             try:
                 decoded = response.json()
             except ValueError as exc:
@@ -169,23 +232,34 @@ class BumpaClient:
                     "Bumpa returned an invalid response",
                     status_code=response.status_code,
                     retryable=retryable,
+                    failure_kind="invalid_response",
+                    request_id_hash=request_id_hash,
                 ) from exc
             if not isinstance(decoded, dict):
                 raise BumpaProviderError(
                     "Bumpa returned an unexpected response",
                     status_code=response.status_code,
+                    failure_kind="invalid_response",
+                    request_id_hash=request_id_hash,
                 )
             safe_headers = {
                 key.lower(): value
                 for key, value in response.headers.items()
-                if key.lower()
-                in {"x-ratelimit-limit", "x-ratelimit-remaining", "retry-after", "x-request-id"}
+                if key.lower() in {"x-ratelimit-limit", "x-ratelimit-remaining", "retry-after"}
             }
+            if request_id_hash is not None:
+                safe_headers["x-request-id-sha256"] = request_id_hash
             return response.status_code, decoded, safe_headers
         raise AssertionError("Bumpa request attempts exhausted")
 
     def get_analytics(
-        self, area: str, dataset: str, date_from: date, date_to: date
+        self,
+        area: str,
+        dataset: str,
+        date_from: date,
+        date_to: date,
+        *,
+        max_attempts: int | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         if area not in DATASETS or dataset not in DATASETS[area]:
             raise ValueError("Unsupported Bumpa analytics dataset")
@@ -195,7 +269,7 @@ class BumpaClient:
             "to": date_to.isoformat(),
             **self._scope,
         }
-        return self._request(f"/commerce/v1/analytics/{area}", params)
+        return self._request(f"/commerce/v1/analytics/{area}", params, max_attempts=max_attempts)
 
     def get_orders_page(
         self, date_from: date, date_to: date, page: int, *, limit: int = 100
@@ -215,13 +289,15 @@ class BumpaClient:
 
     def verify(self) -> None:
         today = datetime.now(UTC).date()
-        status, payload, _headers = self.get_analytics("sales", "overview", today, today)
+        status, payload, headers = self.get_analytics("sales", "overview", today, today)
         availability, message = classify_availability(status, payload)
         if availability != "available":
             raise BumpaProviderError(
                 message or "Bumpa connection verification failed",
                 status_code=status,
                 retryable=status == 429 or status >= 500,
+                request_id_hash=headers.get("x-request-id-sha256"),
+                retry_after_seconds=_bounded_retry_after(headers.get("retry-after")),
             )
 
     def sync(self, date_from: date, date_to: date) -> BumpaSyncResult:
@@ -232,13 +308,79 @@ class BumpaClient:
         remaining: int | None = None
         orders_availability = "unavailable"
         orders_error: str | None = "Orders were not requested"
+        successful_dataset_requests = 0
+        degraded_dataset_failures = 0
+        isolated_dataset_error: BumpaProviderError | None = None
 
         for area, names in DATASETS.items():
             for name in names:
-                status, payload, headers = self.get_analytics(area, name, date_from, date_to)
+                try:
+                    status, payload, headers = self.get_analytics(
+                        area,
+                        name,
+                        date_from,
+                        date_to,
+                        # Once one endpoint has exhausted its own retry budget,
+                        # a single independent probe is enough to distinguish an
+                        # isolated defect from a wider outage. Do not spend a
+                        # second full retry budget before handing the job back to
+                        # the durable queue.
+                        max_attempts=1 if degraded_dataset_failures else None,
+                    )
+                except BumpaProviderError as exc:
+                    # Retain at most one exhausted transport/upstream failure
+                    # while probing the remaining independent datasets. A second
+                    # failure is a wider outage and returns control to the
+                    # durable job retry policy. The final all-failed guard keeps
+                    # this decision independent of dataset ordering.
+                    if not _is_degradable_dataset_failure(exc) or degraded_dataset_failures >= 1:
+                        raise
+                    degraded_dataset_failures += 1
+                    isolated_dataset_error = exc
+                    failure_kind = _dataset_failure_kind(exc)
+                    responses.append(
+                        BumpaResponse(
+                            area,
+                            name,
+                            exc.status_code,
+                            {},
+                            {},
+                            "error",
+                            str(exc),
+                            failure_kind,
+                            True,
+                            exc.request_id_hash,
+                            exc.retry_after_seconds,
+                        )
+                    )
+                    datasets.append(
+                        ProviderDataset(
+                            resource=area,
+                            dataset=name,
+                            availability="error",
+                            payload={},
+                            value=None,
+                            title=f"{area}.{name}".replace("_", " ").title(),
+                            error=str(exc),
+                        )
+                    )
+                    continue
                 availability, error = classify_availability(status, payload)
+                successful_dataset_requests += 1
                 responses.append(
-                    BumpaResponse(area, name, status, payload, headers, availability, error)
+                    BumpaResponse(
+                        area,
+                        name,
+                        status,
+                        payload,
+                        headers,
+                        availability,
+                        error,
+                        "upstream_http" if availability == "error" else None,
+                        status == 429 or status >= 500,
+                        headers.get("x-request-id-sha256"),
+                        _bounded_retry_after(headers.get("retry-after")),
+                    )
                 )
                 datasets.append(
                     ProviderDataset(
@@ -253,6 +395,10 @@ class BumpaClient:
                 )
                 limit, remaining = _merge_rate_limits(headers, limit, remaining)
 
+        if degraded_dataset_failures and successful_dataset_requests == 0:
+            assert isolated_dataset_error is not None
+            raise isolated_dataset_error
+
         page = 1
         while page <= MAX_ORDER_PAGES:
             status, payload, headers = self.get_orders_page(date_from, date_to, page)
@@ -260,7 +406,19 @@ class BumpaClient:
             orders_availability = availability
             orders_error = error
             responses.append(
-                BumpaResponse("orders", None, status, payload, headers, availability, error)
+                BumpaResponse(
+                    "orders",
+                    None,
+                    status,
+                    payload,
+                    headers,
+                    availability,
+                    error,
+                    "upstream_http" if availability == "error" else None,
+                    status == 429 or status >= 500,
+                    headers.get("x-request-id-sha256"),
+                    _bounded_retry_after(headers.get("retry-after")),
+                )
             )
             limit, remaining = _merge_rate_limits(headers, limit, remaining)
             if availability != "available":
@@ -297,6 +455,22 @@ def classify_availability(status_code: int, payload: dict[str, Any]) -> tuple[st
     if "error" in payload:
         return "unavailable", safe_message or "Bumpa reported unavailable data"
     return "available", None
+
+
+def _is_degradable_dataset_failure(exc: BumpaProviderError) -> bool:
+    return (
+        exc.retryable
+        and exc.failure_kind in {"timeout", "transport", "provider"}
+        and (exc.status_code is None or exc.status_code >= 500)
+    )
+
+
+def _dataset_failure_kind(exc: BumpaProviderError) -> DatasetFailureKind:
+    if exc.failure_kind == "timeout":
+        return "timeout"
+    if exc.failure_kind == "transport":
+        return "transport"
+    return "upstream_http"
 
 
 def _bounded_retry_after(value: str | None) -> float | None:
