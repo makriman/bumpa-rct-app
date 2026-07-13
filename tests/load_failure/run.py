@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import statistics
 import subprocess
 import sys
@@ -1164,7 +1165,14 @@ raise SystemExit(module.main())
         )
         output = io.StringIO()
         with (
-            patch.object(check_disk.os, "stat", return_value=SimpleNamespace(st_dev=7)),
+            patch.object(
+                check_disk.os,
+                "stat",
+                return_value=SimpleNamespace(
+                    st_dev=7,
+                    st_mode=stat.S_IFREG | 0o700,
+                ),
+            ),
             patch.object(check_disk.os, "statvfs", return_value=fake_filesystem),
             patch.object(check_disk.socket, "gethostname", return_value="synthetic-private-host"),
             patch.object(check_disk, "datetime", FixedDateTime),
