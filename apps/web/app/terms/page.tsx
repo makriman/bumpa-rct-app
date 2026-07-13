@@ -1,4 +1,14 @@
+import type { Metadata } from "next";
 import { PublicShell } from "@/components/public-shell";
+import { publicPageMetadata } from "@/lib/site-metadata";
+
+export const metadata: Metadata = publicPageMetadata({
+  path: "/terms",
+  pageTitle: "Terms of use",
+  pageDescription:
+    "The intended access, availability, and responsible-use boundaries for Bumpa Bestie.",
+});
+
 export default function TermsPage() {
   return (
     <PublicShell>

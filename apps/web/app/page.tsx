@@ -1,6 +1,10 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { AppIcon } from "@/components/app-icon";
 import { PublicShell } from "@/components/public-shell";
+import { publicPageMetadata } from "@/lib/site-metadata";
+
+export const metadata: Metadata = publicPageMetadata({ path: "/" });
 
 export default function HomePage() {
   return (

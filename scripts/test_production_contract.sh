@@ -590,6 +590,27 @@ grep -Fq 'format filter {' infra/caddy/Caddyfile
 grep -Fq 'request>uri query {' infra/caddy/Caddyfile
 grep -Fq 'replace hub.verify_token REDACTED' infra/caddy/Caddyfile
 grep -Fq 'wrap json' infra/caddy/Caddyfile
+grep -Fq '(non_document_csp) {' infra/caddy/Caddyfile
+grep -Fq 'header ?Content-Security-Policy "default-src '\''none'\'';' \
+  infra/caddy/Caddyfile
+grep -Fq 'header_up -Content-Security-Policy' infra/caddy/Caddyfile
+grep -Fq 'header_up -Content-Security-Policy-Report-Only' infra/caddy/Caddyfile
+grep -Fq 'header_up -X-Nonce' infra/caddy/Caddyfile
+if grep -Eq "script-src[^;]*'unsafe-inline'" \
+  infra/caddy/Caddyfile apps/web/lib/content-security-policy.ts; then
+  echo "Document script CSP permits unsafe inline execution" >&2
+  exit 1
+fi
+grep -Fq '"style-src-attr '\''unsafe-inline'\''"' \
+  apps/web/lib/content-security-policy.ts
+grep -Fq 'await connection();' apps/web/app/layout.tsx
+grep -Fq 'requestHeaders.set(CONTENT_SECURITY_POLICY_HEADER, contentSecurityPolicy);' \
+  apps/web/middleware.ts
+grep -Fq 'requestHeaders.set(CSP_NONCE_REQUEST_HEADER, nonce);' \
+  apps/web/middleware.ts
+grep -Fq '://{$WWW_DOMAIN:www.bumpabestie.localhost} {' infra/caddy/Caddyfile
+grep -Fq 'redir {$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost}{uri} 308' \
+  infra/caddy/Caddyfile
 grep -Fq 'health_uri /health/live' infra/caddy/Caddyfile
 if grep -Fq 'health_uri /health/ready' infra/caddy/Caddyfile; then
   echo "Caddy must not remove durable ingress solely because an async dependency is degraded" >&2

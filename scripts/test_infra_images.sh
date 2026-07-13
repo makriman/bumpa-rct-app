@@ -673,6 +673,44 @@ docker run --detach \
   "$caddy_image" >/dev/null
 test "$(docker exec "$edge" id -u)" = 10001
 edge_port="$(docker port "$edge" 80/tcp | sed -E 's/^.*:([0-9]+)$/\1/' | head -1)"
+www_headers=""
+for _attempt in {1..30}; do
+  www_headers="$(
+    curl --silent --show-error --dump-header - --output /dev/null \
+      --header 'Host: www.bumpabestie.localhost' \
+      "http://127.0.0.1:$edge_port/canonical-path?source=www" || true
+  )"
+  if grep -Eq '^HTTP/[0-9.]+ 308' <<<"$www_headers"; then
+    break
+  fi
+  sleep 1
+done
+if ! grep -Eq '^HTTP/[0-9.]+ 308' <<<"$www_headers"; then
+  echo "Caddy www redirect did not become ready on port $edge_port" >&2
+  printf '%s\n' "$www_headers" >&2
+  docker logs "$edge" >&2 || true
+  exit 1
+fi
+www_headers_normalized="$(tr -d '\r' <<<"$www_headers")"
+if ! grep -Eiq '^location: http://bumpabestie\.localhost/canonical-path\?source=www$' \
+  <<<"$www_headers_normalized"; then
+  echo "Caddy www redirect did not preserve the request path and query" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
+www_csp_count="$(grep -Eic '^content-security-policy:' <<<"$www_headers_normalized")"
+if [[ "$www_csp_count" != "1" ]]; then
+  echo "Caddy www redirect returned $www_csp_count Content-Security-Policy headers; expected 1" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
+if ! grep -Eiq \
+  "^content-security-policy: default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'$" \
+  <<<"$www_headers_normalized"; then
+  echo "Caddy www redirect returned an unexpected Content-Security-Policy" >&2
+  printf '%s\n' "$www_headers_normalized" >&2
+  exit 1
+fi
 edge_status=""
 verify_token_canary="caddy-runtime-secret-canary-$suffix"
 for _attempt in {1..30}; do
