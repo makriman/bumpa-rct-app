@@ -4,12 +4,96 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+inherited_lock_fd="${BUMPABESTIE_MAINTENANCE_LOCK_FD:-}"
+promotion_state_file="${BUMPABESTIE_PROMOTION_STATE_FILE:-}"
+if [[ -z "$inherited_lock_fd" || -z "$promotion_state_file" \
+  || -z "${BUMPABESTIE_PREVIOUS_CHECKOUT:-}" ]]; then
+  echo "Direct deployment is forbidden; use the guarded release promotion entrypoint" >&2
+  exit 2
+fi
+
 # Deployment and scheduled backup both stop and resume application writers.
 # Serialize them before either workflow reads mutable checkout or environment
 # state so one workflow cannot restart services during the other's critical
 # section.
 source "$ROOT_DIR/scripts/maintenance_lock.sh"
 acquire_maintenance_lock
+source "$ROOT_DIR/scripts/promotion_state.sh"
+if [[ "$(read_promotion_state "$promotion_state_file")" != "PRE_BOUNDARY" ]]; then
+  echo "Promotion handoff is not at the pre-boundary phase" >&2
+  exit 2
+fi
+source "$ROOT_DIR/scripts/release_boundary.sh"
+
+previous_boundary_valid=0
+automatic_rollback_available=0
+previous_revision=""
+previous_image_tag=""
+previous_infra_image_tag=""
+previous_api_image=""
+previous_worker_image=""
+previous_scheduler_image=""
+previous_web_image=""
+previous_caddy_image=""
+previous_postgres_image=""
+previous_redis_image=""
+previous_backup_image=""
+previous_hermes_image=""
+promotion_previous_checkout="${BUMPABESTIE_PREVIOUS_CHECKOUT:-}"
+
+restore_previous_checkout() {
+  if [[ -z "$promotion_previous_checkout" ]]; then
+    return 0
+  fi
+  if [[ ! "$promotion_previous_checkout" =~ ^[a-f0-9]{40}$ ]] \
+    || ! git rev-parse --verify "${promotion_previous_checkout}^{commit}" >/dev/null 2>&1; then
+    echo "Previous checkout handoff is invalid; operator intervention is required." >&2
+    return 1
+  fi
+  git checkout --detach "$promotion_previous_checkout" >/dev/null
+}
+
+restore_previous_release_pointers() {
+  if ((previous_boundary_valid == 0)); then
+    return 1
+  fi
+  rewrite_release_pointers .env.production \
+    "$previous_revision" "$previous_image_tag" "$previous_infra_image_tag" \
+    "$previous_api_image" "$previous_web_image" "$previous_caddy_image" \
+    "$previous_postgres_image" "$previous_backup_image" "$previous_hermes_image"
+}
+
+# Install a set -u-safe trap before target validation. Once a trusted release
+# record is loaded, every later preflight failure restores its complete pointer
+# boundary even when the operator selected the failed target before invoking us.
+early_failure_restore() {
+  local result=$?
+  local restored=1
+  trap - EXIT
+  rm -f .env.production.release.* .deployed-revision.tmp.* .deployed-release.json.tmp.*
+  if ((result != 0 && previous_boundary_valid)); then
+    if restore_previous_release_pointers; then
+      echo "Restored the previously verified release pointers after preflight failure." >&2
+    else
+      restored=0
+      echo "Unable to restore the previously verified release pointers; operator intervention is required." >&2
+    fi
+  fi
+  if ((result != 0)); then
+    if ! restore_previous_checkout; then
+      restored=0
+      echo "Unable to restore the previous checkout after preflight failure." >&2
+    fi
+    if ((previous_boundary_valid && restored)); then
+      write_promotion_state "$promotion_state_file" PREVIOUS_RESTORED || \
+        mark_maintenance_required "preflight_terminal_state_write_failed" || true
+    elif ((previous_boundary_valid)); then
+      mark_maintenance_required "preflight_restore_failed" || true
+    fi
+  fi
+  exit "$result"
+}
+trap early_failure_restore EXIT
 
 if [[ ! -f .env.production ]]; then
   echo ".env.production is required and must have mode 0600" >&2
@@ -20,6 +104,27 @@ if [[ "$permissions" != "600" ]]; then
   echo ".env.production permissions must be 0600; found $permissions" >&2
   exit 2
 fi
+
+if [[ -e .deployed-release.json ]]; then
+  if ! load_release_boundary .deployed-release.json; then
+    echo ".deployed-release.json is not a valid private release boundary" >&2
+    exit 2
+  fi
+  previous_revision="$RELEASE_REVISION"
+  previous_image_tag="$RELEASE_IMAGE_TAG"
+  previous_infra_image_tag="$RELEASE_INFRA_IMAGE_TAG"
+  previous_api_image="$RELEASE_API_IMAGE"
+  previous_worker_image="$RELEASE_WORKER_IMAGE"
+  previous_scheduler_image="$RELEASE_SCHEDULER_IMAGE"
+  previous_web_image="$RELEASE_WEB_IMAGE"
+  previous_caddy_image="$RELEASE_CADDY_IMAGE"
+  previous_postgres_image="$RELEASE_POSTGRES_IMAGE"
+  previous_redis_image="$RELEASE_REDIS_IMAGE"
+  previous_backup_image="$RELEASE_BACKUP_IMAGE"
+  previous_hermes_image="$RELEASE_HERMES_IMAGE"
+  previous_boundary_valid=1
+fi
+
 ./scripts/validate_env.sh .env.production production
 
 value_for() {
@@ -35,6 +140,20 @@ for key in \
   printf -v "$key" '%s' "$value"
   export "${key?}"
 done
+
+target_revision="$DEPLOY_REF"
+target_image_tag="$IMAGE_TAG"
+target_infra_image_tag="$INFRA_IMAGE_TAG"
+target_api_image="$API_IMAGE"
+target_web_image="$WEB_IMAGE"
+# Values are assigned dynamically by the validated environment-key loop above.
+# shellcheck disable=SC2153
+target_caddy_image="$CADDY_IMAGE"
+# shellcheck disable=SC2153
+target_postgres_image="$POSTGRES_IMAGE"
+# shellcheck disable=SC2153
+target_backup_image="$BACKUP_IMAGE"
+target_hermes_image="$HERMES_IMAGE"
 
 if [[ ! -d "$SECRETS_DIR" || -L "$SECRETS_DIR" ]]; then
   echo "SECRETS_DIR must be a real directory" >&2
@@ -69,14 +188,16 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 2
 fi
 
-git fetch --tags --prune origin
 git rev-parse --verify "${DEPLOY_REF}^{commit}" >/dev/null
 deploy_commit="$(git rev-parse "${DEPLOY_REF}^{commit}")"
 if [[ "$IMAGE_TAG" != "sha-$deploy_commit" ]]; then
   echo "IMAGE_TAG must be sha-$deploy_commit for DEPLOY_REF=$DEPLOY_REF" >&2
   exit 2
 fi
-git checkout --detach "$deploy_commit"
+if [[ "$(git rev-parse HEAD)" != "$deploy_commit" ]]; then
+  echo "Promotion checkout does not match DEPLOY_REF" >&2
+  exit 2
+fi
 
 for unit_name in \
   bumpabestie-backup.service bumpabestie-backup.timer \
@@ -130,9 +251,32 @@ running_image() {
   fi
 }
 
-previous_api_image="$(running_image api)"
-previous_web_image="$(running_image web)"
-previous_hermes_image="$(running_image hermes)"
+if ((previous_boundary_valid)); then
+  for service in api worker scheduler web hermes caddy postgres redis; do
+    case "$service" in
+      api) recorded_image="$previous_api_image" ;;
+      worker) recorded_image="$previous_worker_image" ;;
+      scheduler) recorded_image="$previous_scheduler_image" ;;
+      web) recorded_image="$previous_web_image" ;;
+      hermes) recorded_image="$previous_hermes_image" ;;
+      caddy) recorded_image="$previous_caddy_image" ;;
+      postgres) recorded_image="$previous_postgres_image" ;;
+      redis) recorded_image="$previous_redis_image" ;;
+    esac
+    actual_image="$(running_image "$service")"
+    if [[ -z "$actual_image" || "$actual_image" != "$recorded_image" ]]; then
+      echo "Running $service image does not match the verified release boundary" >&2
+      exit 2
+    fi
+  done
+  automatic_rollback_available=1
+fi
+
+if ((previous_boundary_valid == 0)); then
+  previous_api_image="$(running_image api)"
+  previous_web_image="$(running_image web)"
+  previous_hermes_image="$(running_image hermes)"
+fi
 previous_worker_running=0
 previous_scheduler_running=0
 previous_hermes_running=0
@@ -151,7 +295,9 @@ for service in api web worker scheduler hermes caddy; do
   fi
 done
 previous_application_revision=""
-if [[ -n "$previous_api_image" ]]; then
+if ((previous_boundary_valid)); then
+  previous_application_revision="$previous_revision"
+elif [[ -n "$previous_api_image" ]]; then
   previous_application_revision="$(
     docker image inspect \
       --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
@@ -159,10 +305,110 @@ if [[ -n "$previous_api_image" ]]; then
   )"
 fi
 
+running_image_ref() {
+  local service="$1"
+  local container_id configured_ref
+  container_id="$("${compose[@]}" ps -q "$service")"
+  if [[ -z "$container_id" ]]; then
+    echo "$service has no container while recording a release boundary" >&2
+    return 1
+  fi
+  configured_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+  if [[ ! "$configured_ref" =~ @sha256:[a-f0-9]{64}$ ]]; then
+    echo "$service is not running from an immutable digest reference" >&2
+    return 1
+  fi
+  printf '%s\n' "$configured_ref"
+}
+
+persist_release_metadata() {
+  local revision="$1"
+  local image_tag="$2"
+  local infra_image_tag="$3"
+  local api_image="$4"
+  local worker_image="$5"
+  local scheduler_image="$6"
+  local web_image="$7"
+  local caddy_image="$8"
+  local postgres_image="$9"
+  local redis_image="${10}"
+  local backup_image="${11}"
+  local hermes_image="${12}"
+  local operations_revision="${13}"
+  local deployed_at revision_tmp release_tmp
+
+  validate_release_pointer_values \
+    "$revision" "$image_tag" "$infra_image_tag" \
+    "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
+    "$backup_image" "$hermes_image" || return 1
+  if [[ ! "$operations_revision" =~ ^[a-f0-9]{40}$ ]]; then
+    return 1
+  fi
+  if [[ "$worker_image" != "$api_image" || "$scheduler_image" != "$api_image" ]] \
+    || [[ ! "$redis_image" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[a-f0-9]{64}$ ]]; then
+    return 1
+  fi
+
+  deployed_at="$(date -u +%FT%TZ)"
+  revision_tmp=".deployed-revision.tmp.$$"
+  release_tmp=".deployed-release.json.tmp.$$"
+  if ! printf '%s %s %s %s\n' \
+    "$deployed_at" "$revision" "$image_tag" "$infra_image_tag" > "$revision_tmp"; then
+    rm -f "$revision_tmp" "$release_tmp"
+    return 1
+  fi
+  if ! jq --null-input \
+    --arg deployed_at "$deployed_at" \
+    --arg revision "$revision" \
+    --arg operations_revision "$operations_revision" \
+    --arg image_tag "$image_tag" \
+    --arg infra_image_tag "$infra_image_tag" \
+    --arg api "$api_image" \
+    --arg worker "$worker_image" \
+    --arg scheduler "$scheduler_image" \
+    --arg web "$web_image" \
+    --arg caddy "$caddy_image" \
+    --arg postgres "$postgres_image" \
+    --arg redis "$redis_image" \
+    --arg backup "$backup_image" \
+    --arg hermes "$hermes_image" \
+    '{
+      deployed_at: $deployed_at,
+      revision: $revision,
+      operations_revision: $operations_revision,
+      image_tag: $image_tag,
+      infra_image_tag: $infra_image_tag,
+      images: {
+        api: $api,
+        worker: $worker,
+        scheduler: $scheduler,
+        web: $web,
+        caddy: $caddy,
+        postgres: $postgres,
+        redis: $redis,
+        backup: $backup,
+        hermes: $hermes
+      }
+    }' > "$release_tmp"; then
+    rm -f "$revision_tmp" "$release_tmp"
+    return 1
+  fi
+  if ! chmod 0600 "$revision_tmp" "$release_tmp" \
+    || ! mv "$release_tmp" .deployed-release.json \
+    || ! mv "$revision_tmp" .deployed-revision; then
+    rm -f "$revision_tmp" "$release_tmp"
+    return 1
+  fi
+}
+
 deployment_started=0
 writers_quiesced=0
 rollback() {
-  result=$?
+  local result=$?
+  local rollback_result=1
+  local predeployment_restored=1
+  local hybrid_api hybrid_worker hybrid_scheduler hybrid_web hybrid_caddy
+  local hybrid_postgres hybrid_redis hybrid_backup hybrid_hermes
   trap - EXIT
   if ((result == 0)); then
     return
@@ -173,8 +419,30 @@ rollback() {
   "${compose[@]}" ps >&2 || true
   "${compose[@]}" logs --no-color --tail=200 caddy api web worker scheduler hermes postgres redis >&2 || true
 
-  if ((writers_quiesced && !deployment_started && ${#previous_writer_containers[@]} > 0)); then
-    echo "Restarting the previously running application after pre-deployment failure." >&2
+  if ((!deployment_started)); then
+    if ((previous_boundary_valid)); then
+      if restore_previous_release_pointers; then
+        echo "Restored the complete previously verified release pointer boundary." >&2
+      else
+        predeployment_restored=0
+        echo "Unable to restore the previous release pointers; operator intervention is required." >&2
+      fi
+    fi
+    if ! restore_previous_checkout; then
+      predeployment_restored=0
+      echo "Unable to restore the previous checkout; operator intervention is required." >&2
+    fi
+    if ((writers_quiesced && ${#previous_writer_containers[@]} > 0)); then
+      echo "Restarting the previously running application after pre-deployment failure." >&2
+    else
+      if ((predeployment_restored)); then
+        write_promotion_state "$promotion_state_file" PREVIOUS_RESTORED || \
+          mark_maintenance_required "predeployment_terminal_state_write_failed" || true
+      else
+        mark_maintenance_required "predeployment_restore_failed" || true
+      fi
+      exit "$result"
+    fi
     set +e
     docker start "${previous_writer_containers[@]}" >/dev/null
     SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh
@@ -182,10 +450,17 @@ rollback() {
     set -e
     if ((restart_result == 0)); then
       echo "The previous application resumed successfully." >&2
+      if ((predeployment_restored)); then
+        write_promotion_state "$promotion_state_file" PREVIOUS_RESTORED || \
+          mark_maintenance_required "predeployment_terminal_state_write_failed" || true
+      else
+        mark_maintenance_required "predeployment_restore_failed" || true
+      fi
     else
       echo "The previous application did not recover cleanly; operator intervention is required." >&2
+      mark_maintenance_required "predeployment_recovery_smoke_failed" || true
     fi
-  elif ((deployment_started)) \
+  elif ((deployment_started && automatic_rollback_available)) \
     && [[ -n "$previous_api_image" && -n "$previous_web_image" ]]; then
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
@@ -213,11 +488,66 @@ rollback() {
     rollback_result=$?
     set -e
     if ((rollback_result == 0)); then
-      echo "Application rollback succeeded; edge and data services remained forward-only." >&2
+      # The forward infrastructure has already crossed its migration boundary.
+      # Record a hybrid release only after the rolled-back application passes
+      # smoke, and make the environment select that same boundary on retry.
+      set +e
+      hybrid_api="$(running_image_ref api)"
+      hybrid_worker="$(running_image_ref worker)"
+      hybrid_scheduler="$(running_image_ref scheduler)"
+      hybrid_web="$(running_image_ref web)"
+      hybrid_caddy="$(running_image_ref caddy)"
+      hybrid_postgres="$(running_image_ref postgres)"
+      hybrid_redis="$(running_image_ref redis)"
+      hybrid_hermes="$(running_image_ref hermes)"
+      hybrid_backup="$target_backup_image"
+      if [[ "$hybrid_api" == "$previous_api_image" \
+        && "$hybrid_worker" == "$previous_worker_image" \
+        && "$hybrid_scheduler" == "$previous_scheduler_image" \
+        && "$hybrid_web" == "$previous_web_image" \
+        && "$hybrid_hermes" == "$previous_hermes_image" \
+        && "$hybrid_caddy" == "$target_caddy_image" \
+        && "$hybrid_postgres" == "$target_postgres_image" ]]; then
+        rollback_result=0
+      else
+        rollback_result=1
+      fi
+      # Persist actual-safe Compose pointers before metadata. If metadata cannot
+      # be recorded, backups still use the running boundary and the next deploy
+      # will fail closed on the deliberate record/live mismatch.
+      if ((rollback_result == 0)) && rewrite_release_pointers .env.production \
+          "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
+          "$hybrid_api" "$hybrid_web" "$hybrid_caddy" "$hybrid_postgres" \
+          "$hybrid_backup" "$hybrid_hermes" \
+        && persist_release_metadata \
+          "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
+          "$hybrid_api" "$hybrid_worker" "$hybrid_scheduler" "$hybrid_web" \
+          "$hybrid_caddy" "$hybrid_postgres" "$hybrid_redis" \
+          "$hybrid_backup" "$hybrid_hermes" "$target_revision"; then
+        rollback_result=0
+      else
+        rollback_result=1
+      fi
+      set -e
+      if ((rollback_result == 0)); then
+        if write_promotion_state "$promotion_state_file" HYBRID_PERSISTED; then
+          echo "Application rollback succeeded and its forward-infrastructure release boundary was persisted." >&2
+        else
+          mark_maintenance_required "hybrid_terminal_state_write_failed" || true
+          echo "Application rollback persisted but its terminal journal state failed; operator intervention is required." >&2
+        fi
+      else
+        mark_maintenance_required "hybrid_rollback_or_persistence_failed" || true
+        echo "Application rollback passed smoke but its release boundary could not be persisted; operator intervention is required." >&2
+      fi
     else
+      mark_maintenance_required "application_rollback_smoke_failed" || true
       echo "Application rollback also failed; operator intervention is required." >&2
     fi
   else
+    if ((deployment_started)); then
+      mark_maintenance_required "forward_boundary_without_automatic_rollback" || true
+    fi
     echo "No previously verified release is available for automatic rollback." >&2
   fi
   exit "$result"
@@ -308,6 +638,7 @@ if [[ -n "$postgres_container" ]]; then
     backup
 fi
 
+write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY
 deployment_started=1
 "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
@@ -355,57 +686,23 @@ jq --exit-status \
    .providers.bumpa == $bumpa and
    .providers.agent == $agent' <<<"$ready_payload" >/dev/null
 
-deployed_at="$(date -u +%FT%TZ)"
-revision_tmp=".deployed-revision.tmp.$$"
-release_tmp=".deployed-release.json.tmp.$$"
-printf '%s %s %s %s\n' "$deployed_at" "$deploy_commit" "$IMAGE_TAG" "$INFRA_IMAGE_TAG" > "$revision_tmp"
-
-running_image_ref() {
-  local service="$1"
-  local container_id configured_ref
-  container_id="$("${compose[@]}" ps -q "$service")"
-  configured_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
-  if [[ ! "$configured_ref" =~ @sha256:[a-f0-9]{64}$ ]]; then
-    echo "$service is not running from an immutable digest reference" >&2
-    return 1
-  fi
-  printf '%s\n' "$configured_ref"
-}
-
-jq --null-input \
-  --arg deployed_at "$deployed_at" \
-  --arg revision "$deploy_commit" \
-  --arg image_tag "$IMAGE_TAG" \
-  --arg infra_image_tag "$INFRA_IMAGE_TAG" \
-  --arg api "$(running_image_ref api)" \
-  --arg worker "$(running_image_ref worker)" \
-  --arg scheduler "$(running_image_ref scheduler)" \
-  --arg web "$(running_image_ref web)" \
-  --arg caddy "$(running_image_ref caddy)" \
-  --arg postgres "$(running_image_ref postgres)" \
-  --arg redis "$(running_image_ref redis)" \
-  --arg backup "$BACKUP_IMAGE" \
-  --arg hermes "$(running_image_ref hermes)" \
-  '{
-    deployed_at: $deployed_at,
-    revision: $revision,
-    image_tag: $image_tag,
-    infra_image_tag: $infra_image_tag,
-    images: {
-      api: $api,
-      worker: $worker,
-      scheduler: $scheduler,
-      web: $web,
-      caddy: $caddy,
-      postgres: $postgres,
-      redis: $redis,
-      backup: $backup,
-      hermes: $hermes
-    }
-  }' > "$release_tmp"
-chmod 0600 "$revision_tmp" "$release_tmp"
-mv "$release_tmp" .deployed-release.json
-mv "$revision_tmp" .deployed-revision
+persist_release_metadata \
+  "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
+  "$(running_image_ref api)" "$(running_image_ref worker)" \
+  "$(running_image_ref scheduler)" "$(running_image_ref web)" \
+  "$(running_image_ref caddy)" "$(running_image_ref postgres)" \
+  "$(running_image_ref redis)" "$target_backup_image" \
+  "$(running_image_ref hermes)" "$target_revision"
+rewrite_release_pointers .env.production \
+  "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
+  "$target_api_image" "$target_web_image" "$target_caddy_image" \
+  "$target_postgres_image" "$target_backup_image" "$target_hermes_image"
+if ! write_promotion_state "$promotion_state_file" COMMITTED; then
+  mark_maintenance_required "commit_terminal_state_write_failed" || true
+  trap - EXIT
+  echo "Deployment is healthy but its terminal promotion journal could not be committed" >&2
+  exit 1
+fi
 
 trap - EXIT
 echo "Deployed $deploy_commit with app tag $IMAGE_TAG and infrastructure tag $INFRA_IMAGE_TAG"

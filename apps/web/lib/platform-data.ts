@@ -54,6 +54,7 @@ export type SyncRun = {
   tenant_id?: string;
   status: string;
   completion_quality?:
+    | "legacy"
     | "pending"
     | "complete"
     | "accepted_partial"

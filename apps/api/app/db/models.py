@@ -162,7 +162,7 @@ class BumpaSyncRun(IdMixin, Base):
         ),
         CheckConstraint(
             "completion_quality IN "
-            "('pending', 'complete', 'accepted_partial', 'degraded', 'failed')",
+            "('legacy', 'pending', 'complete', 'accepted_partial', 'degraded', 'failed')",
             name="ck_bumpa_sync_runs_completion_quality",
         ),
         CheckConstraint(
@@ -186,7 +186,14 @@ class BumpaSyncRun(IdMixin, Base):
             "AND partial_reason IN ('dataset_unavailable', 'dataset_error', "
             "'orders_unavailable', 'incomplete_dataset_set')) OR "
             "(status = 'failed' AND completion_quality = 'failed' "
-            "AND partial_reason IS NULL)",
+            "AND partial_reason IS NULL) OR "
+            "(completion_quality = 'legacy' "
+            "AND partial_reason IS NULL "
+            "AND orders_availability IS NULL "
+            "AND orders_count IS NULL "
+            "AND ((status IN ('queued', 'running', 'success', 'partial') "
+            "AND error IS NULL) OR "
+            "(status = 'failed' AND error IS NOT NULL)))",
             name="ck_bumpa_sync_runs_completion_state",
         ),
         CheckConstraint(
@@ -218,7 +225,9 @@ class BumpaSyncRun(IdMixin, Base):
         ForeignKey("bumpa_connections.id", ondelete="CASCADE")
     )
     status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
-    completion_quality: Mapped[str] = mapped_column(String(24), default="pending")
+    completion_quality: Mapped[str] = mapped_column(
+        String(24), default="pending", server_default="legacy"
+    )
     partial_reason: Mapped[str | None] = mapped_column(String(40))
     requested_from: Mapped[date] = mapped_column(Date)
     requested_to: Mapped[date] = mapped_column(Date)

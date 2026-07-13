@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# This file is installed root-owned outside the mutable checkout. It must acquire
+# the host lock and persist an operation journal before it opens repository code.
+umask 077
+
+repo="${BUMPABESTIE_REPOSITORY:-/opt/bumpabestie}"
+state_dir="${BUMPABESTIE_STATE_DIRECTORY:-/var/lib/bumpabestie}"
+lock_path="$state_dir/maintenance.lock"
+journal="$lock_path.coordinator-state.json"
+maintenance_required="$lock_path.maintenance-required"
+history_dir="$state_dir/promotion-history"
+lock_wait="${BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS:-900}"
+lock_fd=""
+operation_id=""
+terminal=0
+worker_dir=""
+previous_checkout=""
+previous_revision=""
+previous_env_sha256=""
+previous_release_sha256=""
+previous_deployed_sha256=""
+
+fail() {
+  echo "bumpabestie-promote: $*" >&2
+  exit 2
+}
+
+file_mode() {
+  stat -c '%a' "$1"
+}
+
+file_owner() {
+  stat -c '%u:%g' "$1"
+}
+
+atomic_journal() {
+  local phase="$1"
+  local tmp
+  tmp="$(mktemp "$journal.tmp.XXXXXX")"
+  chmod 0600 "$tmp"
+  jq --null-input \
+    --arg operation_id "$operation_id" \
+    --arg phase "$phase" \
+    --arg target_revision "${revision:-}" \
+    --arg previous_checkout "${previous_checkout:-}" \
+    --arg previous_env_sha256 "${previous_env_sha256:-}" \
+    --arg previous_release_sha256 "${previous_release_sha256:-}" \
+    --arg previous_deployed_sha256 "${previous_deployed_sha256:-}" \
+    --arg started_at "${started_at:-$(date -u +%FT%TZ)}" \
+    --arg updated_at "$(date -u +%FT%TZ)" \
+    '{schema_version: 1, operation_id: $operation_id, phase: $phase,
+      target_revision: $target_revision, previous_checkout: $previous_checkout,
+      previous_env_sha256: $previous_env_sha256,
+      previous_release_sha256: $previous_release_sha256,
+      previous_deployed_sha256: $previous_deployed_sha256,
+      started_at: $started_at, updated_at: $updated_at}' >"$tmp"
+  sync -f "$tmp"
+  mv -f "$tmp" "$journal"
+  sync -f "$state_dir"
+}
+
+mark_maintenance_required() {
+  local reason="$1"
+  local tmp
+  tmp="$(mktemp "$maintenance_required.tmp.XXXXXX")" || return 1
+  chmod 0600 "$tmp"
+  printf '%s\n' "$reason" >"$tmp"
+  sync -f "$tmp"
+  mv -f "$tmp" "$maintenance_required"
+  sync -f "$state_dir"
+}
+
+# ShellCheck cannot see that this function is invoked by the installed trap.
+# shellcheck disable=SC2317
+on_exit() {
+  local result=$?
+  local inner_journal_present=0 inner_journal
+  trap - EXIT HUP INT TERM
+  if ((terminal == 0)) && [[ -f "$journal" ]]; then
+    for inner_journal in "$lock_path".promotion-state.*; do
+      if [[ -e "$inner_journal" || -L "$inner_journal" ]]; then
+        inner_journal_present=1
+        break
+      fi
+    done
+    if [[ -n "$previous_checkout" && "$inner_journal_present" == "0" \
+      && ! -e "$maintenance_required" && ! -L "$maintenance_required" ]] \
+      && validate_previous_restored; then
+      atomic_journal PREVIOUS_RESTORED
+      archive_terminal PREVIOUS_RESTORED
+    else
+      mark_maintenance_required "coordinator_operation=$operation_id phase=$(jq -r '.phase // \"UNKNOWN\"' "$journal" 2>/dev/null || printf UNKNOWN)" || true
+    fi
+  fi
+  if [[ -n "$worker_dir" && "$worker_dir" == "$state_dir"/promotion-worker.* ]]; then
+    rm -rf -- "$worker_dir"
+  fi
+  exit "$result"
+}
+
+archive_terminal() {
+  local phase="$1"
+  local destination="$history_dir/${operation_id}-${phase}.json"
+  [[ ! -e "$destination" && ! -L "$destination" ]] || fail "journal archive already exists"
+  mv "$journal" "$destination"
+  chmod 0600 "$destination"
+  sync -f "$history_dir"
+  terminal=1
+}
+
+validate_image_reference() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]
+}
+
+env_value() {
+  local key="$1"
+  local count value
+  count="$(awk -F= -v key="$key" '$1 == key {count++} END {print count+0}' "$repo/.env.production")"
+  [[ "$count" == "1" ]] || return 1
+  value="$(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$repo/.env.production")"
+  printf '%s\n' "$value"
+}
+
+record_matches_env() {
+  local expected_revision="$1" expected_operations="$2"
+  jq --exit-status \
+    --arg revision "$expected_revision" --arg operations "$expected_operations" \
+    --arg deploy_ref "$(env_value DEPLOY_REF)" \
+    --arg image_tag "$(env_value IMAGE_TAG)" \
+    --arg infra_tag "$(env_value INFRA_IMAGE_TAG)" \
+    --arg api "$(env_value API_IMAGE)" --arg web "$(env_value WEB_IMAGE)" \
+    --arg caddy "$(env_value CADDY_IMAGE)" --arg postgres "$(env_value POSTGRES_IMAGE)" \
+    --arg backup "$(env_value BACKUP_IMAGE)" --arg hermes "$(env_value HERMES_IMAGE)" \
+    '.revision == $revision and (.operations_revision // .revision) == $operations and
+     .revision == $deploy_ref and .image_tag == $image_tag and
+     .infra_image_tag == $infra_tag and .images.api == $api and
+     .images.worker == $api and .images.scheduler == $api and
+     .images.web == $web and .images.caddy == $caddy and
+     .images.postgres == $postgres and .images.backup == $backup and
+     .images.hermes == $hermes' "$repo/.deployed-release.json" >/dev/null
+}
+
+validate_committed() {
+  [[ "$(git -C "$repo" rev-parse HEAD)" == "$revision" ]] &&
+    [[ "$(env_value DEPLOY_REF)" == "$revision" ]] &&
+    [[ "$(env_value IMAGE_TAG)" == "sha-$revision" ]] &&
+    [[ "$(env_value INFRA_IMAGE_TAG)" == "$infra_image_tag" ]] &&
+    [[ "$(env_value API_IMAGE)" == "$api_image" ]] &&
+    [[ "$(env_value WEB_IMAGE)" == "$web_image" ]] &&
+    [[ "$(env_value CADDY_IMAGE)" == "$caddy_image" ]] &&
+    [[ "$(env_value POSTGRES_IMAGE)" == "$postgres_image" ]] &&
+    [[ "$(env_value BACKUP_IMAGE)" == "$backup_image" ]] &&
+    [[ "$(env_value HERMES_IMAGE)" == "$hermes_image" ]] &&
+    record_matches_env "$revision" "$revision"
+}
+
+validate_previous_restored() {
+  [[ "$(git -C "$repo" rev-parse HEAD)" == "$previous_checkout" ]] &&
+    [[ "$(sha256sum "$repo/.env.production" | awk '{print $1}')" == "$previous_env_sha256" ]] &&
+    [[ "$(sha256sum "$repo/.deployed-release.json" | awk '{print $1}')" == "$previous_release_sha256" ]] &&
+    [[ "$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')" == "$previous_deployed_sha256" ]]
+}
+
+if (($# != 8)); then
+  fail "usage: bumpabestie-promote REVISION INFRA_IMAGE_TAG API WEB CADDY POSTGRES BACKUP HERMES"
+fi
+revision="$1"; infra_image_tag="$2"; api_image="$3"; web_image="$4"
+caddy_image="$5"; postgres_image="$6"; backup_image="$7"; hermes_image="$8"
+[[ "$revision" =~ ^[a-f0-9]{40}$ ]] || fail "revision must be a full lowercase commit SHA"
+[[ "$infra_image_tag" =~ ^sha-[a-f0-9]{40}$ ]] || fail "infrastructure tag is invalid"
+for image_reference in \
+  "$api_image" "$web_image" "$caddy_image" "$postgres_image" "$backup_image" "$hermes_image"; do
+  validate_image_reference "$image_reference" || fail "an immutable image reference is invalid"
+done
+[[ "$lock_wait" =~ ^[0-9]+$ ]] || fail "lock wait must be a non-negative integer"
+command -v flock >/dev/null || fail "flock is required"
+command -v jq >/dev/null || fail "jq is required"
+command -v sha256sum >/dev/null || fail "sha256sum is required"
+command -v git >/dev/null || fail "git is required"
+
+[[ "$state_dir" == /* && -d "$state_dir" && ! -L "$state_dir" ]] || fail "state directory is unsafe"
+[[ "$(file_mode "$state_dir")" == "700" ]] || fail "state directory must have mode 0700"
+[[ ! -e "$lock_path" || (-f "$lock_path" && ! -L "$lock_path") ]] || fail "maintenance lock is unsafe"
+exec {lock_fd}>>"$lock_path"
+flock -w "$lock_wait" "$lock_fd" || exit 75
+[[ -f "$lock_path" && ! -L "$lock_path" ]] || fail "maintenance lock changed while opening"
+fd_stat="$(stat -Lc '%d:%i' "/proc/$BASHPID/fd/$lock_fd")"
+path_stat="$(stat -Lc '%d:%i' "$lock_path")"
+[[ -f "/proc/$BASHPID/fd/$lock_fd" && "$fd_stat" == "$path_stat" ]] || fail "maintenance lock descriptor mismatch"
+exec {probe_fd}>>"$lock_path"
+if flock -n "$probe_fd"; then
+  flock -u "$probe_fd" || true
+  fail "maintenance lock ownership probe failed"
+fi
+exec {probe_fd}>&-
+export BUMPABESTIE_MAINTENANCE_LOCK="$lock_path"
+export BUMPABESTIE_MAINTENANCE_LOCK_FD="$lock_fd"
+
+# No repository or environment path is read before this point.
+[[ ! -e "$maintenance_required" && ! -L "$maintenance_required" ]] || exit 78
+[[ ! -e "$journal" && ! -L "$journal" ]] || exit 78
+install -d -m 0700 "$history_dir"
+operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+started_at="$(date -u +%FT%TZ)"
+atomic_journal LOCKED
+trap on_exit EXIT HUP INT TERM
+
+[[ "$repo" == /* && -d "$repo" && ! -L "$repo" ]] || fail "repository is unsafe"
+for path in .env.production .deployed-release.json .deployed-revision; do
+  [[ -f "$repo/$path" && ! -L "$repo/$path" ]] || fail "required repository file is unsafe: $path"
+done
+[[ "$(file_mode "$repo/.env.production")" == "600" ]] || fail ".env.production must have mode 0600"
+[[ "$(file_mode "$repo/.deployed-release.json")" == "600" ]] || fail ".deployed-release.json must have mode 0600"
+[[ "$(file_owner "$repo/.env.production")" == "$(file_owner "$repo/.deployed-release.json")" ]] || fail "release files have different owners"
+
+previous_checkout="$(jq -er '.operations_revision // .revision' "$repo/.deployed-release.json")"
+[[ "$previous_checkout" =~ ^[a-f0-9]{40}$ ]] || fail "recorded operations revision is invalid"
+[[ "$(git -C "$repo" rev-parse HEAD)" == "$previous_checkout" ]] || fail "checkout does not match recorded operations revision"
+previous_revision="$(jq -er '.revision' "$repo/.deployed-release.json")"
+previous_env_sha256="$(sha256sum "$repo/.env.production" | awk '{print $1}')"
+previous_release_sha256="$(sha256sum "$repo/.deployed-release.json" | awk '{print $1}')"
+previous_deployed_sha256="$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')"
+atomic_journal SNAPSHOT_RECORDED
+
+[[ -z "$(git -C "$repo" status --porcelain)" ]] || fail "repository checkout is dirty"
+git -C "$repo" fetch --tags --prune origin main
+git -C "$repo" rev-parse --verify "${revision}^{commit}" >/dev/null
+[[ "$(git -C "$repo" rev-parse origin/main)" == "$revision" ]] || \
+  fail "target revision is not the fetched origin/main commit"
+
+# Never execute promotion code from the mutable checkout. Extract the four
+# reviewed target helpers to a private state-directory bundle while the stable
+# coordinator retains the host lock, then syntax-check the complete bundle.
+worker_dir="$(mktemp -d "$state_dir/promotion-worker.XXXXXX")"
+chmod 0700 "$worker_dir"
+for helper in promote_release.sh maintenance_lock.sh release_boundary.sh promotion_state.sh; do
+  if ! git -C "$repo" show "$revision:scripts/$helper" >"$worker_dir/$helper"; then
+    fail "target promotion bundle is incomplete: $helper"
+  fi
+  chmod 0500 "$worker_dir/$helper"
+  bash -n "$worker_dir/$helper" || fail "target promotion bundle has invalid shell syntax: $helper"
+done
+atomic_journal CHILD_RUNNING
+
+set +e
+env \
+  BUMPABESTIE_ROOT_DIR="$repo" \
+  BUMPABESTIE_HELPER_DIR="$worker_dir" \
+  BUMPABESTIE_STABLE_COORDINATOR=1 \
+  BUMPABESTIE_COORDINATOR_JOURNAL="$journal" \
+  "$worker_dir/promote_release.sh" "$@"
+child_result=$?
+set -e
+
+phase=""
+if ((child_result == 0)) && validate_committed; then
+  phase=COMMITTED
+elif ((child_result != 0)) && validate_previous_restored; then
+  phase=PREVIOUS_RESTORED
+elif ((child_result != 0)) && [[ "$(git -C "$repo" rev-parse HEAD)" == "$revision" ]] \
+  && record_matches_env "$previous_revision" "$revision"; then
+  phase=HYBRID_PERSISTED
+fi
+if [[ -z "$phase" || -e "$maintenance_required" || -L "$maintenance_required" ]]; then
+  atomic_journal MAINTENANCE_REQUIRED
+  mark_maintenance_required "coordinator_operation=$operation_id terminal_validation_failed"
+  exit 78
+fi
+atomic_journal "$phase"
+archive_terminal "$phase"
+trap - EXIT HUP INT TERM
+rm -rf -- "$worker_dir"
+worker_dir=""
+if [[ "$phase" == COMMITTED ]]; then
+  exit 0
+fi
+exit "$child_result"

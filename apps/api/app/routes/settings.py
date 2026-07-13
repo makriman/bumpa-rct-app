@@ -5,10 +5,18 @@ from sqlalchemy.orm import Session
 
 from app.core.dependencies import Principal, require_tenant, require_tenant_admin
 from app.core.security import normalize_phone
-from app.db.models import BumpaConnection, McpConnection, PhoneIdentity, TenantMembership, User
+from app.db.models import (
+    BumpaConnection,
+    BumpaSyncRun,
+    McpConnection,
+    PhoneIdentity,
+    TenantMembership,
+    User,
+)
 from app.db.session import get_db
 from app.schemas import McpConnectionCreate, PhoneCreate, ProfileUpdate, UserCreate
 from app.services.audit import audit
+from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -233,12 +241,21 @@ def bumpa_status(
     )
     if not connection:
         return {"status": "not_connected"}
+    last_successful_sync_at = db.scalar(
+        select(BumpaSyncRun.finished_at)
+        .where(
+            BumpaSyncRun.tenant_id == principal.tenant.id,
+            usable_bumpa_sync_run_predicate(),
+        )
+        .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
+        .limit(1)
+    )
     return {
         "status": connection.status,
         "scope_type": connection.scope_type,
         "scope_id_last4": connection.scope_id[-4:],
         "provider": connection.provider,
-        "last_successful_sync_at": connection.last_successful_sync_at,
+        "last_successful_sync_at": last_successful_sync_at,
         "last_error": connection.last_error,
     }
 

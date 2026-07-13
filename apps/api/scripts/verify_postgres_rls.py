@@ -7,9 +7,10 @@ CI invokes this script explicitly after Alembic has migrated its PostgreSQL serv
 
 from __future__ import annotations
 
+import argparse
 import os
 import secrets
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, TypeVar, cast
@@ -22,6 +23,13 @@ from app.db import models
 from app.db.base import Base
 
 FixtureRow = TypeVar("FixtureRow")
+SYNC_COMPAT_TENANT_ID = "sync-compat-tenant"
+SYNC_COMPAT_CONNECTION_ID = "sync-compat-connection"
+SYNC_COMPAT_RUNS = {
+    "sync-compat-success": ("success", None),
+    "sync-compat-partial": ("partial", None),
+    "sync-compat-failed": ("failed", "legacy provider failure"),
+}
 
 
 def _require_postgres_url() -> URL:
@@ -125,6 +133,274 @@ def _assert_schema_and_policies(connection: Connection, tenant_tables: list[str]
             or any(fragment not in policy_sql for fragment in expected_fragments)
         ):
             raise AssertionError(f"Unexpected tenant policy on {table}: {policy}")
+
+
+def _seed_sync_compatibility(admin_engine: Engine) -> None:
+    """Seed the exact pre-0006 row shape while CI is pinned at migration 0005."""
+
+    with admin_engine.begin() as connection:
+        revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+        if revision != "0005_platform_roles":
+            raise AssertionError(
+                f"Sync compatibility seed must run at 0005_platform_roles, found {revision}"
+            )
+        connection.execute(
+            text(
+                "INSERT INTO tenants "
+                "(slug, name, status, timezone, currency_code, research_consent_status, "
+                "id, created_at, updated_at) VALUES "
+                "('sync-compat', 'Sync compatibility', 'active', 'UTC', 'NGN', "
+                "'unknown', :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"tenant_id": SYNC_COMPAT_TENANT_ID},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO bumpa_connections "
+                "(tenant_id, encrypted_api_key, scope_type, scope_id, provider, status, "
+                "id, created_at, updated_at) VALUES "
+                "(:tenant_id, 'encrypted', 'business_id', 'sync-compat', 'bumpa', 'active', "
+                ":connection_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "tenant_id": SYNC_COMPAT_TENANT_ID,
+                "connection_id": SYNC_COMPAT_CONNECTION_ID,
+            },
+        )
+        for run_id in SYNC_COMPAT_RUNS:
+            connection.execute(
+                text(
+                    "INSERT INTO bumpa_sync_runs "
+                    "(tenant_id, bumpa_connection_id, status, requested_from, requested_to, "
+                    "started_at, error, dataset_results, id) VALUES "
+                    "(:tenant_id, :connection_id, 'running', '2026-07-01', '2026-07-12', "
+                    "CURRENT_TIMESTAMP, NULL, CAST('{}' AS json), :run_id)"
+                ),
+                {
+                    "tenant_id": SYNC_COMPAT_TENANT_ID,
+                    "connection_id": SYNC_COMPAT_CONNECTION_ID,
+                    "run_id": run_id,
+                },
+            )
+
+
+def _assert_check_rejected(
+    connection: Connection, run_id: str, values: Mapping[str, object]
+) -> None:
+    savepoint = connection.begin_nested()
+    try:
+        connection.execute(
+            text(
+                "INSERT INTO bumpa_sync_runs "
+                "(tenant_id, bumpa_connection_id, status, completion_quality, "
+                "partial_reason, orders_availability, orders_count, error, requested_from, "
+                "requested_to, dataset_results, id) VALUES "
+                "(:tenant_id, :connection_id, :status, :quality, :reason, "
+                ":orders_availability, :orders_count, :error, '2026-07-01', '2026-07-12', "
+                "CAST('{}' AS json), :run_id)"
+            ),
+            {
+                "tenant_id": SYNC_COMPAT_TENANT_ID,
+                "connection_id": SYNC_COMPAT_CONNECTION_ID,
+                "run_id": run_id,
+                **values,
+            },
+        )
+    except DBAPIError as exc:
+        savepoint.rollback()
+        if getattr(exc.orig, "sqlstate", None) != "23514":
+            raise AssertionError(
+                f"Invalid sync state {run_id} failed for a reason other than CHECK enforcement"
+            ) from exc
+    else:
+        savepoint.rollback()
+        raise AssertionError(f"Invalid sync state {run_id} bypassed completion CHECKs")
+
+
+def _assert_sync_writer_compatibility(admin_engine: Engine) -> None:
+    """Prove PostgreSQL preserved old-writer rollback while typed states stay strict."""
+
+    try:
+        with admin_engine.begin() as connection:
+            default = connection.scalar(
+                text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = 'bumpa_sync_runs' "
+                    "AND column_name = 'completion_quality'"
+                )
+            )
+            if default is None or "legacy" not in str(default):
+                raise AssertionError(
+                    f"completion_quality must have the legacy server default, found {default}"
+                )
+
+            migrated = {
+                str(row.id): (
+                    row.completion_quality,
+                    row.partial_reason,
+                    row.orders_availability,
+                    row.orders_count,
+                )
+                for row in connection.execute(
+                    text(
+                        "SELECT id, completion_quality, partial_reason, orders_availability, "
+                        "orders_count FROM bumpa_sync_runs WHERE tenant_id = :tenant_id"
+                    ),
+                    {"tenant_id": SYNC_COMPAT_TENANT_ID},
+                )
+            }
+            expected_migrated = {
+                run_id: ("legacy", None, None, None) for run_id in SYNC_COMPAT_RUNS
+            }
+            parent_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM tenants WHERE id = :tenant_id"),
+                    {"tenant_id": SYNC_COMPAT_TENANT_ID},
+                )
+                or 0
+            ) + int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_connections WHERE id = :connection_id"),
+                    {"connection_id": SYNC_COMPAT_CONNECTION_ID},
+                )
+                or 0
+            )
+            if migrated and migrated != expected_migrated:
+                raise AssertionError(
+                    "0005 in-flight rows were not converted to evidence-free legacy states: "
+                    f"{migrated}"
+                )
+            if not migrated and parent_count:
+                raise AssertionError(
+                    "PostgreSQL sync compatibility fixtures are incomplete: "
+                    f"parents={parent_count}, runs={migrated}"
+                )
+            if migrated and parent_count != 2:
+                raise AssertionError(
+                    "PostgreSQL sync compatibility fixtures are missing parents: "
+                    f"parents={parent_count}"
+                )
+            if migrated:
+                for run_id, (status, error) in SYNC_COMPAT_RUNS.items():
+                    connection.execute(
+                        text(
+                            "UPDATE bumpa_sync_runs SET status = :status, error = :error, "
+                            "finished_at = CURRENT_TIMESTAMP WHERE id = :run_id"
+                        ),
+                        {"run_id": run_id, "status": status, "error": error},
+                    )
+                terminal = {
+                    str(row.id): (row.status, row.error)
+                    for row in connection.execute(
+                        text(
+                            "SELECT id, status, error FROM bumpa_sync_runs "
+                            "WHERE tenant_id = :tenant_id"
+                        ),
+                        {"tenant_id": SYNC_COMPAT_TENANT_ID},
+                    )
+                }
+                if terminal != SYNC_COMPAT_RUNS:
+                    raise AssertionError(
+                        "Legacy success/partial/failed terminal updates did not persist: "
+                        f"{terminal}"
+                    )
+            else:
+                # Keep the script useful as a standalone head-schema gate. CI's
+                # baseline/seed path additionally proves the 0005 in-flight
+                # transformation; a direct-head caller still proves the server
+                # default and strict constraints below.
+                connection.execute(
+                    text(
+                        "INSERT INTO tenants "
+                        "(slug, name, status, timezone, currency_code, "
+                        "research_consent_status, id, created_at, updated_at) VALUES "
+                        "('sync-compat', 'Sync compatibility', 'active', 'UTC', 'NGN', "
+                        "'unknown', :tenant_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {"tenant_id": SYNC_COMPAT_TENANT_ID},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO bumpa_connections "
+                        "(tenant_id, encrypted_api_key, scope_type, scope_id, provider, status, "
+                        "id, created_at, updated_at) VALUES "
+                        "(:tenant_id, 'encrypted', 'business_id', 'sync-compat', 'bumpa', "
+                        "'active', :connection_id, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                    ),
+                    {
+                        "tenant_id": SYNC_COMPAT_TENANT_ID,
+                        "connection_id": SYNC_COMPAT_CONNECTION_ID,
+                    },
+                )
+
+            # An old process started after rollback must receive the same server
+            # discriminator without naming any 0006+ column.
+            connection.execute(
+                text(
+                    "INSERT INTO bumpa_sync_runs "
+                    "(tenant_id, bumpa_connection_id, status, requested_from, requested_to, "
+                    "started_at, error, dataset_results, id) VALUES "
+                    "(:tenant_id, :connection_id, 'running', '2026-07-01', '2026-07-12', "
+                    "CURRENT_TIMESTAMP, NULL, CAST('{}' AS json), 'sync-compat-post-head')"
+                ),
+                {
+                    "tenant_id": SYNC_COMPAT_TENANT_ID,
+                    "connection_id": SYNC_COMPAT_CONNECTION_ID,
+                },
+            )
+            post_head_quality = connection.scalar(
+                text(
+                    "SELECT completion_quality FROM bumpa_sync_runs "
+                    "WHERE id = 'sync-compat-post-head'"
+                )
+            )
+            if post_head_quality != "legacy":
+                raise AssertionError(
+                    "Post-migration old-schema insert did not receive legacy server default"
+                )
+
+            invalid_states = {
+                "sync-invalid-pending-success": {
+                    "status": "success",
+                    "quality": "pending",
+                    "reason": None,
+                    "orders_availability": None,
+                    "orders_count": None,
+                    "error": None,
+                },
+                "sync-invalid-legacy-evidence": {
+                    "status": "success",
+                    "quality": "legacy",
+                    "reason": None,
+                    "orders_availability": "available",
+                    "orders_count": None,
+                    "error": None,
+                },
+                "sync-invalid-legacy-failure": {
+                    "status": "failed",
+                    "quality": "legacy",
+                    "reason": None,
+                    "orders_availability": None,
+                    "orders_count": None,
+                    "error": None,
+                },
+            }
+            for run_id, values in invalid_states.items():
+                _assert_check_rejected(connection, run_id, values)
+    finally:
+        with admin_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM bumpa_sync_runs WHERE tenant_id = :tenant_id"),
+                {"tenant_id": SYNC_COMPAT_TENANT_ID},
+            )
+            connection.execute(
+                text("DELETE FROM bumpa_connections WHERE id = :connection_id"),
+                {"connection_id": SYNC_COMPAT_CONNECTION_ID},
+            )
+            connection.execute(
+                text("DELETE FROM tenants WHERE id = :tenant_id"),
+                {"tenant_id": SYNC_COMPAT_TENANT_ID},
+            )
 
 
 def _fixture_pair(
@@ -653,8 +929,19 @@ def _cleanup(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed-sync-compat", action="store_true")
+    args = parser.parse_args()
     admin_url = _require_postgres_url()
     admin_engine = create_engine(admin_url, pool_pre_ping=True)
+    if args.seed_sync_compat:
+        try:
+            _seed_sync_compatibility(admin_engine)
+            print("Seeded pre-0006 PostgreSQL sync-writer compatibility fixtures.")
+        finally:
+            admin_engine.dispose()
+        return
+
     run_tag = secrets.token_hex(6)
     role = f"rls_gate_{run_tag}"
     password = secrets.token_hex(24)
@@ -662,6 +949,7 @@ def main() -> None:
     app_engine: Engine | None = None
 
     try:
+        _assert_sync_writer_compatibility(admin_engine)
         with admin_engine.connect() as connection:
             tenant_tables = _discover_tenant_tables(connection)
             _assert_schema_and_policies(connection, tenant_tables)

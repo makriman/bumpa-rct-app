@@ -72,7 +72,12 @@ jobs:
       - name: Typecheck
         working-directory: apps/api
         run: uv run mypy app scripts/verify_postgres_rls.py
-      - name: Migrate empty database
+      - name: Migrate compatibility baseline
+        working-directory: apps/api
+        run: |
+          uv run alembic upgrade 0005_platform_roles
+          uv run python scripts/verify_postgres_rls.py --seed-sync-compat
+      - name: Migrate database to head
         working-directory: apps/api
         run: uv run alembic upgrade head
       - name: Verify PostgreSQL tenant RLS

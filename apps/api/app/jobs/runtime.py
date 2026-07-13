@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -56,6 +57,8 @@ class AsyncRuntimeConfig:
         )
         if not config.queue_name or ":" in config.queue_name:
             raise ValueError("ASYNC_QUEUE_NAME must be non-empty and cannot contain ':'")
+        if re.fullmatch(r"[A-Za-z0-9._-]+", config.queue_key_prefix) is None:
+            raise ValueError("ASYNC_QUEUE_KEY_PREFIX contains invalid characters")
         if config.heartbeat_ttl_seconds < 15:
             raise ValueError("ASYNC_HEARTBEAT_TTL_SECONDS must be at least 15")
         if not 1 <= config.pop_timeout_seconds < config.heartbeat_ttl_seconds:

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# This contract intentionally searches for literal shell source containing
+# parameter expansions and command substitutions.
+# shellcheck disable=SC2016
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +25,10 @@ cleanup() {
   docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
+
+./scripts/test_release_boundary.sh
+./scripts/test_promotion_state.sh
+./scripts/test_promotion_coordinator.sh
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$line" != *=* || "$line" == \#* ]]; then
@@ -180,6 +187,7 @@ docker run --rm --network none \
     (
       source /workspace/scripts/maintenance_lock.sh
       acquire_maintenance_lock
+      bash -ceu "source /workspace/scripts/maintenance_lock.sh; acquire_maintenance_lock"
       : > "$ready"
       read -r _ < "$release" || true
     ) &
@@ -201,6 +209,16 @@ docker run --rm --network none \
     wait "$holder_pid"
     export BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS=1
     (source /workspace/scripts/maintenance_lock.sh; acquire_maintenance_lock)
+
+    set +e
+    (
+      export BUMPABESTIE_MAINTENANCE_LOCK_FD=9
+      source /workspace/scripts/maintenance_lock.sh
+      acquire_maintenance_lock
+    ) 2>/dev/null
+    spoof_status=$?
+    set -e
+    [[ "$spoof_status" -eq 2 ]]
   '
 
 ./scripts/validate_env.sh "$contract_env" production
@@ -347,12 +365,77 @@ if [[ -z "$stop_line" || -z "$backup_init_line" || -z "$backup_line" || -z "$qui
 fi
 deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | head -1 | cut -d: -f1)"
 deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
+release_helper_line="$(grep -n -F 'source "$ROOT_DIR/scripts/release_boundary.sh"' scripts/deploy.sh | cut -d: -f1)"
+release_load_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/deploy.sh | cut -d: -f1)"
+target_validate_line="$(grep -n -F './scripts/validate_env.sh .env.production production' scripts/deploy.sh | cut -d: -f1)"
 scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | head -1 | cut -d: -f1)"
 scheduled_env_line="$(grep -n -F "env_file=\"\${ENV_FILE:-.env.production}\"" scripts/scheduled_backup.sh | cut -d: -f1)"
 if [[ -z "$deploy_lock_line" || -z "$deploy_env_line" || "$deploy_lock_line" -ge "$deploy_env_line" \
   || -z "$scheduled_lock_line" || -z "$scheduled_env_line" \
   || "$scheduled_lock_line" -ge "$scheduled_env_line" ]]; then
   echo "Maintenance workflows do not acquire their shared lock before reading mutable state" >&2
+  exit 1
+fi
+if [[ -z "$release_helper_line" || -z "$release_load_line" || -z "$target_validate_line" \
+  || "$release_helper_line" -ge "$release_load_line" \
+  || "$release_load_line" -ge "$target_validate_line" ]]; then
+  echo "Deployment does not load the previous release boundary before target preflight" >&2
+  exit 1
+fi
+grep -Fq 'trap early_failure_restore EXIT' scripts/deploy.sh
+grep -Fq 'restore_previous_release_pointers' scripts/deploy.sh
+grep -Fq 'for service in api worker scheduler web hermes caddy postgres redis' scripts/deploy.sh
+grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
+grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
+grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh
+grep -Fq '"$previous_revision" "$previous_image_tag" "$target_infra_image_tag"' scripts/deploy.sh
+grep -Fq 'Application rollback succeeded and its forward-infrastructure release boundary was persisted.' scripts/deploy.sh
+grep -Fq '/usr/local/sbin/bumpabestie-promote' docs/deployment.md
+grep -Fq 'Never invoke `scripts/promote_release.sh` or' docs/runbook.md
+test -x infra/bin/bumpabestie-promote
+test -x scripts/promote_release.sh
+promotion_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/promote_release.sh | head -1 | cut -d: -f1)"
+promotion_record_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/promote_release.sh | cut -d: -f1)"
+promotion_checkout_line="$(grep -n -F 'git checkout --detach "$revision"' scripts/promote_release.sh | cut -d: -f1)"
+promotion_pointer_line="$(grep -n -F 'rewrite_release_pointers .env.production' scripts/promote_release.sh | tail -1 | cut -d: -f1)"
+promotion_exec_line="$(grep -n -F '"$ROOT_DIR/scripts/deploy.sh"' scripts/promote_release.sh | tail -1 | cut -d: -f1)"
+if [[ -z "$promotion_lock_line" || -z "$promotion_record_line" \
+  || -z "$promotion_checkout_line" || -z "$promotion_pointer_line" \
+  || -z "$promotion_exec_line" \
+  || "$promotion_lock_line" -ge "$promotion_record_line" \
+  || "$promotion_record_line" -ge "$promotion_checkout_line" \
+  || "$promotion_checkout_line" -ge "$promotion_pointer_line" \
+  || "$promotion_pointer_line" -ge "$promotion_exec_line" ]]; then
+  echo "Release promotion is not serialized across record load, checkout, pointer selection and deploy exec" >&2
+  exit 1
+fi
+grep -Fq 'BUMPABESTIE_PREVIOUS_CHECKOUT="$original_checkout"' scripts/promote_release.sh
+grep -Fq 'BUMPABESTIE_PROMOTION_STATE_FILE="$promotion_state_file"' scripts/promote_release.sh
+grep -Fq 'BUMPABESTIE_STABLE_COORDINATOR' scripts/promote_release.sh
+grep -Fq 'git -C "$repo" show "$revision:scripts/$helper"' infra/bin/bumpabestie-promote
+grep -Fq 'BUMPABESTIE_COORDINATOR_JOURNAL="$journal"' infra/bin/bumpabestie-promote
+grep -Fq 'install -m 0755 -o root -g root' scripts/bootstrap_server.sh
+grep -Fq '/usr/local/sbin/bumpabestie-promote' Makefile
+if grep -Fq './scripts/deploy.sh' Makefile; then
+  echo "Makefile bypasses the stable promotion coordinator" >&2
+  exit 1
+fi
+grep -Fq 'restore_previous_checkout' scripts/deploy.sh
+grep -Fq '.operations_revision // .revision' scripts/release_boundary.sh
+grep -Fq 'Direct deployment is forbidden; use the guarded release promotion entrypoint' scripts/deploy.sh
+grep -Fq 'if [[ "$(git rev-parse HEAD)" != "$deploy_commit" ]]' scripts/deploy.sh
+if grep -Eq '^git (fetch|checkout)' scripts/deploy.sh; then
+  echo "Deploy script mutates its checkout instead of requiring the guarded promotion handoff" >&2
+  exit 1
+fi
+grep -Fq 'write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY' scripts/deploy.sh
+grep -Fq 'write_promotion_state "$promotion_state_file" COMMITTED' scripts/deploy.sh
+grep -Fq 'assert_maintenance_clear' scripts/scheduled_backup.sh
+hybrid_pointer_line="$(grep -n -F 'if ((rollback_result == 0)) && rewrite_release_pointers .env.production' scripts/deploy.sh | cut -d: -f1)"
+hybrid_metadata_line="$(grep -n -F '&& persist_release_metadata' scripts/deploy.sh | cut -d: -f1)"
+if [[ -z "$hybrid_pointer_line" || -z "$hybrid_metadata_line" \
+  || "$hybrid_pointer_line" -ge "$hybrid_metadata_line" ]]; then
+  echo "Hybrid rollback does not persist actual-safe environment pointers before metadata" >&2
   exit 1
 fi
 if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migrate_line" ]]; then
@@ -455,6 +538,7 @@ grep -Fq 'bumpabestie-disk-usage.timer' scripts/bootstrap_server.sh
 grep -Fq 'install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie' scripts/bootstrap_server.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock' scripts/maintenance_lock.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS:-900' scripts/maintenance_lock.sh
+grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_FD:-' scripts/maintenance_lock.sh
 grep -Fq -- '--profile async up -d --wait' scripts/deploy.sh
 # Match literal deploy-script variables.
 # shellcheck disable=SC2016

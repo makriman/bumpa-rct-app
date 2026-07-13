@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import PhoneIdentity, TenantMembership, User
+from app.db.models import (
+    BumpaConnection,
+    BumpaSyncRun,
+    PhoneIdentity,
+    TenantMembership,
+    User,
+)
 from app.db.session import SessionLocal, set_security_context
 from tests.conftest import auth_headers
 
@@ -107,6 +114,112 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
         for row in client.get("/v1/settings/mcp-connections", headers=owner).json()
     )
     assert current.json()["id"] == tenant_id
+
+
+def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
+    client: TestClient,
+) -> None:
+    owner = auth_headers(client, "+2348012345678")
+    other_owner = auth_headers(client, "+2348012345679")
+    tenant_id = client.get("/v1/tenants/current", headers=owner).json()["id"]
+    other_tenant_id = client.get("/v1/tenants/current", headers=other_owner).json()["id"]
+    run_ids = {
+        "settings-typed",
+        "settings-accepted-partial",
+        "settings-legacy",
+        "settings-other",
+    }
+
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        connection = db.scalar(
+            select(BumpaConnection).where(BumpaConnection.tenant_id == tenant_id)
+        )
+        other_connection = db.scalar(
+            select(BumpaConnection).where(BumpaConnection.tenant_id == other_tenant_id)
+        )
+        assert connection is not None and other_connection is not None
+        original_connection_freshness = connection.last_successful_sync_at
+        connection.last_successful_sync_at = datetime(2029, 1, 1, tzinfo=UTC)
+        db.add_all(
+            [
+                BumpaSyncRun(
+                    id="settings-typed",
+                    tenant_id=tenant_id,
+                    bumpa_connection_id=connection.id,
+                    status="success",
+                    completion_quality="complete",
+                    requested_from=date(2028, 1, 1),
+                    requested_to=date(2028, 1, 1),
+                    started_at=datetime(2028, 1, 1, tzinfo=UTC),
+                    finished_at=datetime(2028, 1, 1, 0, 0, 5, tzinfo=UTC),
+                    orders_availability="available",
+                    orders_count=1,
+                ),
+                BumpaSyncRun(
+                    id="settings-accepted-partial",
+                    tenant_id=tenant_id,
+                    bumpa_connection_id=connection.id,
+                    status="partial",
+                    completion_quality="accepted_partial",
+                    partial_reason="profit_not_calculable",
+                    requested_from=date(2028, 6, 1),
+                    requested_to=date(2028, 6, 1),
+                    started_at=datetime(2028, 6, 1, tzinfo=UTC),
+                    finished_at=datetime(2028, 6, 1, 0, 0, 5, tzinfo=UTC),
+                    orders_availability="available",
+                    orders_count=1,
+                ),
+                BumpaSyncRun(
+                    id="settings-legacy",
+                    tenant_id=tenant_id,
+                    bumpa_connection_id=connection.id,
+                    status="success",
+                    completion_quality="legacy",
+                    requested_from=date(2029, 1, 1),
+                    requested_to=date(2029, 1, 1),
+                    started_at=datetime(2029, 1, 1, tzinfo=UTC),
+                    finished_at=datetime(2029, 1, 1, 0, 0, 5, tzinfo=UTC),
+                ),
+                BumpaSyncRun(
+                    id="settings-other",
+                    tenant_id=other_tenant_id,
+                    bumpa_connection_id=other_connection.id,
+                    status="success",
+                    completion_quality="complete",
+                    requested_from=date(2030, 1, 1),
+                    requested_to=date(2030, 1, 1),
+                    started_at=datetime(2030, 1, 1, tzinfo=UTC),
+                    finished_at=datetime(2030, 1, 1, 0, 0, 5, tzinfo=UTC),
+                    orders_availability="available",
+                    orders_count=1,
+                ),
+            ]
+        )
+        db.commit()
+
+    try:
+        response = client.get("/v1/settings/bumpa", headers=owner)
+        assert response.status_code == 200
+        freshness = response.json()["last_successful_sync_at"]
+        assert freshness.startswith("2028-06-01T00:00:05")
+
+        other_response = client.get("/v1/settings/bumpa", headers=other_owner)
+        assert other_response.status_code == 200
+        other_freshness = other_response.json()["last_successful_sync_at"]
+        assert other_freshness.startswith("2030-01-01T00:00:05")
+    finally:
+        with SessionLocal() as db:
+            set_security_context(db, privileged=True)
+            db.query(BumpaSyncRun).filter(BumpaSyncRun.id.in_(run_ids)).delete(
+                synchronize_session=False
+            )
+            connection = db.scalar(
+                select(BumpaConnection).where(BumpaConnection.tenant_id == tenant_id)
+            )
+            assert connection is not None
+            connection.last_successful_sync_at = original_connection_freshness
+            db.commit()
 
 
 def test_member_cannot_mutate_owner_settings(client: TestClient) -> None:

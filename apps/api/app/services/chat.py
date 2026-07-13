@@ -5,7 +5,7 @@ from decimal import Decimal
 from time import monotonic
 
 from fastapi import HTTPException
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -30,6 +30,7 @@ from app.providers.hermes import (
 )
 from app.providers.local import LocalAgentRuntime, LocalClassifier
 from app.providers.redaction import redact_text
+from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
 
 
 def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | None]:
@@ -37,23 +38,7 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
         select(BumpaSyncRun)
         .where(
             BumpaSyncRun.tenant_id == tenant_id,
-            BumpaSyncRun.error.is_(None),
-            BumpaSyncRun.finished_at.is_not(None),
-            or_(
-                and_(
-                    BumpaSyncRun.status == "success",
-                    BumpaSyncRun.completion_quality == "complete",
-                    BumpaSyncRun.partial_reason.is_(None),
-                    BumpaSyncRun.orders_availability == "available",
-                ),
-                and_(
-                    BumpaSyncRun.status == "partial",
-                    BumpaSyncRun.completion_quality == "accepted_partial",
-                    BumpaSyncRun.partial_reason == "profit_not_calculable",
-                    BumpaSyncRun.orders_availability == "available",
-                    BumpaSyncRun.orders_count.is_not(None),
-                ),
-            ),
+            usable_bumpa_sync_run_predicate(),
         )
         .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
         .limit(1)

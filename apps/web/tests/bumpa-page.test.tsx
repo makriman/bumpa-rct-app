@@ -220,6 +220,51 @@ describe("Bumpa refresh", () => {
     ).toHaveTextContent("Some data needs attention");
   });
 
+  it("labels a legacy terminal run as unverified and never current", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/settings/bumpa")) {
+        return jsonResponse({
+          status: "active",
+          provider: "bumpa",
+          scope_type: "business_id",
+          scope_id_last4: "1234",
+          last_successful_sync_at: null,
+          last_error: null,
+        });
+      }
+      if (url.endsWith("/bumpa/sync-runs")) {
+        return jsonResponse([
+          {
+            id: "run-legacy",
+            status: "success",
+            completion_quality: "legacy",
+            partial_reason: null,
+            dataset_results: { "sales.total_sales": "available" },
+            started_at: "2026-07-12T10:00:00Z",
+            finished_at: "2026-07-12T10:00:05Z",
+            error: null,
+          },
+        ]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    render(<BumpaPage />);
+
+    expect(await screen.findByText("Last data refresh")).toBeInTheDocument();
+    expect(screen.getByText("Not yet")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", {
+        name: "Bumpa data verification warning",
+      }),
+    ).toHaveTextContent("Latest refresh is unverified");
+    expect(
+      screen.queryByRole("status", { name: "Bumpa data limitation" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Most data is current")).not.toBeInTheDocument();
+  });
+
   it("polls a queued production sync with backoff until the new run succeeds", async () => {
     let syncRunPolls = 0;
     let jobPolls = 0;

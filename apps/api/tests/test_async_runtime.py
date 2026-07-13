@@ -213,6 +213,7 @@ def test_scheduler_enqueues_one_daily_research_retention_job(
     [
         ("ASYNC_RUNTIME_ENABLED", "maybe", "true or false"),
         ("ASYNC_QUEUE_NAME", "bad:name", "QUEUE_NAME"),
+        ("ASYNC_QUEUE_KEY_PREFIX", "bad:prefix", "QUEUE_KEY_PREFIX"),
         ("ASYNC_HEARTBEAT_TTL_SECONDS", "14", "at least 15"),
         ("ASYNC_POP_TIMEOUT_SECONDS", "45", "below heartbeat"),
         ("ASYNC_SCHEDULER_INTERVAL_SECONDS", "0", "positive"),
@@ -618,23 +619,14 @@ def test_health_command_and_enabled_entrypoint_cycles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     configured = config()
-    monkeypatch.setattr(health.AsyncRuntimeConfig, "from_env", lambda: configured)
     monkeypatch.setattr(health.sys, "argv", ["health", "worker"])
-    monkeypatch.setattr(
-        health,
-        "RedisHealthProbe",
-        lambda _config: SimpleNamespace(is_healthy=lambda _service: True),
-    )
+    monkeypatch.setattr(health, "_heartbeat_exists", lambda _service: True)
     health.main()
     monkeypatch.setattr(health.sys, "argv", ["health"])
     with pytest.raises(SystemExit, match="Usage"):
         health.main()
     monkeypatch.setattr(health.sys, "argv", ["health", "scheduler"])
-    monkeypatch.setattr(
-        health,
-        "RedisHealthProbe",
-        lambda _config: SimpleNamespace(is_healthy=lambda _service: False),
-    )
+    monkeypatch.setattr(health, "_heartbeat_exists", lambda _service: False)
     with pytest.raises(SystemExit) as unavailable:
         health.main()
     assert unavailable.value.code == 1

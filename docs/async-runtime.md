@@ -56,10 +56,13 @@ the replacement attempt. Never edit job status directly or replay a raw webhook.
 
 Worker and scheduler refresh separate Redis heartbeat keys with TTL. Docker health
 checks call `python -m app.jobs.health worker|scheduler`; a stale heartbeat or Redis
-failure makes the container unhealthy. `RedisWakeQueue.health_snapshot()` provides a
-safe readiness payload containing Redis state, worker/scheduler heartbeat state and
-the count of queued wake-up IDs. PostgreSQL job status counts remain the authoritative
-backlog and dead-letter view.
+failure makes the container unhealthy. The container probe deliberately imports only
+the Redis client, validates its small environment surface, and applies one-second
+connect/read timeouts; failures are silent so a credential-bearing Redis URL cannot be
+copied into health logs. `RedisWakeQueue.health_snapshot()` provides a safe readiness
+payload containing Redis state, worker/scheduler heartbeat state and the count of queued
+wake-up IDs. PostgreSQL job status counts remain the authoritative backlog and
+dead-letter view.
 
 Production validation requires the async runtime and validates heartbeat, poll,
 batch, retry and stale-lock bounds. Deployment starts and waits for both containers,

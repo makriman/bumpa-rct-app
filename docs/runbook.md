@@ -59,6 +59,16 @@ database query and, when enabled, Redis plus fresh worker/scheduler heartbeats. 
 reports configured provider modes but is not a Meta, Bumpa or Hermes canary.
 Preserve the response and image digests with any production incident evidence.
 
+For a release, use the root-owned `/usr/local/sbin/bumpabestie-promote`
+coordinator as documented in `docs/deployment.md`. It owns and inherits the
+maintenance lock, snapshots the prior boundary, extracts the reviewed target
+worker without first changing the checkout, and retains a durable journal until a
+verified terminal state. Never invoke `scripts/promote_release.sh` or
+`scripts/deploy.sh` directly and never generate a copy of the full secret-bearing
+environment file. A coordinator journal, maintenance interlock or
+release-record/live-container mismatch is an intentional hard stop and must be
+reconciled before another deployment or backup.
+
 The verified production snapshot is Caddy, web, API, worker, scheduler, Hermes,
 PostgreSQL and Redis with zero restarts and zero OOM kills. Caddy is 2.11.4 built
 with Go 1.26.5 and runs as UID 10001 with restricted capabilities; PostgreSQL is
