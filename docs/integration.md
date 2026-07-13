@@ -44,11 +44,16 @@ send behavior at the adapter/job boundaries.
 The defined read surface is ten analytics datasets plus paginated orders. Code and
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
-Decimal money, unknown-value preservation, and deep redaction. All five supplied
-business credentials authenticate. Four completed the bounded live provider probe;
-store 5 returned a bounded degraded timeout while retaining usable prior data. A
-fresh successful store-5 probe and mapped production sync/reconciliation remain
-required.
+Decimal money, unknown-value preservation, and deep redaction. The current bounded
+live production sync is partial for every store: stores 1–4 each returned 8/10 analytics
+datasets, while store 5 returned 7/10 and is degraded because
+`products.overview` hit an upstream timeout/HTTP 504. Missing datasets remain
+unavailable rather than being reported as zero. All five mapped jobs were queued
+through the durable production path, reached a correlated terminal run, and
+reported orders as available. This proves mapped sync execution and typed
+partial/degraded handling, not complete provider coverage or a redacted
+canonical/raw count reconciliation; 10/10 dataset evidence and final reconciliation
+remain required.
 
 ## WhatsApp contract
 
@@ -80,6 +85,14 @@ messages and OTPs continue to use the primary production sender. The test lane h
 code was sent, or substitute for an approved production authentication template.
 Keep the mode `disabled` when any identifier or subscription is uncertain.
 
+The current Meta test lane has a validated sender phone-number ID, and its test WABA
+app subscription is verified. The WABA has zero approved
+authentication templates. Both attempted template-create endpoints were denied
+with Graph code `10` and subcode `2388185`, so this is an external account/permission
+gate rather than application delivery evidence. No outbound message was sent. The
+lane remains reply-only with `supports_otp=false` and cannot satisfy OTP, proactive
+insight, operational-template or delivery-receipt gates.
+
 ## Agent contract
 
 The fake agent returns deterministic, tenant-tagged responses and captures only the
@@ -87,8 +100,10 @@ redacted context envelope. The Hermes runtime uses a pinned upstream-derived ima
 an authenticated private gateway per profile, staged profile directories, and a
 Hermes-only Anthropic secret. Contract tests cover authentication, lifecycle,
 redacted context, and profile isolation. All five production profiles pass
-authenticated GET-only health, but an explicitly authorized Claude completion and
-cross-profile canary are still required before claiming the provider path live.
+authenticated health and each completed an explicitly authorized live Claude
+request through its own Hermes gateway. This proves 5/5 mapped profile completions,
+not cross-profile isolation under attack, restart/recovery behavior, WhatsApp
+routing or unrestricted launch readiness; those separate canaries remain open.
 
 Claude is the model provider through Hermes. The Anthropic key belongs only to the
 Hermes runtime secret boundary; FastAPI passes tenant-scoped,
@@ -103,8 +118,8 @@ artifact, generated TypeScript client, drift comparison and MSW handlers have no
 yet been added. Eighteen Playwright project checks exercise desktop/mobile public
 navigation, OTP-to-chat, fail-closed role boundaries, resumable operator onboarding,
 team mutation, Bumpa evidence, research filtering/report queueing and responsive
-navigation. The exact-release web gate also passes 120 unit/component tests across
-21 files and a production build.
+navigation. The exact-release web gate also passes 121 unit/component tests across
+22 files and a production build.
 The separate `make integration` gate exercises the real FastAPI/Postgres path
 through the web proxy.
 

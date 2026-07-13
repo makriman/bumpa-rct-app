@@ -72,9 +72,9 @@ secrets retain local defaults.
 ## Status
 
 The local gates pass: backend lint/typing plus 324 tests at 85.02% branch-aware
-coverage, frontend lint/typing/build plus 120 unit/component tests, eighteen
-desktop/mobile Playwright checks, 37 host/operations tests, full Docker image and Compose startup, a
-non-bypass Postgres RLS probe, and a checksum-verified
+coverage, frontend lint/typing/build plus 121 unit/component tests across 22 files,
+eighteen desktop/mobile Playwright checks, 37 host/operations tests, full Docker
+image and Compose startup, a non-bypass Postgres RLS probe, and a checksum-verified
 Postgres/exports/reserved-Hermes backup and restore drill. `make compose-smoke`
 also verifies Postgres-backed OTP login, Bumpa mock sync, chat, research logging
 and PDF report download through the same-origin web proxy, then removes every
@@ -85,6 +85,30 @@ The sealed resilience runner additionally proves exact authenticated chat/sync
 budgets, idempotent chat replay, tenant isolation, near-full disk alert
 sanitization/signing, 50-event webhook replay, and Redis/Postgres recovery using
 synthetic credentials and isolated volumes only.
+
+Release `6fbe2a9eb0591bde5ad3cebe94d8f3568075df7b` is live on the five branded
+hosts. Core/corrective [PR 27](https://github.com/makriman/bumpa-rct-app/pull/27),
+[PR 35](https://github.com/makriman/bumpa-rct-app/pull/35), evidence
+[PR 36](https://github.com/makriman/bumpa-rct-app/pull/36), and accessibility
+[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37) are included in the
+boundary. Exact-revision [main CI 29274276654](https://github.com/makriman/bumpa-rct-app/actions/runs/29274276654)
+passed 13/13 jobs and [publish run 29274700347](https://github.com/makriman/bumpa-rct-app/actions/runs/29274700347)
+passed 7/7 jobs. All eight services are running, all seven configured healthchecks
+are healthy, and restart/OOM-kill counts are zero. The production RLS audit passed
+23/23 tenant tables and exercised 115 tenant/table contexts across 516 scoped rows
+with zero no-context or cross-tenant leakage.
+
+Provider readiness remains deliberately partial. Five mapped durable Bumpa jobs
+completed with orders available: stores 1–4 returned accepted-partial 8/10 analytics
+datasets, while degraded store 5 returned 7/10 because `products.overview` timed
+out/returned HTTP 504. All five mapped Hermes profiles completed a live Claude
+request, but cross-profile attack and recovery canaries remain open. The configured
+Meta test WABA is subscribed to the app and its configured sender phone-number ID
+is validated, but the WABA has zero authentication templates;
+template creation was denied with Graph code
+`10`/subcode `2388185`. The lane remains reply-only with `supports_otp=false`, and
+no outbound message was sent. Off-host backup durability, a real alert destination,
+and privacy/retention approval remain launch gates.
 
 The live adapters, durable worker/scheduler runtime, transactional outbox, Redis
 rate limits, tenant profile lifecycle, and scoped secret mounts are implemented and
