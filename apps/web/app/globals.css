@@ -1132,6 +1132,18 @@ a {
   color: #28663d;
   border: 1px solid #cce5d2;
 }
+.sync-quality-notice {
+  margin: 4px 0 14px;
+}
+.sync-quality-notice strong {
+  display: block;
+  color: #194867;
+  font-size: 0.9rem;
+  margin-bottom: 2px;
+}
+.sync-quality-notice p {
+  margin: 0;
+}
 
 .empty-state {
   min-height: 280px;
@@ -1586,6 +1598,9 @@ a {
   padding: 14px 17px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
   font-size: 0.84rem;
+}
+.toast-warning {
+  background: #6f4d14;
 }
 
 .connection-card {

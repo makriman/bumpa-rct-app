@@ -540,6 +540,9 @@ def all_sync_runs(
             "id": row.id,
             "tenant_id": row.tenant_id,
             "status": row.status,
+            "completion_quality": row.completion_quality,
+            "partial_reason": row.partial_reason,
+            "orders_availability": row.orders_availability,
             "started_at": row.started_at,
             "error": row.error,
         }

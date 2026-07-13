@@ -53,6 +53,23 @@ EXPECTED_COUNT_KEYS = {
     "applied",
     "dry_run",
 }
+EXPECTED_SYNC_DATASETS = frozenset(
+    {
+        "sales.overview",
+        "sales.total_sales",
+        "sales.gross_profit",
+        "sales.net_profit",
+        "products.overview",
+        "products.products_sold",
+        "products.top_selling_products",
+        "products.least_selling_products",
+        "customers.overview",
+        "customers.top_customers_order",
+    }
+)
+OPTIONAL_UNAVAILABLE_SYNC_DATASETS = frozenset(
+    {"sales.gross_profit", "sales.net_profit"}
+)
 
 
 class OpsError(RuntimeError):
@@ -634,6 +651,48 @@ def _validate_api_base(value: str) -> None:
         raise OpsError("api_base_must_be_https")
 
 
+def _validate_completed_sync_run(
+    completed_run: dict[str, Any],
+) -> tuple[str, str, int, int]:
+    run_id = completed_run.get("id")
+    status = completed_run.get("status")
+    completion_quality = completed_run.get("completion_quality")
+    partial_reason = completed_run.get("partial_reason")
+    orders_availability = completed_run.get("orders_availability")
+    orders_count = completed_run.get("orders_count")
+    datasets = completed_run.get("dataset_results")
+    if not isinstance(run_id, str) or not UUID_RE.fullmatch(run_id):
+        raise OpsError("bumpa_sync_run_id_invalid")
+    if completed_run.get("error") is not None:
+        raise OpsError("bumpa_sync_run_error_present")
+    if orders_availability != "available":
+        raise OpsError("bumpa_sync_orders_unavailable")
+    if (
+        isinstance(orders_count, bool)
+        or not isinstance(orders_count, int)
+        or orders_count < 0
+    ):
+        raise OpsError("bumpa_sync_orders_count_invalid")
+    if not isinstance(datasets, dict) or set(datasets) != EXPECTED_SYNC_DATASETS:
+        raise OpsError("bumpa_sync_dataset_set_invalid")
+    if any(value not in {"available", "unavailable"} for value in datasets.values()):
+        raise OpsError("bumpa_sync_dataset_status_invalid")
+    unavailable = {key for key, value in datasets.items() if value == "unavailable"}
+    if unavailable - OPTIONAL_UNAVAILABLE_SYNC_DATASETS:
+        raise OpsError("bumpa_sync_required_dataset_unavailable")
+    expected_status = "partial" if unavailable else "success"
+    if status != expected_status:
+        raise OpsError("bumpa_sync_run_status_mismatch")
+    expected_quality = "accepted_partial" if unavailable else "complete"
+    expected_reason = "profit_not_calculable" if unavailable else None
+    if completion_quality != expected_quality or partial_reason != expected_reason:
+        # The API assigns accepted_partial only after it has checked the exact
+        # provider diagnostic for each unavailable profit metric and proved the
+        # orders read completed without an error.
+        raise OpsError("bumpa_sync_completion_evidence_invalid")
+    return run_id, expected_status, len(datasets) - len(unavailable), len(unavailable)
+
+
 def _tenant_ids(inputs: Inputs, host: str, api_base: str) -> dict[str, str]:
     token, session_id = _issue_session(
         host, phone=inputs.operator_phone, kind="operator"
@@ -844,24 +903,18 @@ def bumpa_sync_canaries(inputs: Inputs, host: str, api_base: str) -> None:
             )
             if completed_run is None:
                 raise OpsError("bumpa_sync_correlated_run_not_found")
-            run_id = completed_run.get("id")
-            status = completed_run.get("status")
-            datasets = completed_run.get("dataset_results") or {}
             if (
-                not isinstance(run_id, str)
-                or not UUID_RE.fullmatch(run_id)
-                or status != "success"
-                or completed_run.get("requested_from") != requested_from
+                completed_run.get("requested_from") != requested_from
                 or completed_run.get("requested_to") != requested_to
-                or not isinstance(datasets, dict)
-                or not datasets
-                or any(value != "available" for value in datasets.values())
             ):
-                raise OpsError("bumpa_sync_canary_not_fully_successful")
-            available = sum(value == "available" for value in datasets.values())
+                raise OpsError("bumpa_sync_run_range_mismatch")
+            run_id, status, available, unavailable = _validate_completed_sync_run(
+                completed_run
+            )
             print(
                 f"bumpa_sync_{store.index}={status};tenant_id={tenant_id};run_id={run_id};"
-                f"datasets_available={available};datasets_total={len(datasets)}"
+                f"datasets_available={available};datasets_unavailable={unavailable};"
+                f"datasets_total={len(EXPECTED_SYNC_DATASETS)}"
             )
         finally:
             _revoke_session(host, token)

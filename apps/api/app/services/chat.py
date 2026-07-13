@@ -5,7 +5,7 @@ from decimal import Decimal
 from time import monotonic
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -13,9 +13,8 @@ from app.core.crypto import FieldCipher
 from app.core.time import utcnow
 from app.db.models import (
     AgentMessage,
-    BumpaConnection,
     BumpaMetricSnapshot,
-    BumpaOrder,
+    BumpaSyncRun,
     Conversation,
     HermesProfile,
     ResearchEvent,
@@ -34,33 +33,68 @@ from app.providers.redaction import redact_text
 
 
 def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | None]:
-    connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant_id))
+    latest_usable_run = db.scalar(
+        select(BumpaSyncRun)
+        .where(
+            BumpaSyncRun.tenant_id == tenant_id,
+            BumpaSyncRun.error.is_(None),
+            BumpaSyncRun.finished_at.is_not(None),
+            or_(
+                and_(
+                    BumpaSyncRun.status == "success",
+                    BumpaSyncRun.completion_quality == "complete",
+                    BumpaSyncRun.partial_reason.is_(None),
+                    BumpaSyncRun.orders_availability == "available",
+                ),
+                and_(
+                    BumpaSyncRun.status == "partial",
+                    BumpaSyncRun.completion_quality == "accepted_partial",
+                    BumpaSyncRun.partial_reason == "profit_not_calculable",
+                    BumpaSyncRun.orders_availability == "available",
+                    BumpaSyncRun.orders_count.is_not(None),
+                ),
+            ),
+        )
+        .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
+        .limit(1)
+    )
+    if latest_usable_run is None:
+        return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
     metrics = list(
         db.scalars(
-            select(BumpaMetricSnapshot)
-            .where(BumpaMetricSnapshot.tenant_id == tenant_id)
-            .order_by(BumpaMetricSnapshot.created_at.desc())
-            .limit(10)
+            select(BumpaMetricSnapshot).where(
+                BumpaMetricSnapshot.tenant_id == tenant_id,
+                BumpaMetricSnapshot.sync_run_id == latest_usable_run.id,
+            )
         ).all()
-    )
-    order_count = db.scalar(
-        select(func.count()).select_from(BumpaOrder).where(BumpaOrder.tenant_id == tenant_id)
     )
     if not metrics:
         return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
-    unique: dict[str, BumpaMetricSnapshot] = {}
-    for metric in metrics:
-        unique.setdefault(metric.metric_key, metric)
-    sales = unique.get("sales.total_sales")
-    products = unique.get("products.products_sold")
-    freshness = connection.last_successful_sync_at if connection else None
+    snapshot = {metric.metric_key: metric for metric in metrics}
+    sales = snapshot.get("sales.total_sales")
+    gross_profit = snapshot.get("sales.gross_profit")
+    net_profit = snapshot.get("sales.net_profit")
+    products = snapshot.get("products.products_sold")
+    freshness = latest_usable_run.finished_at
     context = (
-        f"Total sales: {_format_decimal(sales.value_decimal if sales else None, money=True)}; "
-        f"products sold: {_format_decimal(products.value_decimal if products else None)}; "
-        f"orders in current snapshot: {order_count or 0}; "
+        f"Total sales: {_format_metric(sales, money=True)}; "
+        f"gross profit: {_format_metric(gross_profit, money=True)}; "
+        f"net profit: {_format_metric(net_profit, money=True)}; "
+        f"products sold: {_format_metric(products)}; "
+        f"orders in current snapshot: {_format_count(latest_usable_run.orders_count)}; "
         f"data refreshed: {_format_timestamp(freshness)}."
     )
     return context, freshness
+
+
+def _format_metric(metric: BumpaMetricSnapshot | None, *, money: bool = False) -> str:
+    if metric is None or metric.availability != "available":
+        return "unavailable"
+    return _format_decimal(metric.value_decimal, money=money)
+
+
+def _format_count(value: int | None) -> str:
+    return "unavailable" if value is None else str(value)
 
 
 def _format_decimal(value: Decimal | None, *, money: bool = False) -> str:
