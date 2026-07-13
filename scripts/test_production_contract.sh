@@ -13,6 +13,7 @@ duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 verification_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
+hermes_health_probe="$(mktemp -d)"
 runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
 backup_init_volume="bumpabestie-backup-init-contract-$$"
 offsite_env="$(mktemp)"
@@ -21,7 +22,7 @@ offsite_marker="$(mktemp)"
 cleanup() {
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$offsite_env" "$offsite_hook" "$offsite_marker"
-  rm -rf "$contract_secrets"
+  rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
   docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
 }
@@ -383,6 +384,62 @@ if ! jq --exit-status '
 fi
 hermes_healthcheck="$(jq --raw-output '.services.hermes.healthcheck.test[1]' <<<"$rendered")"
 sh -n -c "$hermes_healthcheck"
+mkdir -p \
+  "$hermes_health_probe/command-main-only" \
+  "$hermes_health_probe/command-all-up" \
+  "$hermes_health_probe/control-absent" \
+  "$hermes_health_probe/control-present/s6-rc.d/bumpabestie-hermes-control" \
+  "$hermes_health_probe/curl-fail" \
+  "$hermes_health_probe/curl-success"
+cat > "$hermes_health_probe/command-main-only/s6-svstat" <<'EOF'
+#!/bin/sh
+if [ "$1" = /run/service/main-hermes ]; then
+  printf 'up (pid 100) 1 seconds\n'
+  exit 0
+fi
+exit 1
+EOF
+cat > "$hermes_health_probe/command-all-up/s6-svstat" <<'EOF'
+#!/bin/sh
+printf 'up (pid 100) 1 seconds\n'
+EOF
+cat > "$hermes_health_probe/curl-fail/curl" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+cat > "$hermes_health_probe/curl-success/curl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+printf 'longrun\n' > \
+  "$hermes_health_probe/control-present/s6-rc.d/bumpabestie-hermes-control/type"
+chmod 0555 \
+  "$hermes_health_probe/command-main-only/s6-svstat" \
+  "$hermes_health_probe/command-all-up/s6-svstat" \
+  "$hermes_health_probe/curl-fail/curl" \
+  "$hermes_health_probe/curl-success/curl"
+health_probe_image='python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df'
+docker run --rm --network none --read-only \
+  --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+  --volume "$hermes_health_probe/command-main-only:/command:ro" \
+  --volume "$hermes_health_probe/control-absent:/etc/s6-overlay:ro" \
+  --volume "$hermes_health_probe/curl-fail:/stubs:ro" \
+  "$health_probe_image" sh -eu -c "$hermes_healthcheck"
+if docker run --rm --network none --read-only \
+    --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+    --volume "$hermes_health_probe/command-main-only:/command:ro" \
+    --volume "$hermes_health_probe/control-present:/etc/s6-overlay:ro" \
+    --volume "$hermes_health_probe/curl-success:/stubs:ro" \
+    "$health_probe_image" sh -eu -c "$hermes_healthcheck"; then
+  echo "Hermes healthcheck accepted a failed control service in a control-capable image" >&2
+  exit 1
+fi
+docker run --rm --network none --read-only \
+  --env HERMES_CONTROL_PORT=8699 --env PATH=/stubs:/usr/local/bin:/usr/bin:/bin \
+  --volume "$hermes_health_probe/command-all-up:/command:ro" \
+  --volume "$hermes_health_probe/control-present:/etc/s6-overlay:ro" \
+  --volume "$hermes_health_probe/curl-success:/stubs:ro" \
+  "$health_probe_image" sh -eu -c "$hermes_healthcheck"
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
