@@ -310,7 +310,9 @@ if ! jq --exit-status '
   .services.hermes.environment.HERMES_STAGING_ROOT == "/staged/profiles" and
   .services.api.environment.HERMES_CONTROL_PORT == "8699" and
   .services.api.group_add == ["10000"] and
-  (.services.hermes.healthcheck.test[1] | contains("bumpabestie-hermes-control")) and
+  (.services.hermes.healthcheck.test[1] | contains("/run/service/main-hermes")) and
+  (.services.hermes.healthcheck.test[1] | contains("/etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type")) and
+  (.services.hermes.healthcheck.test[1] | contains("/run/service/bumpabestie-hermes-control")) and
   (.services.hermes.healthcheck.test[1] | contains("HERMES_CONTROL_PORT")) and
   (.services.hermes.environment | has("ANTHROPIC_API_KEY") | not) and
   (.services.hermes.secrets | length == 1) and
@@ -379,6 +381,8 @@ if ! jq --exit-status '
   }' <<<"$rendered" >&2
   exit 1
 fi
+hermes_healthcheck="$(jq --raw-output '.services.hermes.healthcheck.test[1]' <<<"$rendered")"
+sh -n -c "$hermes_healthcheck"
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
@@ -426,7 +430,11 @@ grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=180' scripts/deploy.sh
 grep -Fq 'if ! SMOKE_SCHEME=https' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=' scripts/deploy.sh
 grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=60' scripts/deploy.sh
-test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 3
+test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
+test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 2
+grep -Fq 'if docker start "${previous_writer_containers[@]}" >/dev/null' scripts/deploy.sh
+grep -Fq '&& "${compose[@]}" --profile async up -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq 'COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type' infra/hermes/Dockerfile
 if grep -Fq 'SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh' scripts/deploy.sh; then
   echo "Deployment bypasses the bounded direct-origin and edge smoke gates" >&2
   exit 1
