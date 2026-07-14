@@ -48,7 +48,8 @@ function postgresScalar(sql: string): string {
 
 async function enterPhone(page: Page, country: string, nationalNumber: string) {
   await page.goto("/login");
-  await page.getByLabel("Country or region").selectOption(country);
+  await page.getByRole("button", { name: /Country code/ }).click();
+  await page.locator(`[role="option"][data-country-iso="${country}"]`).click();
   await page.getByLabel("Mobile number").fill(nationalNumber);
   await page.getByRole("button", { name: "Continue securely" }).click();
   await expect(

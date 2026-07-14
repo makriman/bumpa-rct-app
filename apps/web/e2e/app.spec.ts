@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { previewResearchEvents, previewTeam } from "../lib/preview-fixtures";
 import {
   apiPath,
@@ -7,6 +7,11 @@ import {
   liveSession,
   mockBumpa,
 } from "./support";
+
+async function selectCountry(page: Page, iso: string) {
+  await page.getByRole("button", { name: /Country code/ }).click();
+  await page.locator(`[role="option"][data-country-iso="${iso}"]`).click();
+}
 
 test("public lander presents the product and reaches login", async ({
   page,
@@ -83,7 +88,7 @@ test("temporary web PIN login reaches live SME chat through the browser BFF", as
   });
 
   await page.goto("/login");
-  await page.getByLabel("Country or region").selectOption("US");
+  await selectCountry(page, "US");
   await page.getByLabel("Mobile number").fill("202 555 0123");
   const submitButton = page.locator(".auth-submit");
   const continueClick = submitButton.click();
@@ -138,13 +143,45 @@ test("country-aware sign-in validates input and normalizes UK and India numbers"
   ).toBeVisible();
   await page.getByRole("button", { name: "Change number" }).click();
 
-  await page.getByLabel("Country or region").selectOption("IN");
+  await selectCountry(page, "IN");
   await page.getByLabel("Mobile number").fill("98765 43210");
   await page.getByRole("button", { name: "Continue securely" }).click();
   await expect(
     page.getByRole("heading", { name: "Enter your web PIN." }),
   ).toBeVisible();
   expect(requestedPhones).toEqual(["+447400123456", "+919876543210"]);
+});
+
+test("country picker supports search and keyboard selection", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  const trigger = page.getByRole("button", {
+    name: "Country code, United Kingdom +44",
+  });
+
+  await trigger.click();
+  const search = page.getByRole("textbox", {
+    name: "Search countries or calling codes",
+  });
+  await expect(search).toBeFocused();
+  await search.fill("India");
+  await search.press("Enter");
+
+  await expect(
+    page.getByRole("button", { name: "Country code, India +91" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Mobile number")).toHaveAttribute(
+    "placeholder",
+    "98765 43210",
+  );
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Country code, India +91" }).click();
+  await page
+    .getByRole("textbox", { name: "Search countries or calling codes" })
+    .press("Escape");
+  await expect(page.getByRole("listbox")).toHaveCount(0);
 });
 
 test("protected user, admin, and research surfaces fail closed without authorization", async ({

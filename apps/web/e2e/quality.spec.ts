@@ -65,6 +65,17 @@ test("public landing and login have zero automated Axe WCAG A/AA violations", as
     page.getByRole("heading", { name: "Welcome back." }),
   ).toBeVisible();
   await expectWcagAA(page);
+
+  const countryPicker = page.getByRole("button", {
+    name: "Country code, United Kingdom +44",
+  });
+  await countryPicker.click();
+  await expect(
+    page.getByRole("textbox", {
+      name: "Search countries or calling codes",
+    }),
+  ).toBeFocused();
+  await expectWcagAA(page);
 });
 
 test("login hydrates without locale-derived text mismatches", async ({

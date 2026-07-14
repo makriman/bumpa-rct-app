@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { connection } from "next/server";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/newsreader";
+import "flag-icons/css/flag-icons.min.css";
 import { siteMetadata } from "@/lib/site-metadata";
 import "./globals.css";
 

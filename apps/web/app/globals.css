@@ -611,9 +611,7 @@ a {
   margin-bottom: 9px;
 }
 .phone-fields {
-  display: grid;
-  grid-template-columns: minmax(170px, 0.85fr) minmax(0, 1.15fr);
-  gap: 10px;
+  display: block;
 }
 .phone-fields .field {
   gap: 6px;
@@ -628,7 +626,7 @@ a {
   display: block;
   margin-top: 8px;
 }
-.national-number-control {
+.phone-input-control {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
@@ -636,32 +634,171 @@ a {
   border: 1px solid var(--line);
   border-radius: 12px;
   background: white;
-  overflow: hidden;
 }
-.national-number-control:focus-within {
+.phone-input-control:focus-within {
   border-color: var(--forest);
   outline: 3px solid rgba(29, 91, 71, 0.12);
 }
-.national-number-control > span {
-  height: 100%;
-  display: grid;
-  place-items: center;
-  padding: 0 10px 0 13px;
-  border-right: 1px solid var(--line);
-  color: var(--ink-soft);
-  background: #fbfaf6;
-  font-size: 0.84rem;
-  font-weight: 750;
+.phone-input-control.input-error {
+  border-color: var(--danger);
 }
-.national-number-control .input {
+.phone-input-control .input {
   min-width: 0;
   border: 0;
-  border-radius: 0;
+  border-radius: 0 12px 12px 0;
   outline: 0;
 }
-.national-number-control .input:focus {
+.phone-input-control .input:focus {
   border: 0;
   outline: 0;
+}
+.country-code-picker {
+  position: relative;
+  align-self: stretch;
+}
+.country-code-trigger {
+  height: 100%;
+  min-width: 106px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 12px 0 0 12px;
+  color: var(--ink-soft);
+  background: #fbfaf6;
+  cursor: pointer;
+}
+.country-code-trigger:hover,
+.country-code-trigger[aria-expanded="true"] {
+  color: var(--forest-deep);
+  background: #f3f3e9;
+}
+.country-code-trigger:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--forest);
+  outline-offset: -3px;
+}
+.country-code-trigger .fi,
+.country-code-option .fi {
+  width: 21px;
+  height: 15px;
+  flex: 0 0 auto;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(25, 35, 31, 0.12);
+}
+.country-code-value {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 750;
+}
+.country-code-trigger svg {
+  color: var(--ink-soft);
+  transition: transform 0.16s ease;
+}
+.country-code-trigger[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.country-code-popover {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 9px);
+  left: 0;
+  width: min(330px, calc(100vw - 48px));
+  padding: 8px;
+  border: 1px solid rgba(25, 35, 31, 0.12);
+  border-radius: 15px;
+  background: white;
+  box-shadow: 0 20px 50px rgba(19, 42, 33, 0.16);
+}
+.country-search-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink-soft);
+  background: #fbfaf6;
+}
+.country-search-control:focus-within {
+  border-color: var(--forest);
+  box-shadow: 0 0 0 3px rgba(29, 91, 71, 0.1);
+}
+.country-search-control input {
+  min-width: 0;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 0.84rem;
+}
+.country-search-control input::placeholder {
+  color: #78837e;
+}
+.country-code-options {
+  max-height: 276px;
+  margin-top: 7px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.country-list-label {
+  display: block;
+  padding: 6px 10px 5px;
+  color: var(--ink-soft);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.country-code-option {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 21px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.country-code-option.active {
+  background: #eff6f1;
+}
+.country-code-option[aria-selected="true"] {
+  color: var(--forest-deep);
+  background: var(--mint);
+}
+.country-option-name {
+  overflow: hidden;
+  font-size: 0.82rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.country-option-code {
+  color: var(--ink-soft);
+  font-size: 0.79rem;
+  font-variant-numeric: tabular-nums;
+}
+.country-empty-state {
+  display: block;
+  padding: 24px 12px;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  text-align: center;
 }
 .auth-submit {
   width: 100%;
@@ -2030,8 +2167,12 @@ a {
   .auth-card h1 {
     font-size: 2.45rem;
   }
-  .phone-fields {
-    grid-template-columns: 1fr;
+  .country-code-trigger {
+    min-width: 100px;
+    padding-inline: 10px;
+  }
+  .country-code-popover {
+    width: min(320px, calc(100vw - 36px));
   }
 }
 @media (max-width: 560px) {
