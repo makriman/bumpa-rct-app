@@ -223,10 +223,7 @@ export default function LoginPage({
       </section>
       <section className="auth-main">
         <div className="auth-card">
-          <Link href="/" className="brand auth-brand">
-            <span className="brand-mark">B</span>
-            <span className="brand-word">Bumpa Bestie</span>
-          </Link>
+          <Brand className="auth-brand" />
 
           {step === "phone" ? (
             <>

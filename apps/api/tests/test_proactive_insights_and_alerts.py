@@ -141,6 +141,8 @@ def _fresh_sync(db, tenant: Tenant, *, finished_at: datetime) -> BumpaSyncRun:  
         currency_code="NGN",
         requested_from=date(2026, 7, 1),
         requested_to=date(2026, 7, 13),
+        response_from=datetime(2026, 7, 1, tzinfo=UTC),
+        response_to=datetime(2026, 7, 13, tzinfo=UTC),
         availability="available",
     )
     db.add_all((connection, run, snapshot))

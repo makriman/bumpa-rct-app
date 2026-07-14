@@ -270,6 +270,21 @@ for timer_name in bumpabestie-backup.timer bumpabestie-disk-usage.timer; do
 done
 
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
+application_writer_services=(api worker scheduler)
+
+assert_application_writers_stopped() {
+  local service container_id state
+  for service in "${application_writer_services[@]}"; do
+    while IFS= read -r container_id; do
+      [[ -n "$container_id" ]] || continue
+      state="$(docker inspect --format '{{.State.Status}}' "$container_id")"
+      if [[ "$state" != "exited" ]]; then
+        echo "Refusing to cross the migration boundary while $service is $state" >&2
+        return 1
+      fi
+    done < <("${compose[@]}" ps --all -q "$service")
+  done
+}
 
 run_production_smoke() {
   if ! SMOKE_SCHEME=https \
@@ -487,7 +502,7 @@ persist_release_metadata() {
 }
 
 deployment_started=0
-writers_quiesced=0
+writer_stop_attempted=0
 rollback() {
   local result=$?
   local rollback_result=1
@@ -517,7 +532,7 @@ rollback() {
       predeployment_restored=0
       echo "Unable to restore the previous checkout; operator intervention is required." >&2
     fi
-    if ((writers_quiesced && ${#previous_writer_containers[@]} > 0)); then
+    if ((writer_stop_attempted && ${#previous_writer_containers[@]} > 0)); then
       echo "Restarting the previously running application after pre-deployment failure." >&2
     else
       if ((predeployment_restored)); then
@@ -730,8 +745,9 @@ if [[ "$target_pg_major" != "16" ]]; then
 fi
 
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
-writers_quiesced=1
+writer_stop_attempted=1
 "${compose[@]}" stop --timeout 60 caddy web api worker scheduler hermes
+assert_application_writers_stopped
 if [[ -n "$postgres_container" ]]; then
   running_pg_version_num="$(
     docker exec "$postgres_container" psql \
@@ -777,6 +793,10 @@ if [[ -n "$postgres_container" ]]; then
     backup
 fi
 
+# The backup may be long-running. Recheck the writer interlock immediately
+# before crossing the forward-only database boundary so an old API, worker, or
+# scheduler can never overlap the target migration.
+assert_application_writers_stopped
 write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY
 deployment_started=1
 "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis

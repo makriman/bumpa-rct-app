@@ -1,0 +1,64 @@
+{
+  "sales.overview": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": [
+      {"title": "Total Sales", "value": "₦12,500.50"},
+      {"title": "Offline Sales", "value": "₦2,500.00"},
+      {"title": "Total Settled", "value": "₦10,000.50"},
+      {"title": "Total Owed", "value": "₦2,500.00"}
+    ]
+  },
+  "sales.total_sales": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": {
+      "summary": {"title": "Total Sales", "value": "₦12,500.50", "progress": 10, "progress_text": "10%"},
+      "chart": {
+        "current_period": {"range": ["2026-01-01", "2026-01-31"], "data": [{"index": 0, "value": 12500.5, "dateLabel": "Jan"}]},
+        "previous_period": {"range": ["2025-12-01", "2025-12-31"], "data": [{"index": 0, "value": 11000, "dateLabel": "Dec"}]}
+      }
+    }
+  },
+  "sales.gross_profit": {"error": "Gross profit cannot be calculated for this store"},
+  "sales.net_profit": {"error": "Net profit cannot be calculated for this store"},
+  "products.overview": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": {
+      "total_products": {"title": "Total Products", "value": 12},
+      "total_stock": {"title": "Total Stock", "value": "48"},
+      "inventory_value": {"title": "Inventory Value", "value": 60000},
+      "total_products_chart": {"range": ["2026-01-01", "2026-01-31"], "data": [{"index": 0, "value": 12, "dateLabel": "Jan"}]},
+      "total_products_sold_chart": {"range": ["2026-01-01", "2026-01-31"], "data": [{"index": 0, "value": 7, "dateLabel": "Jan"}]}
+    }
+  },
+  "products.products_sold": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": {
+      "summary": {"title": "Products Sold", "value": 7, "progress": 0, "progress_text": "0%"},
+      "chart": {
+        "current_period": {"range": ["2026-01-01", "2026-01-31"], "data": [{"index": 0, "value": 7, "dateLabel": "Jan"}]},
+        "previous_period": {"range": ["2025-12-01", "2025-12-31"], "data": [{"index": 0, "value": 6, "dateLabel": "Dec"}]}
+      }
+    }
+  },
+  "products.top_selling_products": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": [{"title": "Top 5 performing products by order count", "data": [{"id": 101, "label": "Synthetic Best Seller", "value": 5}]}]
+  },
+  "products.least_selling_products": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": [{"title": "Least performing products by order count", "data": [{"id": 102, "label": "Synthetic Slow Seller", "value": 1}]}]
+  },
+  "customers.overview": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": [
+      {"title": "Total Customers", "value": 6},
+      {"title": "New Customers", "value": 2},
+      {"title": "Returning Customers", "value": 4},
+      {"title": "Avg. Spend / Customer", "value": 2083.42}
+    ]
+  },
+  "customers.top_customers_order": {
+    "range": {"from": "2026-01-01", "to": "2026-01-31"},
+    "data": {"summary": {"title": "Top customers by number of orders", "data": [{"id": 501, "label": "Synthetic Customer", "value": 3}]}}
+  }
+}

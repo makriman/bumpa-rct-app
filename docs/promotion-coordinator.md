@@ -37,6 +37,14 @@ Successful `COMMITTED`, exact `PREVIOUS_RESTORED`, and verified
 `/var/lib/bumpabestie/promotion-history`. The installed launcher is root-owned so
 a Git checkout cannot replace the process that owns locking and crash detection.
 
+Before any forward migration, the guarded deployment stops the previous API,
+worker, and scheduler and proves that no project container for those writer
+services is running. It repeats that assertion after the recovery-point backup,
+immediately before recording the forward boundary. A failed or partial stop
+returns through the coordinator's pre-boundary recovery path and restarts the
+previously recorded containers; old and new sync writers therefore cannot overlap
+the generation-fenced Bumpa schema during a promotion.
+
 Temporary-auth preflight crosses the root-only verifier boundary through the
 separately installed root-owned
 `/usr/local/sbin/bumpabestie-validate-temporary-auth-secret` helper and one

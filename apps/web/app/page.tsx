@@ -1,14 +1,28 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { headers } from "next/headers";
 import { AppIcon } from "@/components/app-icon";
 import { PublicShell } from "@/components/public-shell";
-import { publicPageMetadata } from "@/lib/site-metadata";
+import { CSP_NONCE_REQUEST_HEADER } from "@/lib/content-security-policy";
+import { buildStructuredData, publicPageMetadata } from "@/lib/site-metadata";
 
 export const metadata: Metadata = publicPageMetadata({ path: "/" });
 
-export default function HomePage() {
+export default async function HomePage() {
+  const structuredData = buildStructuredData();
+  const nonce = (await headers()).get(CSP_NONCE_REQUEST_HEADER) ?? undefined;
   return (
     <PublicShell>
+      <script
+        type="application/ld+json"
+        nonce={nonce}
+        // Browsers intentionally hide nonce attribute values after parsing,
+        // while React still holds the server value during hydration.
+        suppressHydrationWarning
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),
+        }}
+      />
       <section className="hero">
         <div>
           <span className="eyebrow">Built for ambitious SMEs</span>
@@ -42,7 +56,8 @@ export default function HomePage() {
               <div className="preview-person">
                 <span className="avatar">BB</span>
                 <div>
-                  Bumpa Bestie<div className="online">● Your data is fresh</div>
+                  Bumpa Bestie
+                  <div className="online">● Your data is fresh</div>
                 </div>
               </div>
               <span>•••</span>

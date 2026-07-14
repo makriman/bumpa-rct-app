@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -155,6 +156,14 @@ class BumpaConnection(IdMixin, TimestampMixin, Base):
             "scope_type IN ('business_id', 'location_id')",
             name="ck_bumpa_connections_scope_type",
         ),
+        CheckConstraint(
+            "sync_generation >= 0",
+            name="ck_bumpa_connections_sync_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "published_sync_generation >= 0 AND published_sync_generation <= sync_generation",
+            name="ck_bumpa_connections_published_generation_valid",
+        ),
         UniqueConstraint("tenant_id"),
     )
 
@@ -164,6 +173,10 @@ class BumpaConnection(IdMixin, TimestampMixin, Base):
     scope_id: Mapped[str] = mapped_column(String(160))
     provider: Mapped[str] = mapped_column(String(24), default="local")
     status: Mapped[str] = mapped_column(String(24), default="active")
+    sync_generation: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    published_sync_generation: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0"
+    )
     last_successful_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_failed_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -184,7 +197,7 @@ class BumpaSyncRun(IdMixin, Base):
         CheckConstraint(
             "partial_reason IS NULL OR partial_reason IN "
             "('profit_not_calculable', 'dataset_unavailable', 'dataset_error', "
-            "'orders_unavailable', 'incomplete_dataset_set')",
+            "'orders_unavailable', 'incomplete_dataset_set', 'optional_dataset_unavailable')",
             name="ck_bumpa_sync_runs_partial_reason",
         ),
         CheckConstraint(
@@ -194,7 +207,8 @@ class BumpaSyncRun(IdMixin, Base):
             "AND partial_reason IS NULL AND error IS NULL) OR "
             "(status = 'partial' AND completion_quality = 'accepted_partial' "
             "AND partial_reason IS NOT NULL "
-            "AND partial_reason = 'profit_not_calculable' AND error IS NULL "
+            "AND partial_reason IN ('profit_not_calculable', 'optional_dataset_unavailable') "
+            "AND error IS NULL "
             "AND orders_availability IS NOT NULL "
             "AND orders_availability = 'available' AND orders_count IS NOT NULL) OR "
             "(status = 'partial' AND completion_quality = 'degraded' "
@@ -230,6 +244,10 @@ class BumpaSyncRun(IdMixin, Base):
             name="ck_bumpa_sync_runs_orders_count_nonnegative",
         ),
         CheckConstraint(
+            "sync_generation IS NULL OR sync_generation > 0",
+            name="ck_bumpa_sync_runs_sync_generation_positive",
+        ),
+        CheckConstraint(
             "orders_availability IS NULL OR orders_availability IN "
             "('available', 'unavailable', 'error')",
             name="ck_bumpa_sync_runs_orders_availability",
@@ -255,6 +273,9 @@ class BumpaSyncRun(IdMixin, Base):
     orders_availability: Mapped[str | None] = mapped_column(String(24))
     orders_count: Mapped[int | None] = mapped_column(Integer)
     dataset_results: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    # Nullable for rolling compatibility with writers deployed before the
+    # generation fence. New syncs always persist their claimed generation.
+    sync_generation: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class BumpaRawResponse(IdMixin, Base):
@@ -269,7 +290,8 @@ class BumpaRawResponse(IdMixin, Base):
             name="ck_bumpa_raw_responses_http_status",
         ),
         CheckConstraint(
-            "failure_kind IS NULL OR failure_kind IN ('timeout', 'transport', 'upstream_http')",
+            "failure_kind IS NULL OR failure_kind IN "
+            "('timeout', 'transport', 'upstream_http', 'invalid_response')",
             name="ck_bumpa_raw_responses_failure_kind",
         ),
         CheckConstraint(
@@ -308,6 +330,7 @@ class BumpaMetricSnapshot(IdMixin, Base):
     metric_title: Mapped[str | None] = mapped_column(String(200))
     value_decimal: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     value_text: Mapped[str | None] = mapped_column(Text)
+    canonical_payload: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     currency_code: Mapped[str | None] = mapped_column(String(3))
     requested_from: Mapped[date] = mapped_column(Date)
     requested_to: Mapped[date] = mapped_column(Date)

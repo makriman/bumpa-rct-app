@@ -61,6 +61,14 @@ class LocalCommerceProvider:
                         value=value,
                         title=key.replace("_", " ").title(),
                         payload={"dataset": name, "value": str(value), "currency": "NGN"},
+                        canonical_payload={
+                            "schema_version": 1,
+                            "kind": "scalar",
+                            "value": str(value),
+                        },
+                        currency_code="NGN" if resource == "sales" else None,
+                        response_from=datetime.combine(date_from, datetime.min.time(), tzinfo=UTC),
+                        response_to=datetime.combine(date_to, datetime.min.time(), tzinfo=UTC),
                     )
                 )
         orders = [

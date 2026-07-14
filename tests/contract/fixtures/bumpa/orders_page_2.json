@@ -1,19 +1,22 @@
 {
-  "data": [
-    {
-      "id": "synthetic-order-1002",
-      "order_number": "DEMO-1002",
-      "status": "future_status_is_preserved",
-      "total_amount": "0.00",
-      "currency": "NGN",
-      "shipping_details": {
-        "address": "Synthetic Address"
-      }
-    }
-  ],
-  "pagination": {
+  "success": true,
+  "orders": {
     "current_page": 2,
     "last_page": 2,
-    "limit": 1
+    "per_page": 1,
+    "total": 2,
+    "data": [
+      {
+        "id": "synthetic-order-1002",
+        "order_number": "DEMO-1002",
+        "status": "future_status_is_preserved",
+        "payment_status": "unpaid",
+        "total": "0.00",
+        "currency_code": "NGN",
+        "shipping_details": {
+          "street": "Synthetic Address"
+        }
+      }
+    ]
   }
 }

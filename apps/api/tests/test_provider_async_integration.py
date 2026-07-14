@@ -640,6 +640,7 @@ def test_bumpa_worker_retries_exhausted_transient_failures_and_dead_letters_auth
 
 def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
 ) -> None:
     field_key = "worker-bumpa-timeout-test-field-key"
     private_detail = "private-timeout-detail-must-not-be-persisted"
@@ -738,8 +739,9 @@ def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budge
         assert stored.status == "dead_letter"
         assert stored.attempts == stored.max_attempts == 3
         # Each job attempt exhausts the first dataset's three-call budget, then
-        # makes one independent probe before classifying a widespread outage.
-        assert calls == 12
+        # probes all nine remaining analytics endpoints and orders once before
+        # classifying a provider-wide outage.
+        assert calls == 39
         assert sleeps == [1, 2] * 3
         assert private_detail not in (stored.last_error or "")
         assert "private-api-key" not in (stored.last_error or "")

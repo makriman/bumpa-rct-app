@@ -20,7 +20,6 @@ from app.core.config import Settings
 from app.core.time import utcnow
 from app.db.models import (
     BumpaMetricSnapshot,
-    BumpaSyncRun,
     PhoneIdentity,
     Tenant,
     TenantMembership,
@@ -29,7 +28,7 @@ from app.db.models import (
 )
 from app.jobs.runtime import PermanentJobError
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
-from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
+from app.services.bumpa_freshness import latest_available_metrics, latest_complete_orders_run
 
 InsightCadence = Literal["daily", "weekly"]
 MAX_TEMPLATE_SUMMARY_CHARS = 900
@@ -63,18 +62,22 @@ def deliver_proactive_insight(
         return {"status": "ineligible", "cadence": cadence, "sent": 0}
 
     effective_now = _as_utc(now or utcnow())
-    run = db.scalar(
-        select(BumpaSyncRun)
-        .where(
-            BumpaSyncRun.tenant_id == tenant.id,
-            usable_bumpa_sync_run_predicate(),
-        )
-        .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.id.desc())
-        .limit(1)
+    fresh_metrics = latest_available_metrics(
+        db,
+        tenant.id,
+        metric_keys=(
+            "sales.total_sales",
+            "sales.gross_profit",
+            "products.products_sold",
+        ),
     )
-    if run is None or run.finished_at is None:
+    orders_run = latest_complete_orders_run(db, tenant.id)
+    freshness_values = [row.refreshed_at for row in fresh_metrics.values()]
+    if orders_run is not None and orders_run.finished_at is not None:
+        freshness_values.append(orders_run.finished_at)
+    if not freshness_values:
         return {"status": "no_fresh_data", "cadence": cadence, "sent": 0}
-    freshness = _as_utc(run.finished_at)
+    freshness = min(_as_utc(value) for value in freshness_values)
     if freshness < effective_now - timedelta(hours=settings.insight_max_freshness_hours):
         return {"status": "no_fresh_data", "cadence": cadence, "sent": 0}
 
@@ -99,7 +102,12 @@ def deliver_proactive_insight(
     if not recipients:
         return {"status": "no_recipients", "cadence": cadence, "sent": 0}
 
-    summary = _build_summary(db, tenant, run, cadence, freshness)
+    summary = _build_summary(
+        fresh_metrics={key: row.snapshot for key, row in fresh_metrics.items()},
+        orders_count=orders_run.orders_count if orders_run is not None else None,
+        cadence=cadence,
+        freshness=freshness,
+    )
     provider = MetaWhatsAppClient.from_settings(settings)
     sent = 0
     already_sent = 0
@@ -202,34 +210,24 @@ def deliver_proactive_insight(
 
 
 def _build_summary(
-    db: Session,
-    tenant: Tenant,
-    run: BumpaSyncRun,
+    *,
+    fresh_metrics: dict[str, BumpaMetricSnapshot],
+    orders_count: int | None,
     cadence: InsightCadence,
     freshness: datetime,
 ) -> str:
-    snapshots = db.scalars(
-        select(BumpaMetricSnapshot)
-        .where(
-            BumpaMetricSnapshot.tenant_id == tenant.id,
-            BumpaMetricSnapshot.sync_run_id == run.id,
-            BumpaMetricSnapshot.availability == "available",
-        )
-        .order_by(BumpaMetricSnapshot.metric_key.asc())
-    ).all()
-    values = {snapshot.metric_key: snapshot for snapshot in snapshots}
     parts = [f"Your {cadence} Bumpa Bestie insight"]
     for key, label in (
         ("sales.total_sales", "sales"),
         ("sales.gross_profit", "gross profit"),
         ("products.products_sold", "products sold"),
     ):
-        snapshot = values.get(key)
+        snapshot = fresh_metrics.get(key)
         if snapshot is None or snapshot.value_decimal is None:
             continue
         parts.append(f"{label}: {_format_metric(snapshot.value_decimal, snapshot.currency_code)}")
-    if run.orders_count is not None:
-        parts.append(f"orders: {run.orders_count:,}")
+    if orders_count is not None:
+        parts.append(f"orders: {orders_count:,}")
     parts.append(f"data refreshed {freshness.strftime('%Y-%m-%d %H:%M UTC')}")
     return ". ".join(parts)[:MAX_TEMPLATE_SUMMARY_CHARS]
 

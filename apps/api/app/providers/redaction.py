@@ -68,7 +68,11 @@ SENSITIVE_STRUCTURED_FIELDS = SENSITIVE_ORDER_FIELDS | {
     "delivery_address",
     "delivery_details",
     "email",
+    "first_name",
+    "full_name",
+    "display_name",
     "invoice_url",
+    "last_name",
     "order_url",
     "payment_url",
     "phone",
@@ -95,20 +99,30 @@ def parse_money(value: Any) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, Decimal):
-        return value
+        parsed = value
     if isinstance(value, int):
-        return Decimal(value)
-    if isinstance(value, float):
-        return Decimal(str(value))
-    if isinstance(value, str):
+        parsed = Decimal(value)
+    elif isinstance(value, float):
+        parsed = Decimal(str(value))
+    elif isinstance(value, str):
         cleaned = value.replace("₦", "").replace(",", "").strip()
         if not cleaned:
             return None
         try:
-            return Decimal(cleaned)
+            parsed = Decimal(cleaned)
         except InvalidOperation:
             return None
-    return None
+    elif not isinstance(value, Decimal):
+        return None
+    if not parsed.is_finite():
+        return None
+    normalized = parsed.normalize()
+    if abs(parsed) > Decimal("999999999999999999.999999"):
+        return None
+    exponent = normalized.as_tuple().exponent
+    if not isinstance(exponent, int) or exponent < -6:
+        return None
+    return parsed
 
 
 def _normalise_key(value: str) -> str:
@@ -141,6 +155,50 @@ def redact_order_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(redacted, dict):  # pragma: no cover - retained for type safety
         raise TypeError("Order payload must be a mapping")
     return redacted
+
+
+def redact_bumpa_payload(
+    payload: dict[str, Any], *, resource: str, dataset: str | None
+) -> dict[str, Any]:
+    """Deep-redact provider evidence, including customer ranking identities.
+
+    Product labels are legitimate business facts, so the extra identity scrub is
+    deliberately limited to the customer-ranking endpoint. The generic pass still
+    removes contact details, URLs and labelled PII from every provider response.
+    """
+
+    redacted = redact_order_payload(payload)
+    if resource == "customers" and dataset == "top_customers_order":
+        redacted = _redact_customer_ranking_lists(redacted)
+    return redacted
+
+
+def _redact_customer_ranking_lists(value: Any) -> Any:
+    if isinstance(value, dict):
+        identity_fields = {
+            "customer",
+            "customer_id",
+            "customer_name",
+            "display_name",
+            "first_name",
+            "full_name",
+            "id",
+            "label",
+            "last_name",
+            "name",
+            "title",
+        }
+        return {
+            key: (
+                "[REDACTED]"
+                if _normalise_key(str(key)) in identity_fields
+                else _redact_customer_ranking_lists(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_customer_ranking_lists(item) for item in value]
+    return value
 
 
 def _redact_labelled_address(match: re.Match[str]) -> str:

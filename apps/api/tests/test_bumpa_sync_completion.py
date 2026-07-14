@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -70,6 +71,9 @@ def _datasets(
                 title=key,
                 error=error,
                 payload={"value": str(value)} if error is None else {"error": error},
+                currency_code="NGN" if resource == "sales" else None,
+                response_from=datetime(2026, 7, 1, tzinfo=UTC),
+                response_to=datetime(2026, 7, 12, tzinfo=UTC),
             )
         )
     return datasets
@@ -275,6 +279,145 @@ def _run_with_result(
     )
 
 
+def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    field_key = "canonical-persistence-field-key"
+    private_phone = "+2348000000999"
+    private_customer = "Private Customer Name"
+    datasets = _datasets()
+    datasets = [
+        replace(
+            dataset,
+            canonical_payload={
+                "schema_version": 1,
+                "kind": "ranking",
+                "groups": [
+                    {
+                        "title": "Top products",
+                        "rows": [{"rank": "1", "label": "Useful Product", "value": "4"}],
+                    }
+                ],
+            },
+        )
+        if (dataset.resource, dataset.dataset) == ("products", "top_selling_products")
+        else dataset
+        for dataset in datasets
+    ]
+    order = ProviderOrder(
+        order_id="structured-order",
+        order_number="STRUCT-1",
+        status="paid",
+        payment_status="paid",
+        currency_code=None,
+        total_amount=Decimal("44"),
+        order_date=datetime(2026, 7, 10, tzinfo=UTC),
+        payload={
+            "id": "structured-order",
+            "shipping_price": "4.50",
+            "customer_details": {"name": private_customer, "phone": private_phone},
+            "items": [
+                {
+                    "id": "line-1",
+                    "name": "Useful Product",
+                    "quantity": 2,
+                    "price": "20",
+                    "total": "40",
+                    "product": {"id": "nested-product-7", "name": "Useful Product"},
+                }
+            ],
+        },
+    )
+    result = _sync_result(datasets, [order])
+    result.responses[-1] = BumpaResponse(
+        "orders",
+        None,
+        200,
+        {"success": True, "orders": {"data": [order.payload]}},
+        {},
+        "available",
+        None,
+    )
+    result.responses[:] = [
+        BumpaResponse(
+            "customers",
+            "top_customers_order",
+            200,
+            {
+                "data": {
+                    "summary": {
+                        "title": "Top customers",
+                        "data": [
+                            {
+                                "id": "customer-7",
+                                "label": private_customer,
+                                "phone": private_phone,
+                                "value": 4,
+                            }
+                        ],
+                    }
+                }
+            },
+            {},
+            "available",
+            None,
+        )
+        if response.resource == "customers" and response.dataset == "top_customers_order"
+        else response
+        for response in result.responses
+    ]
+
+    with Session(engine) as db:
+        tenant = Tenant(slug="canonical-persistence", name="Canonical Persistence")
+        db.add(tenant)
+        db.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key=FieldCipher(field_key).encrypt("private-key"),
+            scope_type="business_id",
+            scope_id="business-test",
+            provider="bumpa",
+            status="active",
+        )
+        db.add(connection)
+        db.commit()
+        run = _run_with_result(monkeypatch, db, connection, result, field_key)
+
+        metric = db.scalar(
+            select(BumpaMetricSnapshot).where(
+                BumpaMetricSnapshot.sync_run_id == run.id,
+                BumpaMetricSnapshot.metric_key == "products.top_selling_products",
+            )
+        )
+        stored_order = db.scalar(
+            select(BumpaOrder).where(BumpaOrder.bumpa_order_id == "structured-order")
+        )
+        assert stored_order is not None
+        item = db.scalar(select(BumpaOrderItem).where(BumpaOrderItem.order_id == stored_order.id))
+        customer_evidence = db.scalar(
+            select(BumpaRawResponse).where(
+                BumpaRawResponse.sync_run_id == run.id,
+                BumpaRawResponse.resource == "customers",
+                BumpaRawResponse.dataset == "top_customers_order",
+            )
+        )
+
+        assert metric is not None
+        assert metric.canonical_payload["groups"][0]["rows"][0]["label"] == "Useful Product"
+        assert stored_order.currency_code is None
+        assert stored_order.shipping_amount == Decimal("4.5")
+        assert stored_order.raw_payload["customer_details"] == "[REDACTED]"
+        assert item is not None
+        assert item.product_id == "nested-product-7"
+        assert customer_evidence is not None
+        serialized = json.dumps(customer_evidence.payload)
+        assert private_customer not in serialized
+        assert private_phone not in serialized
+        assert "[REDACTED]" in serialized
+
+
 def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -305,7 +448,7 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         db.add(connection)
         db.commit()
 
-        complete = _run_with_result(
+        _run_with_result(
             monkeypatch,
             db,
             connection,
@@ -315,7 +458,6 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
             ),
             field_key,
         )
-        original_freshness = complete.finished_at
         original_order = db.scalar(
             select(BumpaOrder).where(BumpaOrder.bumpa_order_id == "order-existing")
         )
@@ -401,8 +543,8 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert "exception" not in warning
 
         assert degraded.status == "partial"
-        assert degraded.completion_quality == "degraded"
-        assert degraded.partial_reason == "dataset_error"
+        assert degraded.completion_quality == "accepted_partial"
+        assert degraded.partial_reason == "optional_dataset_unavailable"
         sync_events = list(
             db.scalars(
                 select(ResearchEvent)
@@ -413,15 +555,14 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert [event.event_type for event in sync_events] == [
             "bumpa_sync_completed",
             "bumpa_sync_completed",
-            "bumpa_sync_degraded",
         ]
-        assert sync_events[-1].quality_flags == ["dataset_error"]
-        assert sync_events[-1].business_outcome["completion_quality"] == "degraded"
+        assert sync_events[-1].quality_flags == ["optional_dataset_unavailable"]
+        assert sync_events[-1].business_outcome["completion_quality"] == "accepted_partial"
         assert connection.last_successful_sync_at is not None
         assert connection.last_successful_sync_at.replace(tzinfo=None) == (
-            original_freshness.replace(tzinfo=None)
+            degraded.finished_at.replace(tzinfo=None)
         )
-        assert connection.last_failed_sync_at is not None
+        assert connection.last_failed_sync_at is None
         failed_raw = db.scalar(
             select(BumpaRawResponse).where(
                 BumpaRawResponse.sync_run_id == degraded.id,
@@ -447,13 +588,16 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
             select(BumpaOrder).where(BumpaOrder.bumpa_order_id == "order-existing")
         )
         assert unchanged_order is not None
-        assert unchanged_order.status == "paid"
-        assert db.scalar(select(BumpaOrder).where(BumpaOrder.bumpa_order_id == "order-new")) is None
+        assert unchanged_order.status == "refunded"
+        assert (
+            db.scalar(select(BumpaOrder).where(BumpaOrder.bumpa_order_id == "order-new"))
+            is not None
+        )
         unchanged_item = db.scalar(
             select(BumpaOrderItem).where(BumpaOrderItem.order_id == unchanged_order.id)
         )
         assert unchanged_item is not None
-        assert unchanged_item.name == "Original item"
+        assert unchanged_item.name == "Changed item"
 
         # Page-one orders remain run evidence only when a later page fails; they
         # cannot partially overwrite the canonical order/item boundary.
@@ -493,13 +637,15 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert page_run.partial_reason == "orders_unavailable"
         db.refresh(unchanged_order)
         db.refresh(unchanged_item)
-        assert unchanged_order.status == "paid"
-        assert unchanged_item.name == "Original item"
+        assert unchanged_order.status == "refunded"
+        assert unchanged_item.name == "Changed item"
 
         context, freshness = chat_service.build_business_context(db, tenant.id)
-        assert freshness == original_freshness
-        assert "Total sales: NGN 100.00" in context
-        assert "999" not in context
+        assert freshness.replace(tzinfo=None) == degraded.finished_at.replace(tzinfo=None)
+        assert "Total sales: NGN 777.00" in context
+        assert "metrics refreshed:" in context
+        assert "orders refreshed:" in context
+        assert "conservative data boundary:" in context
 
 
 def test_full_bumpa_provider_failure_log_is_typed_and_contains_no_secrets(
@@ -693,14 +839,19 @@ def test_sync_fails_closed_if_connection_boundary_changes_while_waiting_for_lock
         db.add(connection)
         db.commit()
 
-        original_refresh = db.refresh
+        extracted = _sync_result(_datasets())
 
-        def mutate_after_lock(instance, *args, **kwargs) -> None:
-            original_refresh(instance, *args, **kwargs)
-            if instance is connection and kwargs.get("with_for_update") is True:
-                connection.scope_id = "rotated-scope"
+        def mutate_during_extraction(**_kwargs: object) -> bumpa_service.ExtractedSync:
+            assert not db.in_transaction()
+            with engine.begin() as concurrent:
+                concurrent.execute(
+                    update(BumpaConnection)
+                    .where(BumpaConnection.id == connection.id)
+                    .values(scope_id="rotated-scope")
+                )
+            return bumpa_service.ExtractedSync(snapshot=extracted, live_result=extracted)
 
-        monkeypatch.setattr(db, "refresh", mutate_after_lock)
+        monkeypatch.setattr(bumpa_service, "_extract_sync", mutate_during_extraction)
         with pytest.raises(HTTPException) as raised:
             bumpa_service.run_sync(
                 db,
@@ -712,9 +863,130 @@ def test_sync_fails_closed_if_connection_boundary_changes_while_waiting_for_lock
                 runtime_backend="bumpa",
             )
         assert raised.value.status_code == 409
-        assert raised.value.detail == "Bumpa connection changed before sync started"
+        assert raised.value.detail == "Bumpa connection changed during sync"
         db.rollback()
-        assert db.scalar(select(BumpaSyncRun)) is None
+        assert db.scalar(select(BumpaSyncRun).where(BumpaSyncRun.tenant_id == tenant.id)) is None
+
+
+def test_sync_generations_publish_in_newest_successful_start_order(tmp_path) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'sync-generations.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as setup:
+        tenant = Tenant(slug="sync-generations", name="Sync Generations")
+        setup.add(tenant)
+        setup.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key="local-only",
+            scope_type="business_id",
+            scope_id="sync-generations",
+            provider="local",
+            status="active",
+        )
+        setup.add(connection)
+        setup.commit()
+        connection_id = connection.id
+
+    with factory() as first, factory() as second:
+        first_connection = first.get(BumpaConnection, connection_id)
+        second_connection = second.get(BumpaConnection, connection_id)
+        assert first_connection is not None
+        assert second_connection is not None
+        first_boundary = bumpa_service._capture_connection_boundary(first_connection)
+        second_boundary = bumpa_service._capture_connection_boundary(second_connection)
+
+        first_generation = bumpa_service._claim_sync_generation(first, first_boundary)
+        second_generation = bumpa_service._claim_sync_generation(second, second_boundary)
+        assert (first_generation, second_generation) == (1, 2)
+
+        # A newer claim that is merely in flight (or later fails) does not erase
+        # the last valid older extraction.
+        first_publication = bumpa_service._claim_publication_generation(
+            first, first_boundary, first_generation
+        )
+        assert first_publication is not None
+        first.commit()
+
+        with factory() as observer:
+            observed = observer.get(BumpaConnection, connection_id)
+            assert observed is not None
+            assert observed.sync_generation == 2
+            assert observed.published_sync_generation == 1
+
+        # When the newer extraction succeeds, it atomically becomes current.
+        second_publication = bumpa_service._claim_publication_generation(
+            second, second_boundary, second_generation
+        )
+        assert second_publication is not None
+        second.commit()
+
+        # An older extraction finishing after the newer publication is rejected.
+        assert (
+            bumpa_service._claim_publication_generation(first, first_boundary, first_generation)
+            is None
+        )
+        first.rollback()
+
+    with factory() as observer:
+        observed = observer.get(BumpaConnection, connection_id)
+        assert observed is not None
+        assert observed.sync_generation == 2
+        assert observed.published_sync_generation == 2
+
+
+def test_failed_sync_events_use_distinct_flushed_run_ids() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine, expire_on_commit=False) as db:
+        tenant = Tenant(
+            slug="failed-run-events",
+            name="Failed run events",
+            research_consent_status="granted",
+        )
+        db.add(tenant)
+        db.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key="local-only",
+            scope_type="business_id",
+            scope_id="failed-run-events",
+            provider="local",
+            status="active",
+        )
+        db.add(connection)
+        db.commit()
+        boundary = bumpa_service._capture_connection_boundary(connection)
+
+        for hour in (1, 2):
+            generation = bumpa_service._claim_sync_generation(db, boundary)
+            bumpa_service._persist_extraction_failure(
+                db,
+                boundary=boundary,
+                run=BumpaSyncRun(
+                    tenant_id=tenant.id,
+                    bumpa_connection_id=connection.id,
+                    status="running",
+                    sync_generation=generation,
+                    requested_from=date(2026, 7, 1),
+                    requested_to=date(2026, 7, 12),
+                    started_at=datetime(2026, 7, 14, hour, tzinfo=UTC),
+                ),
+                error="Commerce sync failed",
+                failure_kind="internal_failure",
+                retryable=False,
+            )
+
+        events = list(
+            db.scalars(
+                select(ResearchEvent).where(
+                    ResearchEvent.tenant_id == tenant.id,
+                    ResearchEvent.event_type == "bumpa_sync_failed",
+                )
+            )
+        )
+        assert len(events) == 2
+        assert len({event.idempotency_key for event in events}) == 2
 
 
 def test_outer_commit_failure_falls_back_to_one_sanitized_failed_audit(
@@ -740,14 +1012,14 @@ def test_outer_commit_failure_falls_back_to_one_sanitized_failed_audit(
         real_commit = db.commit
         commit_attempts = 0
 
-        def fail_first_outer_commit() -> None:
+        def fail_publication_commit() -> None:
             nonlocal commit_attempts
             commit_attempts += 1
-            if commit_attempts == 1:
+            if commit_attempts == 2:
                 raise RuntimeError("synthetic outer commit failure")
             real_commit()
 
-        monkeypatch.setattr(db, "commit", fail_first_outer_commit)
+        monkeypatch.setattr(db, "commit", fail_publication_commit)
         with pytest.raises(HTTPException) as raised:
             bumpa_service.run_sync(
                 db,
@@ -759,7 +1031,7 @@ def test_outer_commit_failure_falls_back_to_one_sanitized_failed_audit(
 
         assert raised.value.status_code == 502
         assert raised.value.detail == "Commerce sync failed"
-        assert commit_attempts == 2
+        assert commit_attempts == 3
         runs = list(db.scalars(select(BumpaSyncRun)).all())
         assert len(runs) == 1
         assert runs[0].status == "failed"
@@ -890,13 +1162,12 @@ def test_accepted_partial_persists_quality_and_hermes_gets_one_safe_usable_snaps
         )
 
     context = captured["context"]
-    assert freshness == accepted_freshness
-    assert "Total sales: NGN 0.00" in context
+    assert freshness.replace(tzinfo=None) == degraded.finished_at.replace(tzinfo=None)
+    assert "Total sales: NGN 999.00" in context
     assert "gross profit: unavailable" in context
-    assert "net profit: unavailable" in context
+    assert "net profit: NGN 0.00" in context
     assert "products sold: 0" in context
     assert "orders in current snapshot: 0" in context
-    assert "999" not in context
     assert near_miss_error not in context
     assert all(error not in context for error in ACCEPTED_UNAVAILABLE_PROFIT_ERRORS.values())
     assert private_bumpa_key not in context

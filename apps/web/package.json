@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "api-contract:generate": "openapi-typescript ../../contracts/openapi.json --output lib/generated/api-contract.ts && prettier --write lib/generated/api-contract.ts",
+    "brand:generate": "node scripts/generate-brand-assets.mjs",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -40,6 +41,7 @@
     "jsdom": "25.0.1",
     "openapi-typescript": "7.10.1",
     "prettier": "3.4.2",
+    "sharp": "0.34.5",
     "typescript": "5.7.2",
     "vitest": "4.1.10"
   },

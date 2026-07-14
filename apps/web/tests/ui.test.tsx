@@ -1,9 +1,21 @@
 import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { Badge, Metric, Modal, StatePanel } from "@/components/ui";
+import { Badge, Brand, Metric, Modal, StatePanel } from "@/components/ui";
 
 describe("shared UI", () => {
+  it("uses a distinct, accessible Bumpa Bestie lockup", () => {
+    const { container } = render(<Brand />);
+    const home = screen.getByRole("link", { name: "Bumpa Bestie home" });
+    expect(home).toHaveAttribute("href", "/");
+    expect(screen.getByText("Bumpa")).toHaveClass("brand-name");
+    expect(screen.getByText("Bestie")).toHaveClass("brand-bestie");
+    expect(container.querySelector(".brand-mark svg")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+  });
+
   it("renders semantic metric content", () => {
     render(
       <Metric label="Active SMEs" value="24" trend="+3" note="Last 30 days" />,
