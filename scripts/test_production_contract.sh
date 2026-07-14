@@ -318,13 +318,21 @@ if ((auth_secret_fixture_supported)); then
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c \
     'printf unexpected > /fixture/unexpected-entry'
-  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
-      temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
-      "$auth_secret_runtime_image" >/dev/null 2>&1; then
-    echo "Temporary web PIN preflight accepted an extra secret-directory entry" >&2
-    exit 1
-  fi
+  # Immutable rotations deliberately retain sibling verifier files. Prove the
+  # validator selects and exposes only the exact file instead of mounting its
+  # containing directory into the isolated validation runtime.
+  "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+    temporary_static_pin \
+    "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+    "$auth_secret_runtime_image"
+  docker run --rm --pull never \
+    --network none --read-only --user 0:0 \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/temporary-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      test -f /run/temporary-auth-secret/temporary_web_pin_verifier
+      test ! -e /run/temporary-auth-secret/unexpected-entry
+    '
   docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add DAC_OVERRIDE \
     --security-opt no-new-privileges:true \
