@@ -168,19 +168,181 @@ test("country picker supports search and keyboard selection", async ({
   await search.fill("India");
   await search.press("Enter");
 
-  await expect(
-    page.getByRole("button", { name: "Country code, India +91" }),
-  ).toBeVisible();
+  const indiaTrigger = page.getByRole("button", {
+    name: "Country code, India +91",
+  });
+  await expect(indiaTrigger).toBeVisible();
+  await expect(indiaTrigger).toBeFocused();
   await expect(page.getByLabel("Mobile number")).toHaveAttribute(
     "placeholder",
     "98765 43210",
   );
   await expect(page.getByRole("listbox")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "Country code, India +91" }).click();
-  await page
-    .getByRole("textbox", { name: "Search countries or calling codes" })
-    .press("Escape");
+  await indiaTrigger.click();
+  const reopenedSearch = page.getByRole("textbox", {
+    name: "Search countries or calling codes",
+  });
+  for (let index = 0; index < 18; index += 1) {
+    await reopenedSearch.press("ArrowDown");
+  }
+  expect(
+    await page.locator(".country-code-option.active").evaluate((element) => {
+      const optionBounds = element.getBoundingClientRect();
+      const listBounds = element.parentElement?.getBoundingClientRect();
+      return Boolean(
+        listBounds &&
+          optionBounds.top >= listBounds.top &&
+          optionBounds.bottom <= listBounds.bottom,
+      );
+    }),
+  ).toBe(true);
+  await reopenedSearch.press("Escape");
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expect(indiaTrigger).toBeFocused();
+});
+
+test("country picker menu fits a compact mobile viewport", async ({ page }) => {
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 390, height: 420 },
+    { width: 844, height: 390 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/login?viewport=${viewport.width}x${viewport.height}`);
+    await page
+      .getByRole("button", { name: "Country code, United Kingdom +44" })
+      .click();
+
+    const popover = page.locator(".country-code-popover");
+    await expect(popover).toBeVisible();
+    expect(
+      await popover.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          horizontal: bounds.left >= 0 && bounds.right <= window.innerWidth,
+          vertical: bounds.top >= 0 && bounds.bottom <= window.innerHeight,
+        };
+      }),
+    ).toEqual({ horizontal: true, vertical: true });
+  }
+});
+
+test("country picker follows the visual viewport while open", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 667 });
+  await page.goto("/login?visual-viewport");
+  const trigger = page.getByRole("button", {
+    name: "Country code, United Kingdom +44",
+  });
+  const triggerBounds = await trigger.boundingBox();
+  expect(triggerBounds).not.toBeNull();
+  const initialViewportHeight = 360;
+  const initialViewportTop = Math.min(
+    Math.max(0, (triggerBounds?.y ?? 0) - 100),
+    667 - initialViewportHeight,
+  );
+  await page.evaluate(
+    ({ height, offsetTop }) => {
+      const visualViewport = new EventTarget();
+      Object.defineProperties(visualViewport, {
+        height: { configurable: true, value: height },
+        offsetTop: { configurable: true, value: offsetTop },
+        width: { configurable: true, value: 390 },
+      });
+      Object.defineProperty(window, "visualViewport", {
+        configurable: true,
+        value: visualViewport,
+      });
+    },
+    { height: initialViewportHeight, offsetTop: initialViewportTop },
+  );
+  await trigger.click();
+
+  const popover = page.locator(".country-code-popover");
+  const fitsVisualViewport = () =>
+    popover.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      return Boolean(
+        viewport &&
+          bounds.top >= viewport.offsetTop &&
+          bounds.bottom <= viewport.offsetTop + viewport.height,
+      );
+    });
+  await expect.poll(fitsVisualViewport).toBe(true);
+
+  const resizedViewportHeight = 300;
+  const resizedViewportTop = Math.min(
+    Math.max(0, (triggerBounds?.y ?? 0) - 72),
+    667 - resizedViewportHeight,
+  );
+  await page.evaluate(
+    ({ height, offsetTop }) => {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      Object.defineProperties(viewport, {
+        height: { configurable: true, value: height },
+        offsetTop: { configurable: true, value: offsetTop },
+      });
+      viewport.dispatchEvent(new Event("resize"));
+      viewport.dispatchEvent(new Event("scroll"));
+    },
+    { height: resizedViewportHeight, offsetTop: resizedViewportTop },
+  );
+  await expect.poll(fitsVisualViewport).toBe(true);
+
+  const constrainedViewportHeight = 120;
+  const constrainedViewportTop = Math.min(
+    Math.max(0, (triggerBounds?.y ?? 0) - 36),
+    667 - constrainedViewportHeight,
+  );
+  await page.evaluate(
+    ({ height, offsetTop }) => {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      Object.defineProperties(viewport, {
+        height: { configurable: true, value: height },
+        offsetTop: { configurable: true, value: offsetTop },
+      });
+      viewport.dispatchEvent(new Event("resize"));
+    },
+    {
+      height: constrainedViewportHeight,
+      offsetTop: constrainedViewportTop,
+    },
+  );
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await page.evaluate(
+    ({ height, offsetTop }) => {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      Object.defineProperties(viewport, {
+        height: { configurable: true, value: height },
+        offsetTop: { configurable: true, value: offsetTop },
+      });
+      viewport.dispatchEvent(new Event("resize"));
+    },
+    { height: initialViewportHeight, offsetTop: initialViewportTop },
+  );
+  await trigger.click();
+  await expect(page.getByRole("listbox")).toBeVisible();
+
+  await page.evaluate(
+    ({ height }) => {
+      const viewport = window.visualViewport;
+      if (!viewport) return;
+      Object.defineProperties(viewport, {
+        height: { configurable: true, value: height },
+        offsetTop: { configurable: true, value: 0 },
+      });
+      viewport.dispatchEvent(new Event("scroll"));
+    },
+    { height: Math.max(1, Math.floor((triggerBounds?.y ?? 1) - 1)) },
+  );
   await expect(page.getByRole("listbox")).toHaveCount(0);
 });
 
