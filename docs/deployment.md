@@ -12,63 +12,55 @@ evidenced. A selected adapter is not unrestricted-traffic approval: every
 unsupported or externally blocked capability remains fail-closed until its full
 activation gate passes.
 
-As of 2026-07-13 UTC, release
-`b35762ab2a9d5c1a4956530cae63040354805510` is live on the five branded
-`bumpabestie.com` hosts through Cloudflare. Core
-[PR 27](https://github.com/makriman/bumpa-rct-app/pull/27), corrective
-[PR 35](https://github.com/makriman/bumpa-rct-app/pull/35),
-evidence [PR 36](https://github.com/makriman/bumpa-rct-app/pull/36), accessibility
-[PR 37](https://github.com/makriman/bumpa-rct-app/pull/37), delivery-hardening
-[PR 41](https://github.com/makriman/bumpa-rct-app/pull/41),
-[PR CI 29290441375](https://github.com/makriman/bumpa-rct-app/actions/runs/29290441375)
-(13/13 jobs on pre-merge commit `5644fd596c1292e3f8c0505fbb80109c4f556bae`,
-whose tree matches the merge commit),
-[main CI 29290795169](https://github.com/makriman/bumpa-rct-app/actions/runs/29290795169)
+As of 2026-07-14, release
+`0ec2c58f8b0a26734ca08788787640dca1409821` is live on the five branded
+`bumpabestie.com` hosts through Cloudflare. Temporary web-login
+[PR 45](https://github.com/makriman/bumpa-rct-app/pull/45), exact-revision
+[main CI 29333098858](https://github.com/makriman/bumpa-rct-app/actions/runs/29333098858)
 (13/13 jobs) and
-[publish run 29291129708](https://github.com/makriman/bumpa-rct-app/actions/runs/29291129708)
-(7/7 jobs) complete the release gates; the main/publish runs are bound to the exact
-deployed revision. Deployed image index references
-are recorded in `docs/verification.md`.
-The redacted production transcript is
-[`docs/release-evidence-b35762a.md`](release-evidence-b35762a.md).
+[publish run 29333505495](https://github.com/makriman/bumpa-rct-app/actions/runs/29333505495)
+(7/7 jobs) complete the current build and publication gates. The deployed release
+record matches all six promoted release indexes, and the eight running services
+use their intended exact references. The redacted production transcript is
+[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md).
 
-Production verification found all eight services running, all seven healthchecked
-services healthy, Caddy running, and zero restarts or OOM kills at schema
-`0012_operational_retention`. All 23 tenant tables have ENABLE+FORCE RLS
-and one policy each; a non-bypass application-role audit exercised 115 tenant/table
-contexts across 670 scoped rows and found zero no-context or cross-tenant leakage.
-The onboarding audit found five stores, five owners/memberships/phone
-identities/Bumpa connections and exactly one approved operator/owner dual role.
+Production verification found seven long-running application services using their
+intended successor references and Redis using its separately pinned upstream
+digest. All eight services were running, all seven configured healthchecks were
+healthy, and every container had zero restarts, OOM kills or unhealthy states at
+schema `0013_web_pin_challenges`. Temporary web sign-in is
+limited to exactly five existing mapped collaborators and preserves the existing
+role boundary. Acceptance covered every collaborator on public chat,
+administration and research: five browser and ten API/BFF sign-ins completed the
+15 host-scoped combinations. Wrong-code and unmapped canaries failed generically,
+sibling hosts did not inherit cookies, role gates held, logout revoked sessions,
+and the final active-session/challenge counts were zero.
 
-Five mapped durable Bumpa jobs reached correlated terminal runs with orders
+Historical predecessor evidence recorded five correlated Bumpa runs with orders
 available. Stores 1–4 returned accepted-partial 8/10 analytics datasets; degraded
-store 5 returned 7/10 because `products.overview` timed out/returned HTTP 504.
-All five mapped Hermes profiles passed health and completed an explicitly authorized
-live Claude request. Forty foreign-profile gateway/control attempts were rejected,
-and the audited restart plus post-restart completion passed. Read-only Graph checks
-confirm that the configured Meta test WABA and phone-number ID pair with
-`+15550772716`; the sender reports `PENDING` and has five approved
-non-authentication templates but zero authentication templates. Both
-authentication-template create paths were denied with Graph code
-`10`/subcode `2388185`; the lane remains reply-only with
-`supports_otp=false`, and no outbound message was sent.
+store 5 returned 7/10 because `products.overview` timed out/returned HTTP 504. The
+same predecessor evidence recorded five Hermes health/completion canaries, 40
+rejected foreign-profile gateway/control attempts, and an audited restart plus
+post-restart completion. Those provider canaries were not rerun for this web
+release. The current release does not activate WhatsApp: WhatsApp authentication,
+Meta test-sender verification and proactive/daily/weekly delivery are disabled. The
+operational WhatsApp/outbox fingerprint was unchanged by the complete web-login
+acceptance matrix; no Meta send or delivery receipt is claimed.
 
-Guarded promotion verified pre-release backup `20260713T225544Z`. Post-release
-backup `20260713T230602Z` records the exact deployed revision and backup image
-digest and passed its format-3 manifest and all five checksums. All eight services
-remain running, all seven configured healthchecks are healthy, and restart/OOM-kill
-counts are zero. The recorded
-[10m39s observation](release-evidence-b35762a.md#stability-observation) from
-23:08:07Z through 23:18:46Z found no
-health/readiness deviation and no severe or exit-signal log match across all eight
-services. Backup and disk-usage timers are active. All five DNS records are
+The prior release's local recovery points remain historical evidence only. A new
+exact-successor local backup passed its guarded wrapper, five-artifact checksum
+replay and format-3 revision/schema/image manifest checks. The stability observation
+also passed: every container had at least 20 minutes of continuous uptime, five
+closing samples retained all eight IDs, and exact images, seven healthchecks,
+readiness, public smoke, severe/exit-signal logs, firewall, interlock and timers
+remained clean. Backup and disk-usage timers are active. All five DNS records are
 Cloudflare-proxied; Full (strict), Always Use HTTPS, TLS 1.2 minimum and TLS 1.3 are
 enabled. TLS 1.0/1.1 are rejected on every host, `www` canonically redirects to the
 apex with path/query intact, and dynamic documents have unique nonce-based CSP.
 Provider selectors and valid credentials do not by themselves authorize real
 tenant traffic. Complete Bumpa provider coverage, a launch-ready Meta sender with
 approved authentication templates and outbound-delivery evidence, off-host
-durability, a real alert destination and privacy/retention approval remain open
+durability, a real alert destination and privacy/security/retention approval remain open
 gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
@@ -300,7 +292,7 @@ SMOKE_SCHEME=https SMOKE_PORT=443 \
   gate passes through the edge.
 - From a non-Cloudflare external network, a direct-origin probe such as
   `curl --noproxy '*' --resolve bumpabestie.com:443:<origin-ip>
-  https://bumpabestie.com/` cannot connect. Do not run that negative probe from a
+https://bumpabestie.com/` cannot connect. Do not run that negative probe from a
   Cloudflare address.
 
 If the Docker boundary update fails, use its printed snapshot first. An update
@@ -402,13 +394,12 @@ proactive delivery may use them while this mode is selected. The full threat mod
 rotation/rollback procedure, role boundary, client-IP chain and acceptance gates
 are in [`docs/temporary-web-login.md`](temporary-web-login.md).
 
-For the first rollout, do not activate temporary authentication in the same
-promotion that introduces it. First set `AUTH_LOGIN_MODE=disabled`, park WhatsApp,
-leave every `TEMPORARY_WEB_PIN_*` value blank, and promote and verify the new exact
-revision. Then stage temporary mode, the fixed runtime path, blank host path and
-future expiry shown above, run the setter, and run
-the coordinator again with the same revision and six digests. This two-phase
-sequence preserves an old-release rollback before the compatibility boundary.
+The first production rollout used the required two-phase sequence: it promoted
+and verified the exact successor with authentication disabled and WhatsApp parked,
+then staged temporary mode and promoted the same revision and six digests again.
+Future first-time deployments must preserve this ordering. Planned verifier
+rotations on the already compatible release use the guarded setter and coordinator
+without restaging the introduction phase.
 
 Do not include `DEV_FIXED_OTP` or `DEV_OTP_SINK`. Set the five production domains
 and HTTPS origins, independent high-entropy application/database secrets, internal
@@ -631,20 +622,17 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-Pre-promotion backup `20260713T225544Z` provided the guarded rollback recovery
-point. Post-release backup `20260713T230602Z` records application revision
-`b35762ab2a9d5c1a4956530cae63040354805510`, schema
-`0012_operational_retention`, PostgreSQL 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:5333c066e1680e8db6a0748ec6e6bc9bb9cb16d907c1540bdaf48dbcd3cf0158`.
-Its format-3 manifest and all five SHA-256 entries passed. All eight services are
-running, all seven healthchecks pass, restart/OOM-kill counts are zero, and the
-backup/disk-usage timers are active. The recorded
-[10m39s post-release observation](release-evidence-b35762a.md#stability-observation)
-found no
-health/readiness deviation and no severe or exit-signal match in any service log.
-`OFFSITE_BACKUP_SCRIPT` remains unset, so this
-proves a local recovery point only; off-host copy, external backup alert delivery
-and remote restore evidence remain open.
+The previously verified recovery points belong to the predecessor release, but a
+new exact-successor local backup is recorded in
+[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md). Its guarded
+wrapper, five expected artifacts, SHA-256 replay and format-3 manifest all passed;
+the manifest binds the exact successor, schema `0013_web_pin_challenges` and the
+current backup digest. The stability observation also passed its 20-minute minimum
+uptime/log window and five closing live samples, with stable identities, exact
+images, 8/8 services, 7/7 configured healthchecks, zero restart/OOM/severe/exit
+signals, healthy readiness/public smoke, firewall persistence, clear interlock and
+active timers. Off-host copy, external backup-alert delivery and remote restore
+evidence remain open.
 
 ## Five-store production onboarding
 
