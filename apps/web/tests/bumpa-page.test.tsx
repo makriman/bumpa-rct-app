@@ -157,6 +157,50 @@ describe("Bumpa refresh", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("keeps an isolated inventory-overview timeout visible without hiding current data", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/settings/bumpa")) {
+        return jsonResponse({
+          status: "active",
+          provider: "bumpa",
+          last_successful_sync_at: "2026-07-12T10:00:05Z",
+          last_error: null,
+        });
+      }
+      if (url.endsWith("/bumpa/sync-runs")) {
+        return jsonResponse([
+          {
+            id: "run-inventory-limited",
+            status: "partial",
+            completion_quality: "accepted_partial",
+            partial_reason: "optional_dataset_unavailable",
+            dataset_results: {
+              orders: "available",
+              "products.overview": "error",
+              "sales.total_sales": "available",
+            },
+            started_at: "2026-07-12T10:00:00Z",
+            finished_at: "2026-07-12T10:00:05Z",
+            error: null,
+          },
+        ]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    render(<BumpaPage />);
+
+    expect(
+      await screen.findByRole("status", { name: "Bumpa data limitation" }),
+    ).toHaveTextContent(
+      "The inventory overview is temporarily unavailable from Bumpa. All other data from this refresh is current.",
+    );
+    expect(
+      screen.queryByText("Some data needs attention"),
+    ).not.toBeInTheDocument();
+  });
+
   it("keeps degraded partial refreshes visibly distinct", async () => {
     let syncRunPolls = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

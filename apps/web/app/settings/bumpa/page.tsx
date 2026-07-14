@@ -53,7 +53,7 @@ function isTerminalSyncStatus(status: string): status is TerminalSyncStatus {
   return terminalSyncStatuses.has(status as TerminalSyncStatus);
 }
 
-function isUsableProfitPartial(
+function isUsableAcceptedPartial(
   run:
     | Pick<SyncRun, "completion_quality" | "partial_reason" | "status">
     | undefined,
@@ -61,7 +61,8 @@ function isUsableProfitPartial(
   return (
     run?.status === "partial" &&
     run.completion_quality === "accepted_partial" &&
-    run.partial_reason === "profit_not_calculable"
+    (run.partial_reason === "profit_not_calculable" ||
+      run.partial_reason === "optional_dataset_unavailable")
   );
 }
 
@@ -93,6 +94,15 @@ function profitLimitationMessage(
       ? "are"
       : "is";
   return `${label} ${verb} unavailable because Bumpa cannot calculate ${verb === "are" ? "them" : "it"} for this store. All other data from this refresh is current.`;
+}
+
+function acceptedPartialMessage(
+  run: Pick<SyncRun, "dataset_results" | "partial_reason">,
+): string {
+  if (run.partial_reason === "optional_dataset_unavailable") {
+    return "The inventory overview is temporarily unavailable from Bumpa. All other data from this refresh is current.";
+  }
+  return profitLimitationMessage(run);
 }
 
 function abortError(): Error {
@@ -278,10 +288,11 @@ export default function BumpaPage() {
       } else if (finalResult.status === "partial") {
         if (
           finalResult.completion_quality === "accepted_partial" &&
-          finalResult.partial_reason === "profit_not_calculable"
+          (finalResult.partial_reason === "profit_not_calculable" ||
+            finalResult.partial_reason === "optional_dataset_unavailable")
         ) {
           setToast(
-            `Bumpa data refreshed. ${profitLimitationMessage(finalResult)}`,
+            `Bumpa data refreshed. ${acceptedPartialMessage(finalResult)}`,
           );
         } else {
           setToastTone("warning");
@@ -307,10 +318,9 @@ export default function BumpaPage() {
     }
   };
   const latest = runs.data?.[0];
-  const usableProfitPartial = isUsableProfitPartial(latest);
-  const unavailableProfitMessage = usableProfitPartial
-    ? profitLimitationMessage(latest)
-    : "";
+  const usableAcceptedPartial = isUsableAcceptedPartial(latest);
+  const acceptedLimitationMessage =
+    latest && usableAcceptedPartial ? acceptedPartialMessage(latest) : "";
   const degradedPartial =
     latest?.status === "partial" && latest.completion_quality === "degraded";
   const unverifiedLegacyRun =
@@ -442,7 +452,7 @@ export default function BumpaPage() {
               </div>
               {latest ? (
                 <>
-                  {usableProfitPartial && (
+                  {usableAcceptedPartial && (
                     <div
                       className="alert alert-info sync-quality-notice"
                       role="status"
@@ -451,7 +461,7 @@ export default function BumpaPage() {
                       <span aria-hidden="true">ⓘ</span>
                       <div>
                         <strong>Most data is current</strong>
-                        <p>{unavailableProfitMessage}</p>
+                        <p>{acceptedLimitationMessage}</p>
                       </div>
                     </div>
                   )}

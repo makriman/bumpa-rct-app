@@ -14,7 +14,6 @@ from app.core.time import utcnow
 from app.db.models import (
     AgentMessage,
     BumpaMetricSnapshot,
-    BumpaSyncRun,
     Conversation,
     HermesProfile,
     Tenant,
@@ -30,45 +29,53 @@ from app.providers.hermes import (
 from app.providers.local import LocalAgentRuntime, LocalClassifier
 from app.providers.redaction import redact_text
 from app.services.admin_operations import record_hermes_call_error
-from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
+from app.services.bumpa_freshness import latest_available_metrics, latest_complete_orders_run
 from app.services.research_events import record_research_event
 
 
 def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | None]:
-    latest_usable_run = db.scalar(
-        select(BumpaSyncRun)
-        .where(
-            BumpaSyncRun.tenant_id == tenant_id,
-            usable_bumpa_sync_run_predicate(),
-        )
-        .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
-        .limit(1)
+    metric_keys = (
+        "sales.total_sales",
+        "sales.gross_profit",
+        "sales.net_profit",
+        "products.products_sold",
+        "products.top_selling_products",
+        "customers.top_customers_order",
     )
-    if latest_usable_run is None:
+    fresh_metrics = latest_available_metrics(db, tenant_id, metric_keys=metric_keys)
+    orders_run = latest_complete_orders_run(db, tenant_id)
+    if not fresh_metrics and orders_run is None:
         return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
-    metrics = list(
-        db.scalars(
-            select(BumpaMetricSnapshot).where(
-                BumpaMetricSnapshot.tenant_id == tenant_id,
-                BumpaMetricSnapshot.sync_run_id == latest_usable_run.id,
-            )
-        ).all()
-    )
-    if not metrics:
-        return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
-    snapshot = {metric.metric_key: metric for metric in metrics}
+    snapshot = {key: fresh.snapshot for key, fresh in fresh_metrics.items()}
     sales = snapshot.get("sales.total_sales")
     gross_profit = snapshot.get("sales.gross_profit")
     net_profit = snapshot.get("sales.net_profit")
     products = snapshot.get("products.products_sold")
-    freshness = latest_usable_run.finished_at
+    top_products = snapshot.get("products.top_selling_products")
+    top_customers = snapshot.get("customers.top_customers_order")
+    metric_freshness = (
+        min(_as_utc(fresh.refreshed_at) for fresh in fresh_metrics.values())
+        if fresh_metrics
+        else None
+    )
+    orders_freshness = (
+        _as_utc(orders_run.finished_at)
+        if orders_run is not None and orders_run.finished_at is not None
+        else None
+    )
+    boundaries = [value for value in (metric_freshness, orders_freshness) if value is not None]
+    freshness = min(boundaries) if boundaries else None
     context = (
         f"Total sales: {_format_metric(sales, money=True)}; "
         f"gross profit: {_format_metric(gross_profit, money=True)}; "
         f"net profit: {_format_metric(net_profit, money=True)}; "
         f"products sold: {_format_metric(products)}; "
-        f"orders in current snapshot: {_format_count(latest_usable_run.orders_count)}; "
-        f"data refreshed: {_format_timestamp(freshness)}."
+        f"top products: {_format_rankings(top_products)}; "
+        f"customer leaders: {_format_rankings(top_customers)}; "
+        f"orders in current snapshot: {_format_count(orders_run.orders_count if orders_run else None)}; "
+        f"metrics refreshed: {_format_timestamp(metric_freshness)}; "
+        f"orders refreshed: {_format_timestamp(orders_freshness)}; "
+        f"conservative data boundary: {_format_timestamp(freshness)}."
     )
     return context, freshness
 
@@ -81,33 +88,79 @@ def data_freshness_at_message(
 ) -> datetime | None:
     """Reconstruct the freshness value returned with an idempotent chat response."""
 
-    return db.scalar(
-        select(BumpaSyncRun.finished_at)
-        .where(
-            BumpaSyncRun.tenant_id == tenant_id,
-            usable_bumpa_sync_run_predicate(),
-            BumpaSyncRun.finished_at <= message_created_at,
-        )
-        .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
-        .limit(1)
+    metrics = latest_available_metrics(
+        db,
+        tenant_id,
+        metric_keys=(
+            "sales.total_sales",
+            "sales.gross_profit",
+            "sales.net_profit",
+            "products.products_sold",
+            "products.top_selling_products",
+            "customers.top_customers_order",
+        ),
+        as_of=message_created_at,
     )
+    orders_run = latest_complete_orders_run(db, tenant_id, as_of=message_created_at)
+    metric_boundary = min((_as_utc(row.refreshed_at) for row in metrics.values()), default=None)
+    boundaries = [
+        value
+        for value in (
+            metric_boundary,
+            _as_utc(orders_run.finished_at)
+            if orders_run is not None and orders_run.finished_at is not None
+            else None,
+        )
+        if value is not None
+    ]
+    return min(boundaries) if boundaries else None
 
 
 def _format_metric(metric: BumpaMetricSnapshot | None, *, money: bool = False) -> str:
     if metric is None or metric.availability != "available":
         return "unavailable"
-    return _format_decimal(metric.value_decimal, money=money)
+    return _format_decimal(
+        metric.value_decimal,
+        money=money,
+        currency_code=metric.currency_code,
+    )
+
+
+def _format_rankings(metric: BumpaMetricSnapshot | None) -> str:
+    if metric is None or metric.availability != "available":
+        return "unavailable"
+    canonical = metric.canonical_payload
+    if (
+        canonical.get("schema_version") != 1
+        or canonical.get("kind") != "ranking"
+        or not isinstance(canonical.get("groups"), list)
+    ):
+        return "unavailable"
+    rendered: list[str] = []
+    for group in canonical["groups"][:2]:
+        if not isinstance(group, dict) or not isinstance(group.get("rows"), list):
+            continue
+        for row in group["rows"][:3]:
+            if not isinstance(row, dict):
+                continue
+            label, value = row.get("label"), row.get("value")
+            if isinstance(label, str) and isinstance(value, str):
+                rendered.append(f"{label} ({value})")
+    return ", ".join(rendered) if rendered else "none in selected period"
 
 
 def _format_count(value: int | None) -> str:
     return "unavailable" if value is None else str(value)
 
 
-def _format_decimal(value: Decimal | None, *, money: bool = False) -> str:
+def _format_decimal(
+    value: Decimal | None, *, money: bool = False, currency_code: str | None = None
+) -> str:
     if value is None:
         return "unavailable"
     if money:
-        return f"NGN {value:,.2f}"
+        amount = f"{value:,.2f}"
+        return f"{currency_code} {amount}" if currency_code else amount
     return format(value.normalize(), "f")
 
 
@@ -116,6 +169,10 @@ def _format_timestamp(value: datetime | None) -> str:
         return "unavailable"
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     return aware.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def handle_chat(

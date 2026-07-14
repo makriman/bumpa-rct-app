@@ -49,8 +49,35 @@ describe("host routing", () => {
       expect(response.headers.get("x-middleware-rewrite")).toBeNull();
       expect(response.headers.get("location")).toBeNull();
       expectStrictDocumentResponse(response);
+      expect(response.headers.get("x-robots-tag")).toBe(
+        "noindex, nofollow, noarchive",
+      );
     },
   );
+
+  it("indexes the public home but prevents discovery of authentication and private surfaces", async () => {
+    const home = await middleware(
+      new NextRequest("https://bumpabestie.com/", {
+        headers: { host: "bumpabestie.com" },
+      }),
+    );
+    const login = await middleware(
+      new NextRequest("https://bumpabestie.com/login", {
+        headers: { host: "bumpabestie.com" },
+      }),
+    );
+    const consent = await middleware(
+      new NextRequest("https://bumpabestie.com/research-consent", {
+        headers: { host: "bumpabestie.com" },
+      }),
+    );
+
+    expect(home.headers.get("x-robots-tag")).toBeNull();
+    expect(consent.headers.get("x-robots-tag")).toBeNull();
+    expect(login.headers.get("x-robots-tag")).toBe(
+      "noindex, nofollow, noarchive",
+    );
+  });
 
   it("rewrites the admin host root to the admin surface in explicit demo mode", async () => {
     const previous = process.env.NEXT_PUBLIC_DEMO_MODE;
@@ -254,7 +281,13 @@ describe("host routing", () => {
     ).toBe(true);
     expect(matches("/api/health")).toBe(false);
     expect(matches("/_next/static/chunks/app.js")).toBe(false);
+    expect(matches("/brand/social-card.png")).toBe(false);
+    expect(matches("/brand/app-icon-192.png")).toBe(false);
+    expect(matches("/brand-mark.svg")).toBe(false);
+    expect(matches("/favicon.ico")).toBe(false);
     expect(matches("/icon.svg")).toBe(false);
+    expect(matches("/apple-icon.png")).toBe(false);
+    expect(matches("/manifest.webmanifest")).toBe(false);
     expect(matches("/robots.txt")).toBe(false);
     expect(matches("/sitemap.xml")).toBe(false);
   });

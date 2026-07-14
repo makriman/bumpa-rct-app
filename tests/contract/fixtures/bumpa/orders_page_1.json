@@ -1,20 +1,32 @@
 {
-  "data": [
-    {
-      "id": "synthetic-order-1001",
-      "order_number": "DEMO-1001",
-      "status": "processing",
-      "total_amount": "12500.50",
-      "currency": "NGN",
-      "customer_details": {
-        "name": "Synthetic Customer One",
-        "phone": "+2340000000001"
-      }
-    }
-  ],
-  "pagination": {
+  "success": true,
+  "orders": {
     "current_page": 1,
     "last_page": 2,
-    "limit": 1
+    "per_page": 1,
+    "total": 2,
+    "data": [
+      {
+        "id": "synthetic-order-1001",
+        "order_number": "DEMO-1001",
+        "status": "processing",
+        "payment_status": "paid",
+        "total": "12500.50",
+        "currency_code": "NGN",
+        "customer_details": {
+          "first_name": "Synthetic",
+          "phone": "+2340000000001"
+        },
+        "items": [
+          {
+            "id": "synthetic-item-1",
+            "name": "Synthetic Product",
+            "price": "12500.50",
+            "quantity": 1,
+            "total": "12500.50"
+          }
+        ]
+      }
+    ]
   }
 }

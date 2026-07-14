@@ -20,7 +20,7 @@ from typing import Any, TypeVar, cast
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi import HTTPException, Request, Response
-from sqlalchemy import Engine, Table, create_engine, event, inspect, text
+from sqlalchemy import Engine, Table, create_engine, inspect, text, update
 from sqlalchemy.engine import URL, Connection, RowMapping, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
@@ -467,518 +467,356 @@ def _assert_bumpa_raw_downgrade_schema(admin_engine: Engine) -> None:
 
 
 def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
-    """Prove the production sync lock and rollback boundary with two PostgreSQL sessions."""
+    """Exercise the generation publication fence with real PostgreSQL sessions."""
 
-    run_tag = secrets.token_hex(6)
-    tenant_id = f"sync-atomic-tenant-{run_tag}"
-    connection_id = f"sync-atomic-connection-{run_tag}"
     factory = sessionmaker(bind=admin_engine, expire_on_commit=False)
-    with factory() as db:
-        db.add(
-            models.Tenant(
-                id=tenant_id,
-                slug=f"sync-atomic-{run_tag}",
-                name="Sync atomicity gate",
-                status="active",
-                timezone="UTC",
-                currency_code="NGN",
-                research_consent_status="unknown",
-            )
-        )
-        db.flush()
-        db.add(
-            models.BumpaConnection(
-                id=connection_id,
-                tenant_id=tenant_id,
-                encrypted_api_key="local-gate-only",
-                scope_type="business_id",
-                scope_id=f"sync-atomic-{run_tag}",
-                provider="local",
-                status="active",
-            )
-        )
-        db.commit()
+    service_module: Any = bumpa_service
+    original_provider = service_module.LocalCommerceProvider
+    created_tenant_ids: list[str] = []
 
-    first_provider_entered = threading.Event()
-    second_lock_attempted = threading.Event()
-    second_provider_entered = threading.Event()
-    release_first_provider = threading.Event()
-    call_lock = threading.Lock()
-    result_lock = threading.Lock()
-    call_count = 0
-    outcomes: dict[str, tuple[str, str]] = {}
-    http_failures: dict[str, tuple[int, str]] = {}
-    unexpected_failures: dict[str, str] = {}
+    def create_fixture(label: str) -> tuple[str, str]:
+        tag = secrets.token_hex(4)
+        tenant_id = f"sf-t-{label[:4]}-{tag}"
+        connection_id = f"sf-c-{label[:4]}-{tag}"
+        with factory() as db:
+            db.add(
+                models.Tenant(
+                    id=tenant_id,
+                    slug=f"sync-fence-{label}-{tag}",
+                    name="Sync generation fence",
+                    status="active",
+                    timezone="UTC",
+                    currency_code="NGN",
+                    research_consent_status="unknown",
+                )
+            )
+            db.flush()
+            db.add(
+                models.BumpaConnection(
+                    id=connection_id,
+                    tenant_id=tenant_id,
+                    encrypted_api_key="local-gate-only",
+                    scope_type="business_id",
+                    scope_id=f"scope-{tag}",
+                    provider="local",
+                    status="active",
+                )
+            )
+            db.commit()
+        created_tenant_ids.append(tenant_id)
+        return tenant_id, connection_id
 
-    def snapshot(*, valid: bool) -> BumpaSnapshot:
+    def snapshot(label: str, value: Decimal) -> BumpaSnapshot:
+        response_from = datetime(2026, 7, 1, tzinfo=UTC)
+        response_to = datetime(2026, 7, 12, tzinfo=UTC)
         datasets = [
             ProviderDataset(
                 resource=resource,
                 dataset=dataset,
                 availability="available",
-                payload={"value": "1"},
-                value=Decimal("1"),
+                payload={"value": str(value)},
+                value=value,
                 title=key,
+                currency_code="NGN" if resource == "sales" else None,
+                response_from=response_from,
+                response_to=response_to,
             )
             for key in sorted(bumpa_service.EXPECTED_SYNC_DATASETS)
             for resource, dataset in (key.split(".", maxsplit=1),)
         ]
-        order = ProviderOrder(
-            order_id="atomic-order",
-            order_number="ATOMIC-1",
-            status="completed" if valid else "refunded",
-            payment_status="paid" if valid else "refunded",
-            currency_code="NGN" if valid else "INVALID",
-            total_amount=Decimal("100"),
-            order_date=datetime(2026, 7, 12, tzinfo=UTC),
-            payload={
-                "id": "atomic-order",
-                "publication": "committed" if valid else "must-roll-back",
-                "items": [
-                    {
-                        "id": "atomic-item",
-                        "name": "Committed item" if valid else "Must roll back item",
-                        "quantity": "1",
-                        "price": "100",
-                    }
-                ],
-            },
-        )
-        return BumpaSnapshot(datasets=datasets, orders=[order])
-
-    class BlockingLocalCommerceProvider:
-        def __init__(self, _tenant_seed: str) -> None:
-            pass
-
-        def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
-            nonlocal call_count
-            with call_lock:
-                call_count += 1
-                current_call = call_count
-            if current_call == 1:
-                first_provider_entered.set()
-                if not release_first_provider.wait(timeout=30):
-                    raise RuntimeError("Atomicity gate timed out waiting to release first sync")
-                return snapshot(valid=True)
-            second_provider_entered.set()
-            return snapshot(valid=False)
-
-    def observe_lock_attempt(*args: Any) -> None:
-        statement = str(args[2]) if len(args) > 2 else ""
-        if (
-            threading.current_thread().name == "bumpa-sync-second"
-            and "FOR UPDATE" in statement.upper()
-        ):
-            second_lock_attempted.set()
-
-    def worker(label: str) -> None:
-        try:
-            with factory() as db:
-                connection = db.get(models.BumpaConnection, connection_id)
-                if connection is None:
-                    raise RuntimeError("Atomicity gate connection disappeared")
-                sync_run = bumpa_service.run_sync(
-                    db,
-                    tenant_id=tenant_id,
-                    connection=connection,
-                    date_from=date(2026, 7, 1),
-                    date_to=date(2026, 7, 12),
+        return BumpaSnapshot(
+            datasets=datasets,
+            orders=[
+                ProviderOrder(
+                    order_id="generation-order",
+                    order_number="GENERATION-1",
+                    status=label,
+                    payment_status="paid",
+                    currency_code="NGN",
+                    total_amount=value,
+                    order_date=response_to,
+                    payload={
+                        "id": "generation-order",
+                        "publication": label,
+                        "items": [
+                            {
+                                "id": "generation-item",
+                                "name": f"{label} item",
+                                "quantity": "1",
+                                "price": str(value),
+                            }
+                        ],
+                    },
                 )
+            ],
+        )
+
+    def verify_pair(case: str) -> None:
+        tenant_id, connection_id = create_fixture(case)
+        entered = (threading.Event(), threading.Event())
+        releases = (threading.Event(), threading.Event())
+        call_lock = threading.Lock()
+        result_lock = threading.Lock()
+        call_count = 0
+        outcomes: dict[str, tuple[str, int]] = {}
+        http_failures: dict[str, tuple[int, str]] = {}
+        unexpected: dict[str, str] = {}
+
+        class ControlledProvider:
+            def __init__(self, _tenant_seed: str) -> None:
+                pass
+
+            def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
+                nonlocal call_count
+                with call_lock:
+                    index = call_count
+                    call_count += 1
+                if index > 1:
+                    raise RuntimeError("Generation gate received an unexpected provider call")
+                entered[index].set()
+                if not releases[index].wait(timeout=30):
+                    raise RuntimeError("Generation gate timed out at provider boundary")
+                if case == "newer_failure" and index == 1:
+                    raise RuntimeError("Synthetic newer extraction failure")
+                return snapshot(
+                    "older" if index == 0 else "newer",
+                    Decimal("100") if index == 0 else Decimal("200"),
+                )
+
+        def worker(label: str) -> None:
+            try:
+                with factory() as db:
+                    connection = db.get(models.BumpaConnection, connection_id)
+                    if connection is None:
+                        raise RuntimeError("Generation gate connection disappeared")
+                    run = bumpa_service.run_sync(
+                        db,
+                        tenant_id=tenant_id,
+                        connection=connection,
+                        date_from=date(2026, 7, 1),
+                        date_to=date(2026, 7, 12),
+                    )
+                    with result_lock:
+                        outcomes[label] = (run.status, int(run.sync_generation or -1))
+            except HTTPException as exc:
                 with result_lock:
-                    outcomes[label] = (sync_run.id, sync_run.status)
-        except HTTPException as exc:
-            with result_lock:
-                http_failures[label] = (exc.status_code, str(exc.detail))
-        except Exception as exc:  # pragma: no cover - asserted with the concrete type below
-            with result_lock:
-                unexpected_failures[label] = type(exc).__name__
+                    http_failures[label] = (exc.status_code, str(exc.detail))
+            except Exception as exc:  # pragma: no cover - asserted below
+                with result_lock:
+                    unexpected[label] = type(exc).__name__
 
-    service_module: Any = bumpa_service
-    original_provider = service_module.LocalCommerceProvider
-    first_thread = threading.Thread(
-        target=worker, args=("first",), name="bumpa-sync-first", daemon=True
-    )
-    second_thread = threading.Thread(
-        target=worker, args=("second",), name="bumpa-sync-second", daemon=True
-    )
-    event.listen(admin_engine, "before_cursor_execute", observe_lock_attempt)
-    service_module.LocalCommerceProvider = BlockingLocalCommerceProvider
-    try:
-        first_thread.start()
-        if not first_provider_entered.wait(timeout=10):
-            raise AssertionError("First PostgreSQL sync never entered its provider boundary")
-        second_thread.start()
-        if not second_lock_attempted.wait(timeout=10):
-            raise AssertionError("Second PostgreSQL sync never attempted the connection row lock")
-        if second_provider_entered.wait(timeout=0.35):
-            raise AssertionError(
-                "Second sync crossed the provider boundary while the lock was held"
-            )
+        first = threading.Thread(target=worker, args=("older",), daemon=True)
+        second = threading.Thread(target=worker, args=("newer",), daemon=True)
+        service_module.LocalCommerceProvider = ControlledProvider
+        try:
+            first.start()
+            if not entered[0].wait(timeout=10):
+                raise AssertionError("Older sync did not enter its provider boundary")
+            second.start()
+            if not entered[1].wait(timeout=10):
+                raise AssertionError("Newer sync did not enter its provider boundary")
 
-        release_first_provider.set()
-        first_thread.join(timeout=20)
-        second_thread.join(timeout=20)
-        if first_thread.is_alive() or second_thread.is_alive():
-            raise AssertionError("PostgreSQL sync serialization gate did not terminate")
-        if unexpected_failures:
-            raise AssertionError(f"Unexpected sync failures: {unexpected_failures}")
-        if outcomes.get("first", (None, None))[1] != "success":
-            raise AssertionError(f"First serialized sync did not succeed: {outcomes}")
-        if http_failures != {"second": (502, "Commerce sync failed")}:
-            raise AssertionError(f"Failure injection did not fail closed: {http_failures}")
-        if call_count != 2 or not second_provider_entered.is_set():
-            raise AssertionError("Both serialized provider calls were not exercised")
+            if case == "older_then_newer":
+                releases[0].set()
+                first.join(timeout=20)
+                releases[1].set()
+            else:
+                releases[1].set()
+                second.join(timeout=20)
+                releases[0].set()
+
+            first.join(timeout=20)
+            second.join(timeout=20)
+            if first.is_alive() or second.is_alive():
+                raise AssertionError(f"Generation scenario {case} did not terminate")
+            if unexpected:
+                raise AssertionError(f"Unexpected generation failures for {case}: {unexpected}")
+        finally:
+            releases[0].set()
+            releases[1].set()
+            first.join(timeout=5)
+            second.join(timeout=5)
+            service_module.LocalCommerceProvider = original_provider
+
+        if case == "older_then_newer":
+            if outcomes != {"older": ("success", 1), "newer": ("success", 2)}:
+                raise AssertionError(f"Older/newer publication outcomes are invalid: {outcomes}")
+            if http_failures:
+                raise AssertionError(f"Unexpected older/newer HTTP failures: {http_failures}")
+            expected_published = 2
+            expected_order = "newer"
+            expected_runs: dict[int, tuple[str, str | None]] = {
+                1: ("success", None),
+                2: ("success", None),
+            }
+        elif case == "newer_then_older":
+            if outcomes != {"newer": ("success", 2)}:
+                raise AssertionError(f"Newer-first outcome is invalid: {outcomes}")
+            expected_http = {"older": (409, "Bumpa sync was superseded by a newer request")}
+            if http_failures != expected_http:
+                raise AssertionError(f"Older extraction was not superseded: {http_failures}")
+            expected_published = 2
+            expected_order = "newer"
+            expected_runs = {
+                1: ("failed", "Superseded by a newer Bumpa sync"),
+                2: ("success", None),
+            }
+        else:
+            if outcomes != {"older": ("success", 1)}:
+                raise AssertionError(f"Failed-newer fallback outcome is invalid: {outcomes}")
+            if http_failures != {"newer": (502, "Commerce sync failed")}:
+                raise AssertionError(f"Newer failure was not audited: {http_failures}")
+            expected_published = 1
+            expected_order = "older"
+            expected_runs = {
+                1: ("success", None),
+                2: ("failed", "Commerce sync failed"),
+            }
 
         with admin_engine.connect() as connection:
-            runs = list(
-                connection.execute(
-                    text(
-                        "SELECT id, status, completion_quality, error FROM bumpa_sync_runs "
-                        "WHERE tenant_id = :tenant_id ORDER BY status"
-                    ),
-                    {"tenant_id": tenant_id},
-                ).mappings()
-            )
-            if len(runs) != 2:
-                raise AssertionError(f"Expected two terminal sync audits, found {runs}")
-            success_run = next((row for row in runs if row["status"] == "success"), None)
-            failed_run = next((row for row in runs if row["status"] == "failed"), None)
-            if success_run is None or success_run["completion_quality"] != "complete":
-                raise AssertionError(f"Successful publication audit is invalid: {success_run}")
-            if (
-                failed_run is None
-                or failed_run["completion_quality"] != "failed"
-                or failed_run["error"] != "Commerce sync failed"
-            ):
-                raise AssertionError(f"Failed publication audit is invalid: {failed_run}")
-
-            order = connection.execute(
+            fence = connection.execute(
                 text(
-                    "SELECT status, payment_status, currency_code, raw_payload "
-                    "FROM bumpa_orders WHERE tenant_id = :tenant_id "
-                    "AND bumpa_order_id = 'atomic-order'"
-                ),
-                {"tenant_id": tenant_id},
-            ).one_or_none()
-            if order is None or tuple(order[:3]) != ("completed", "paid", "NGN"):
-                raise AssertionError(f"Failed sync changed the canonical order: {order}")
-            if (
-                not isinstance(order.raw_payload, dict)
-                or order.raw_payload.get("publication") != "committed"
-            ):
-                raise AssertionError("Failed sync replaced the committed canonical payload")
-
-            item_name = connection.scalar(
-                text(
-                    "SELECT item.name FROM bumpa_order_items AS item "
-                    "JOIN bumpa_orders AS orders ON orders.id = item.order_id "
-                    "WHERE orders.tenant_id = :tenant_id"
-                ),
-                {"tenant_id": tenant_id},
-            )
-            if item_name != "Committed item":
-                raise AssertionError(f"Failed sync changed canonical order items: {item_name}")
-
-            success_raw_count = int(
-                connection.scalar(
-                    text("SELECT COUNT(*) FROM bumpa_raw_responses WHERE sync_run_id = :run_id"),
-                    {"run_id": success_run["id"]},
-                )
-                or 0
-            )
-            success_metric_count = int(
-                connection.scalar(
-                    text("SELECT COUNT(*) FROM bumpa_metric_snapshots WHERE sync_run_id = :run_id"),
-                    {"run_id": success_run["id"]},
-                )
-                or 0
-            )
-            failed_evidence_count = int(
-                connection.scalar(
-                    text(
-                        "SELECT "
-                        "(SELECT COUNT(*) FROM bumpa_raw_responses WHERE sync_run_id = :run_id) "
-                        "+ (SELECT COUNT(*) FROM bumpa_metric_snapshots "
-                        "WHERE sync_run_id = :run_id)"
-                    ),
-                    {"run_id": failed_run["id"]},
-                )
-                or 0
-            )
-            if success_raw_count != 11 or success_metric_count != 10:
-                raise AssertionError(
-                    "Successful sync evidence was not atomically published: "
-                    f"raw={success_raw_count}, metrics={success_metric_count}"
-                )
-            if failed_evidence_count != 0:
-                raise AssertionError("Failed sync leaked run-scoped publication evidence")
-
-            freshness = connection.execute(
-                text(
-                    "SELECT last_successful_sync_at, last_failed_sync_at, last_error "
+                    "SELECT sync_generation, published_sync_generation "
                     "FROM bumpa_connections WHERE id = :connection_id"
                 ),
                 {"connection_id": connection_id},
             ).one()
+            if tuple(fence) != (2, expected_published):
+                raise AssertionError(f"Generation counters are invalid for {case}: {fence}")
+            runs = {
+                int(row.sync_generation): (str(row.status), row.error)
+                for row in connection.execute(
+                    text(
+                        "SELECT sync_generation, status, error FROM bumpa_sync_runs "
+                        "WHERE tenant_id = :tenant_id"
+                    ),
+                    {"tenant_id": tenant_id},
+                )
+            }
+            if runs != expected_runs:
+                raise AssertionError(f"Terminal generation audits are invalid for {case}: {runs}")
+            order = connection.execute(
+                text(
+                    "SELECT status, raw_payload FROM bumpa_orders "
+                    "WHERE tenant_id = :tenant_id AND bumpa_order_id = 'generation-order'"
+                ),
+                {"tenant_id": tenant_id},
+            ).one_or_none()
             if (
-                freshness.last_successful_sync_at is None
-                or freshness.last_failed_sync_at is None
-                or freshness.last_error != "Commerce sync failed"
+                order is None
+                or order.status != expected_order
+                or not isinstance(order.raw_payload, dict)
+                or order.raw_payload.get("publication") != expected_order
             ):
-                raise AssertionError(f"Connection freshness boundary is invalid: {freshness}")
+                raise AssertionError(f"Canonical generation order is invalid for {case}: {order}")
 
-        def verify_failure_first_ordering(*, second_succeeds: bool) -> None:
-            """Prove a waiter starts only after the first failure audit commits."""
+    def verify_rotation(column: str, value: str) -> None:
+        tenant_id, connection_id = create_fixture(f"rot-{column[:3]}")
+        entered = threading.Event()
+        release = threading.Event()
+        result_lock = threading.Lock()
+        outcomes: dict[str, tuple[int, str]] = {}
+        unexpected: list[str] = []
 
+        class RotationProvider:
+            def __init__(self, _tenant_seed: str) -> None:
+                pass
+
+            def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
+                entered.set()
+                if not release.wait(timeout=30):
+                    raise RuntimeError("Rotation gate timed out at provider boundary")
+                return snapshot("rotated", Decimal("300"))
+
+        def worker() -> None:
+            try:
+                with factory() as db:
+                    connection = db.get(models.BumpaConnection, connection_id)
+                    if connection is None:
+                        raise RuntimeError("Rotation gate connection disappeared")
+                    bumpa_service.run_sync(
+                        db,
+                        tenant_id=tenant_id,
+                        connection=connection,
+                        date_from=date(2026, 7, 1),
+                        date_to=date(2026, 7, 12),
+                    )
+            except HTTPException as exc:
+                with result_lock:
+                    outcomes["sync"] = (exc.status_code, str(exc.detail))
+            except Exception as exc:  # pragma: no cover - asserted below
+                with result_lock:
+                    unexpected.append(type(exc).__name__)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        service_module.LocalCommerceProvider = RotationProvider
+        try:
+            thread.start()
+            if not entered.wait(timeout=10):
+                raise AssertionError(f"{column} rotation sync never entered provider")
             with admin_engine.begin() as connection:
                 connection.execute(
-                    text("DELETE FROM bumpa_sync_runs WHERE tenant_id = :tenant_id"),
+                    update(models.BumpaConnection)
+                    .where(models.BumpaConnection.id == connection_id)
+                    .values({column: value})
+                )
+            release.set()
+            thread.join(timeout=20)
+            if thread.is_alive():
+                raise AssertionError(f"{column} rotation gate did not terminate")
+            if unexpected:
+                raise AssertionError(f"Unexpected {column} rotation failure: {unexpected}")
+        finally:
+            release.set()
+            thread.join(timeout=5)
+            service_module.LocalCommerceProvider = original_provider
+
+        expected = {"sync": (409, "Bumpa connection changed during sync")}
+        if outcomes != expected:
+            raise AssertionError(f"{column} rotation did not fence publication: {outcomes}")
+        with admin_engine.connect() as connection:
+            state = connection.execute(
+                text(
+                    "SELECT sync_generation, published_sync_generation FROM bumpa_connections "
+                    "WHERE id = :connection_id"
+                ),
+                {"connection_id": connection_id},
+            ).one()
+            run_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_sync_runs WHERE tenant_id = :tenant_id"),
                     {"tenant_id": tenant_id},
                 )
-                connection.execute(
-                    text("DELETE FROM bumpa_orders WHERE tenant_id = :tenant_id"),
+                or 0
+            )
+            order_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_orders WHERE tenant_id = :tenant_id"),
                     {"tenant_id": tenant_id},
                 )
-                connection.execute(
-                    text(
-                        "UPDATE bumpa_connections SET last_successful_sync_at = NULL, "
-                        "last_failed_sync_at = NULL, last_error = NULL, "
-                        "updated_at = CURRENT_TIMESTAMP WHERE id = :connection_id"
-                    ),
-                    {"connection_id": connection_id},
+                or 0
+            )
+            if tuple(state) != (1, 0) or run_count != 0 or order_count != 0:
+                raise AssertionError(
+                    f"{column} rotation leaked publication state: "
+                    f"state={state}, runs={run_count}, orders={order_count}"
                 )
 
-            first_provider_entered_ordering = threading.Event()
-            waiter_lock_attempted = threading.Event()
-            waiter_provider_entered = threading.Event()
-            ordering_lock = threading.Lock()
-            ordering_call_count = 0
-            ordering_outcomes: dict[str, tuple[str, str]] = {}
-            ordering_http_failures: dict[str, tuple[int, str]] = {}
-            ordering_unexpected: dict[str, str] = {}
-
-            class FailureFirstProvider:
-                def __init__(self, _tenant_seed: str) -> None:
-                    pass
-
-                def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
-                    nonlocal ordering_call_count
-                    with ordering_lock:
-                        ordering_call_count += 1
-                        current_call = ordering_call_count
-                    if current_call == 1:
-                        first_provider_entered_ordering.set()
-                        if not waiter_lock_attempted.wait(timeout=30):
-                            raise RuntimeError("Waiter never queued behind the first failure")
-                        return snapshot(valid=False)
-
-                    # Entering this provider proves the waiter acquired the outer
-                    # row lock. The first audit must therefore already be visible
-                    # from an independent transaction.
-                    with admin_engine.connect() as inspection:
-                        committed_failures = int(
-                            inspection.scalar(
-                                text(
-                                    "SELECT COUNT(*) FROM bumpa_sync_runs "
-                                    "WHERE tenant_id = :tenant_id AND status = 'failed'"
-                                ),
-                                {"tenant_id": tenant_id},
-                            )
-                            or 0
-                        )
-                    if committed_failures != 1:
-                        raise RuntimeError(
-                            "Waiter entered before the first failure audit committed"
-                        )
-                    waiter_provider_entered.set()
-                    return snapshot(valid=second_succeeds)
-
-            waiter_thread_name = (
-                "bumpa-waiter-success" if second_succeeds else "bumpa-waiter-failure"
-            )
-
-            def observe_waiter_lock(*args: Any) -> None:
-                statement = str(args[2]) if len(args) > 2 else ""
-                if (
-                    threading.current_thread().name == waiter_thread_name
-                    and "FOR UPDATE" in statement.upper()
-                ):
-                    waiter_lock_attempted.set()
-
-            def ordering_worker(label: str) -> None:
-                try:
-                    with factory() as db:
-                        connection = db.get(models.BumpaConnection, connection_id)
-                        if connection is None:
-                            raise RuntimeError("Ordering gate connection disappeared")
-                        sync_run = bumpa_service.run_sync(
-                            db,
-                            tenant_id=tenant_id,
-                            connection=connection,
-                            date_from=date(2026, 7, 1),
-                            date_to=date(2026, 7, 12),
-                        )
-                        with ordering_lock:
-                            ordering_outcomes[label] = (sync_run.id, sync_run.status)
-                except HTTPException as exc:
-                    with ordering_lock:
-                        ordering_http_failures[label] = (exc.status_code, str(exc.detail))
-                except Exception as exc:  # pragma: no cover - asserted below
-                    with ordering_lock:
-                        ordering_unexpected[label] = type(exc).__name__
-
-            first_failure_thread = threading.Thread(
-                target=ordering_worker,
-                args=("first",),
-                name="bumpa-first-failure",
-                daemon=True,
-            )
-            waiter_thread = threading.Thread(
-                target=ordering_worker,
-                args=("waiter",),
-                name=waiter_thread_name,
-                daemon=True,
-            )
-            service_module.LocalCommerceProvider = FailureFirstProvider
-            event.listen(admin_engine, "before_cursor_execute", observe_waiter_lock)
-            try:
-                first_failure_thread.start()
-                if not first_provider_entered_ordering.wait(timeout=10):
-                    raise AssertionError("First ordered failure never entered its provider")
-                waiter_thread.start()
-                if not waiter_lock_attempted.wait(timeout=10):
-                    raise AssertionError("Waiter never attempted the connection row lock")
-
-                first_failure_thread.join(timeout=20)
-                waiter_thread.join(timeout=20)
-                if first_failure_thread.is_alive() or waiter_thread.is_alive():
-                    raise AssertionError("Failure-first ordering gate did not terminate")
-                if ordering_unexpected:
-                    raise AssertionError(f"Unexpected ordering failures: {ordering_unexpected}")
-                if not waiter_provider_entered.is_set() or ordering_call_count != 2:
-                    raise AssertionError("Both ordered provider calls were not exercised")
-
-                expected_http = {"first": (502, "Commerce sync failed")}
-                if second_succeeds:
-                    if ordering_outcomes.get("waiter", (None, None))[1] != "success":
-                        raise AssertionError(f"Queued success did not succeed: {ordering_outcomes}")
-                else:
-                    expected_http["waiter"] = (502, "Commerce sync failed")
-                if ordering_http_failures != expected_http:
-                    raise AssertionError(
-                        f"Failure-first HTTP outcomes are invalid: {ordering_http_failures}"
-                    )
-
-                with admin_engine.connect() as connection:
-                    runs = list(
-                        connection.execute(
-                            text(
-                                "SELECT id, status, completion_quality, error, started_at, "
-                                "finished_at FROM bumpa_sync_runs WHERE tenant_id = :tenant_id "
-                                "ORDER BY started_at"
-                            ),
-                            {"tenant_id": tenant_id},
-                        ).mappings()
-                    )
-                    if len(runs) != 2:
-                        raise AssertionError(f"Expected two ordered audits, found {runs}")
-                    failed_runs = [row for row in runs if row["status"] == "failed"]
-                    expected_failure_count = 1 if second_succeeds else 2
-                    if len(failed_runs) != expected_failure_count or any(
-                        row["completion_quality"] != "failed"
-                        or row["error"] != "Commerce sync failed"
-                        for row in failed_runs
-                    ):
-                        raise AssertionError(f"Ordered failure audits are invalid: {runs}")
-
-                    leaked_evidence = int(
-                        connection.scalar(
-                            text(
-                                "SELECT "
-                                "(SELECT COUNT(*) FROM bumpa_raw_responses raw "
-                                "JOIN bumpa_sync_runs run ON run.id = raw.sync_run_id "
-                                "WHERE run.tenant_id = :tenant_id AND run.status = 'failed') + "
-                                "(SELECT COUNT(*) FROM bumpa_metric_snapshots metric "
-                                "JOIN bumpa_sync_runs run ON run.id = metric.sync_run_id "
-                                "WHERE run.tenant_id = :tenant_id AND run.status = 'failed')"
-                            ),
-                            {"tenant_id": tenant_id},
-                        )
-                        or 0
-                    )
-                    if leaked_evidence != 0:
-                        raise AssertionError("An ordered failed audit retained staged evidence")
-
-                    health = connection.execute(
-                        text(
-                            "SELECT last_successful_sync_at, last_failed_sync_at, last_error "
-                            "FROM bumpa_connections WHERE id = :connection_id"
-                        ),
-                        {"connection_id": connection_id},
-                    ).one()
-                    if second_succeeds:
-                        success_run = next(
-                            (row for row in runs if row["status"] == "success"), None
-                        )
-                        if (
-                            success_run is None
-                            or health.last_successful_sync_at != success_run["finished_at"]
-                            or health.last_failed_sync_at != failed_runs[0]["finished_at"]
-                            or health.last_error is not None
-                        ):
-                            raise AssertionError(
-                                f"Queued success health is not final: {health}, {runs}"
-                            )
-                        canonical_count = int(
-                            connection.scalar(
-                                text(
-                                    "SELECT COUNT(*) FROM bumpa_orders "
-                                    "WHERE tenant_id = :tenant_id AND currency_code = 'NGN'"
-                                ),
-                                {"tenant_id": tenant_id},
-                            )
-                            or 0
-                        )
-                        if canonical_count != 1:
-                            raise AssertionError("Queued success did not publish canonical data")
-                    else:
-                        final_failure = failed_runs[-1]
-                        if (
-                            health.last_successful_sync_at is not None
-                            or health.last_failed_sync_at != final_failure["finished_at"]
-                            or health.last_error != "Commerce sync failed"
-                        ):
-                            raise AssertionError(
-                                f"Second failure health is not final: {health}, {runs}"
-                            )
-                        canonical_count = int(
-                            connection.scalar(
-                                text(
-                                    "SELECT COUNT(*) FROM bumpa_orders WHERE tenant_id = :tenant_id"
-                                ),
-                                {"tenant_id": tenant_id},
-                            )
-                            or 0
-                        )
-                        if canonical_count != 0:
-                            raise AssertionError("Failed publications changed canonical orders")
-            finally:
-                first_failure_thread.join(timeout=5)
-                waiter_thread.join(timeout=5)
-                event.remove(admin_engine, "before_cursor_execute", observe_waiter_lock)
-
-        verify_failure_first_ordering(second_succeeds=True)
-        verify_failure_first_ordering(second_succeeds=False)
+    try:
+        verify_pair("older_then_newer")
+        verify_pair("newer_then_older")
+        verify_pair("newer_failure")
+        verify_rotation("encrypted_api_key", "rotated-local-key")
+        verify_rotation("scope_id", "rotated-scope")
+        verify_rotation("status", "inactive")
     finally:
-        release_first_provider.set()
-        first_thread.join(timeout=5)
-        second_thread.join(timeout=5)
         service_module.LocalCommerceProvider = original_provider
-        event.remove(admin_engine, "before_cursor_execute", observe_lock_attempt)
-        with admin_engine.begin() as connection:
-            connection.execute(
-                text("DELETE FROM tenants WHERE id = :tenant_id"), {"tenant_id": tenant_id}
-            )
+        if created_tenant_ids:
+            with admin_engine.begin() as connection:
+                connection.execute(
+                    text("DELETE FROM tenants WHERE id = ANY(:tenant_ids)"),
+                    {"tenant_ids": created_tenant_ids},
+                )
 
 
 def _assert_check_rejected(
@@ -1880,8 +1718,8 @@ def main() -> None:
         try:
             _verify_bumpa_sync_atomicity(admin_engine)
             print(
-                "PostgreSQL Bumpa sync atomicity gate passed: per-connection serialization, "
-                "canonical rollback, run evidence, and freshness publication verified."
+                "PostgreSQL Bumpa sync generation gate passed: atomic claims, deterministic "
+                "publication ordering, failed-newer fallback, and connection rotation verified."
             )
         finally:
             admin_engine.dispose()

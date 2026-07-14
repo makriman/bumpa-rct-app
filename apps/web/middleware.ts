@@ -10,6 +10,14 @@ import {
 import { correlationIdOrNew } from "@/lib/correlation";
 
 const PROTECTED_USER = ["/chat", "/profile", "/settings"];
+const PRIVATE_DOCUMENT_ROOTS = [
+  "/admin",
+  "/chat",
+  "/login",
+  "/profile",
+  "/research",
+  "/settings",
+];
 const PUBLIC_PATHS = new Set([
   "/login",
   "/about",
@@ -45,13 +53,24 @@ function documentSecurity(request: NextRequest): DocumentSecurity {
 function secureDocumentResponse(
   response: NextResponse,
   contentSecurityPolicy: string,
+  preventIndexing = false,
 ): NextResponse {
   response.headers.set(CONTENT_SECURITY_POLICY_HEADER, contentSecurityPolicy);
   // A nonce belongs to exactly one rendered response and must never be shared
   // by an intermediary cache.
   response.headers.set("Cache-Control", "private, no-store");
+  if (preventIndexing) {
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
   response.headers.delete(CSP_NONCE_REQUEST_HEADER);
   return response;
+}
+
+function shouldPreventIndexing(host: string, path: string): boolean {
+  if (host.startsWith("admin.") || host.startsWith("research.")) return true;
+  return PRIVATE_DOCUMENT_ROOTS.some(
+    (root) => path === root || path.startsWith(`${root}/`),
+  );
 }
 
 async function authorizeSession(
@@ -92,15 +111,14 @@ async function authorizeSession(
 
 export async function middleware(request: NextRequest) {
   const { contentSecurityPolicy, requestHeaders } = documentSecurity(request);
-  const redirect = (url: URL) =>
-    secureDocumentResponse(NextResponse.redirect(url), contentSecurityPolicy);
-  const rewrite = (url: URL) =>
-    secureDocumentResponse(
-      NextResponse.rewrite(url, { request: { headers: requestHeaders } }),
-      contentSecurityPolicy,
-    );
   const host = (request.headers.get("host") ?? "").split(":")[0];
   const path = request.nextUrl.pathname;
+  const preventIndexing = shouldPreventIndexing(host, path);
+  const secure = (response: NextResponse) =>
+    secureDocumentResponse(response, contentSecurityPolicy, preventIndexing);
+  const redirect = (url: URL) => secure(NextResponse.redirect(url));
+  const rewrite = (url: URL) =>
+    secure(NextResponse.rewrite(url, { request: { headers: requestHeaders } }));
   const isLocal = host === "localhost" || host === "127.0.0.1";
   const url = request.nextUrl.clone();
   const isPublic =
@@ -163,10 +181,7 @@ export async function middleware(request: NextRequest) {
       return redirect(url);
     }
   }
-  return secureDocumentResponse(
-    NextResponse.next({ request: { headers: requestHeaders } }),
-    contentSecurityPolicy,
-  );
+  return secure(NextResponse.next({ request: { headers: requestHeaders } }));
 }
 
 export const config = {
@@ -174,6 +189,6 @@ export const config = {
   // boundary also performs authorization. Only non-document resources bypass
   // it; do not add the common prefetch-header exclusion here.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|icon.svg|robots.txt|sitemap.xml).*)",
+    "/((?!api|_next/static|_next/image|brand/|brand-mark.svg|favicon.ico|icon.svg|apple-icon.png|manifest.webmanifest|robots.txt|sitemap.xml).*)",
   ],
 };

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -15,6 +15,14 @@ class ProviderDataset:
     value: Decimal | None = None
     title: str | None = None
     error: str | None = None
+    # Endpoint-specific, JSON-safe representation used by downstream business
+    # context. ``value`` remains the one primary scalar only when the endpoint
+    # has an unambiguous primary metric; rankings and multi-metric overviews are
+    # represented here rather than being silently collapsed to null/zero.
+    canonical_payload: dict[str, Any] = field(default_factory=dict)
+    currency_code: str | None = None
+    response_from: datetime | None = None
+    response_to: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -23,7 +31,7 @@ class ProviderOrder:
     order_number: str
     status: str
     payment_status: str
-    currency_code: str
+    currency_code: str | None
     total_amount: Decimal | None
     order_date: datetime | None
     payload: dict[str, Any]

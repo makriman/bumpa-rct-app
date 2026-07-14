@@ -1,105 +1,29 @@
-# Login country-code control design QA
+# Bumpa Bestie brand design QA
 
-- Source visual truth: `/var/folders/02/mtc26_qx5rv99vydlmj80tfr0000gn/T/codex-clipboard-c7aac920-9040-400d-91fc-7055faa1108d.png`
-- Implementation screenshot: `/tmp/bumpabestie-design-qa/implementation-login.png`
-- Open-menu screenshot: `docs/design-evidence/login-country-picker-open.png`
-- Full-view comparison: `/tmp/bumpabestie-design-qa/source-vs-implementation.png`
-- Focused phone-control comparison:
-  `docs/design-evidence/login-phone-control-comparison.png`
-- Desktop comparison viewport: 1025 × 799 after removing the source browser chrome
-- Mobile verification viewport: 390 × 844
-- State: temporary web-access login, default UK country code; closed and open picker states
+## Source truth
 
-## Comparison history
+- Reference: `/var/folders/02/mtc26_qx5rv99vydlmj80tfr0000gn/T/codex-clipboard-68c75fcb-77b3-470b-8593-71d200f8025a.png`
+- Intent: use the supplied Bumpa mark as a cue for simplicity, compact legibility, green brand recognition, and a sturdy wordmark—not as an exact logo target.
+- Product system: existing forest, lime, paper, Inter, and Newsreader tokens in `apps/web/app/globals.css`.
 
-### Initial finding
+## Implementation evidence
 
-- **P1 — The country selector dominated and duplicated the phone field.** The
-  source used a wide country-name select followed by a second visible `+44`,
-  producing two competing controls and consuming most of the available width.
-  On smaller screens it also forced the phone entry into a two-row interaction.
+- Desktop landing page, 1280 × 720: `artifacts/design-qa/brand-home-1280x720.png`
+- Mobile landing page, 412 × 915: `artifacts/design-qa/brand-home-mobile-412x915.png`
+- Desktop sign-in page, 1280 × 720: `artifacts/design-qa/brand-login-1280x720.png`
+- Social card, 1200 × 630: `apps/web/public/brand/social-card.png`
+- Browser state: local development build, public landing and temporary sign-in routes.
 
-### Fix applied
+## Comparison and QA history
 
-- Replaced the separate region select and repeated dial-code prefix with one
-  50px-high phone control. Its compact leading trigger contains a real flag
-  asset, the selected calling code, and a library-provided caret; the national
-  number remains the dominant input.
-- Added a searchable, scroll-contained country list with real flag assets,
-  selected and active states, click-outside dismissal, and keyboard support for
-  Arrow Up/Down, Home/End, Enter, and Escape.
-- Kept the existing typography, palette, radii, validation behavior, phone
-  normalization, and approved-number boundary unchanged.
-
-### Post-fix evidence
-
-- The full-view comparison shows the same screen hierarchy and brand system
-  with a materially simpler phone-entry region.
-- The focused comparison confirms that the country name and repeated dial code
-  are gone; flag and code now occupy 106px on desktop and 100px on mobile.
-- The 390 × 844 open-menu capture stays within the viewport (`19px` left,
-  `339px` right) with no horizontal overflow.
-- Browser-rendered desktop and mobile interactions passed with zero console
-  warnings or errors.
-- All 36 Playwright journeys passed in desktop and mobile Chromium, including
-  Axe WCAG A/AA checks, country normalization, login flow, CSP, and visual
-  baselines. All 162 component/unit tests also passed.
-
-### Accessibility iteration
-
-- **P1 — The first open-menu Axe pass found the 10.56px “Countries” label at a
-  4.14:1 contrast ratio.** The label was moved from the lighter secondary gray
-  to the established `--ink-soft` token, taking it safely above the WCAG AA
-  threshold without changing the visual hierarchy. The desktop and mobile
-  open-menu Axe checks then passed.
-
-### Production viewport iteration
-
-- **P2 — The first live 390 × 844 capture showed the open popover extending
-  18px below the viewport.** The picker now measures its rendered chrome and
-  the browser's visual viewport, responds to resize and scroll events from a
-  mobile keyboard, chooses an above/below placement, and caps the scrollable
-  option region to the space actually available. Browser regressions cover
-  390 × 844, 390 × 420, 844 × 390, and a simulated visual-viewport transition.
-- The picker dismisses safely if the anchor leaves the visual viewport or the
-  remaining viewport is too short to render even the measured search chrome.
-- Keyboard navigation scrolls the active country into view and restores focus
-  to the country-code trigger after selection or dismissal.
-
-## Required fidelity surfaces
-
-- **Fonts and typography:** Existing Inter/Newsreader hierarchy, weights,
-  wrapping, line heights, and antialiasing are unchanged. The calling code uses
-  the existing compact UI weight and tabular numerals.
-- **Spacing and layout rhythm:** The two-column control was consolidated into a
-  single aligned field. Existing 12px field radius and 50px height are retained;
-  the trigger, divider, input, help copy, and submit button share one clear
-  vertical rhythm.
-- **Colors and visual tokens:** The implementation uses the established paper,
-  line, forest, mint, ink, and focus tokens. Hover, expanded, active, selected,
-  focus-visible, and error states remain semantically distinct.
-- **Image quality and asset fidelity:** Country flags come from the pinned MIT
-  `flag-icons` asset set and render at their native 3:2 ratio. Caret and search
-  icons come from the pinned Phosphor icon library. No emoji, CSS-drawn flags,
-  placeholder art, or handwritten SVG was introduced.
-- **Copy and content:** The help text now matches the combined interaction:
-  “Choose the country code, then enter the mobile number. A leading zero is
-  fine.” All security and temporary-access copy remains unchanged.
-
-## Findings
-
-- No actionable P0, P1, or P2 findings remain.
-- No P3 follow-up is required for this scoped control.
-
-## Primary interactions verified
-
-- Open and close the picker with pointer input.
-- Search by country name or calling code.
-- Select India with the keyboard and update the flag, `+91`, and example number.
-- Preserve UK and India E.164 normalization through the real login journey.
-- Render the closed and open states without desktop or mobile overflow.
-- Complete automated WCAG A/AA checks with no reported violations.
+1. Compared the supplied reference and generated social card together. The implementation preserves the reference's small-size clarity and green/neutral balance while introducing an original two-conversation partnership mark and a warmer Bestie wordmark.
+2. Checked desktop landing hierarchy, spacing, icon alignment, typography, chat preview, focus naming, and absence of horizontal overflow.
+3. Checked the 412 px mobile landing page. Header, display type, actions, trust points, and chat preview remain ordered and unclipped; document scroll width equals viewport width.
+4. Checked the sign-in flow and searchable country-code picker. Flags, calling codes, selected state, accessible labels, keyboard dismissal, and focus styling work.
+5. Found the first dark-panel wordmark used light-surface colours and failed visual contrast. Added a scoped dark-surface mark treatment and re-captured the sign-in evidence.
+6. Found a CSP nonce hydration warning on the structured-data script. Added the React hydration exception for the browser-hidden nonce and confirmed fresh landing and sign-in tabs have no console errors.
+7. Verified the SVG, 16/32/48 px ICO frames, Apple icon, PWA icons, maskable icon, and social card are generated reproducibly from the canonical vector source.
 
 ## Final result
 
-final result: passed
+Passed. The identity is distinct, coherent with the existing product, legible across favicon through social-card sizes, responsive on desktop/mobile, and consistent on light and forest surfaces. Automated accessibility and browser regression results are recorded with the release verification.

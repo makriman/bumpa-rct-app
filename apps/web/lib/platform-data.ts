@@ -220,6 +220,7 @@ export type SyncRun = {
     | "failed";
   partial_reason?:
     | "profit_not_calculable"
+    | "optional_dataset_unavailable"
     | "dataset_unavailable"
     | "dataset_error"
     | "orders_unavailable"

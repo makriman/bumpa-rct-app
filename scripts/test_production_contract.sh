@@ -1057,6 +1057,11 @@ rollback_enable_line="$(grep -n -F 'automatic_rollback_available=1' scripts/depl
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
 quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
+writer_stop_attempted_line="$(grep -n -F 'writer_stop_attempted=1' scripts/deploy.sh | cut -d: -f1)"
+writer_guard_lines="$(grep -n -E '^assert_application_writers_stopped$' scripts/deploy.sh | cut -d: -f1)"
+first_writer_guard_line="$(sed -n '1p' <<<"$writer_guard_lines")"
+boundary_writer_guard_line="$(sed -n '2p' <<<"$writer_guard_lines")"
+forward_boundary_line="$(grep -n -F 'write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY' scripts/deploy.sh | cut -d: -f1)"
 role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh | cut -d: -f1)"
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
 reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
@@ -1071,6 +1076,10 @@ require_single_line_number rollback_enable_line "$rollback_enable_line"
 require_single_line_number backup_line "$backup_line"
 require_single_line_number backup_init_line "$backup_init_line"
 require_single_line_number quiesced_line "$quiesced_line"
+require_single_line_number writer_stop_attempted_line "$writer_stop_attempted_line"
+require_single_line_number first_writer_guard_line "$first_writer_guard_line"
+require_single_line_number boundary_writer_guard_line "$boundary_writer_guard_line"
+require_single_line_number forward_boundary_line "$forward_boundary_line"
 require_single_line_number role_init_line "$role_init_line"
 require_single_line_number migrate_line "$migrate_line"
 require_single_line_number reconcile_line "$reconcile_line"
@@ -1081,14 +1090,26 @@ if [[ -z "$stop_line" || -z "$image_pull_line" \
   || "$auth_secret_preflight_count" != 1 \
   || -z "$rollback_enable_line" \
   || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
+  || "$(wc -l <<<"$writer_guard_lines" | tr -d ' ')" != 2 \
   || "$image_pull_line" -ge "$target_auth_secret_match_line" \
   || "$target_auth_secret_match_line" -ge "$target_auth_secret_preflight_line" \
   || "$target_auth_secret_preflight_line" -ge "$stop_line" \
-  || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_init_line" \
-  || "$backup_init_line" -ge "$backup_line" ]]; then
+  || "$writer_stop_attempted_line" -ge "$stop_line" \
+  || "$stop_line" -ge "$first_writer_guard_line" \
+  || "$first_writer_guard_line" -ge "$quiesced_line" \
+  || "$quiesced_line" -ge "$backup_init_line" \
+  || "$backup_init_line" -ge "$backup_line" \
+  || "$backup_line" -ge "$boundary_writer_guard_line" \
+  || "$boundary_writer_guard_line" -ge "$forward_boundary_line" \
+  || "$forward_boundary_line" -ge "$migrate_line" ]]; then
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
   exit 1
 fi
+grep -Fq 'application_writer_services=(api worker scheduler)' scripts/deploy.sh
+grep -Fq 'ps --all -q "$service"' scripts/deploy.sh
+grep -Fq "state=\"\$(docker inspect --format '{{.State.Status}}' \"\$container_id\")\"" scripts/deploy.sh
+grep -Fq 'if [[ "$state" != "exited" ]]; then' scripts/deploy.sh
+grep -Fq 'if ((writer_stop_attempted && ${#previous_writer_containers[@]} > 0)); then' scripts/deploy.sh
 deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | cut -d: -f1)"
 deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
 release_helper_line="$(grep -n -F 'source "$ROOT_DIR/scripts/release_boundary.sh"' scripts/deploy.sh | cut -d: -f1)"

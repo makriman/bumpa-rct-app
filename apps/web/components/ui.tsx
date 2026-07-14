@@ -1,17 +1,38 @@
 "use client";
 
 import Link from "next/link";
+import { ChatsTeardrop } from "@phosphor-icons/react";
 import { useEffect, useId, useRef } from "react";
 import { statusTone, type Tone } from "@/lib/demo-data";
 import { AppIcon } from "./app-icon";
 
-export function Brand({ compact = false }: { compact?: boolean }) {
+export function Brand({
+  compact = false,
+  className = "",
+}: {
+  compact?: boolean;
+  className?: string;
+}) {
   return (
-    <Link href="/" className="brand" aria-label="Bumpa Bestie home">
+    <Link
+      href="/"
+      className={`brand ${className}`.trim()}
+      aria-label="Bumpa Bestie home"
+    >
       <span className="brand-mark" aria-hidden="true">
-        B
+        <ChatsTeardrop
+          size={25}
+          weight="bold"
+          aria-hidden="true"
+          focusable="false"
+        />
       </span>
-      {!compact && <span className="brand-word">Bumpa Bestie</span>}
+      {!compact && (
+        <span className="brand-word">
+          <span className="brand-name">Bumpa</span>
+          <span className="brand-bestie">Bestie</span>
+        </span>
+      )}
     </Link>
   );
 }

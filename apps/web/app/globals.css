@@ -82,22 +82,43 @@ a {
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-weight: 850;
-  letter-spacing: -0.03em;
+  gap: 9px;
+  color: inherit;
+  font-weight: 800;
 }
 .brand-mark {
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
   display: grid;
   place-items: center;
-  border-radius: 12px 12px 12px 4px;
-  color: white;
-  background: var(--forest);
-  box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.12);
+  border-radius: 50%;
+  color: var(--lime);
+  background: var(--forest-deep);
+  box-shadow:
+    0 0 0 1px rgba(18, 62, 49, 0.12),
+    0 4px 12px rgba(18, 62, 49, 0.15);
 }
 .brand-word {
-  font-size: 1.08rem;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.27em;
+  color: var(--ink);
+  font-size: 1.06rem;
+  line-height: 1;
+  letter-spacing: -0.035em;
+  white-space: nowrap;
+}
+.brand-name {
+  font-weight: 830;
+}
+.brand-bestie {
+  color: var(--forest);
+  font-family: var(--font-display);
+  font-size: 1.08em;
+  font-style: italic;
+  font-weight: 690;
+  letter-spacing: -0.02em;
 }
 
 .public-nav {
@@ -506,6 +527,18 @@ a {
   box-shadow:
     0 0 0 68px rgba(219, 234, 116, 0.035),
     0 0 0 136px rgba(219, 234, 116, 0.025);
+}
+.auth-art .brand-mark {
+  color: var(--forest-deep);
+  background: var(--lime);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.16);
+}
+.auth-art .brand-word,
+.auth-art .brand-name {
+  color: white;
+}
+.auth-art .brand-bestie {
+  color: var(--lime);
 }
 .auth-quote {
   max-width: 540px;
@@ -961,6 +994,14 @@ a {
 .sidebar .brand-mark {
   background: var(--lime);
   color: var(--forest-deep);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14);
+}
+.sidebar .brand-word,
+.sidebar .brand-name {
+  color: white;
+}
+.sidebar .brand-bestie {
+  color: var(--lime);
 }
 .nav-label {
   margin: 18px 10px 8px;

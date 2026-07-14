@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -13,6 +16,9 @@ from app.jobs.runtime import AsyncRuntimeConfig, enqueue_job
 from app.jobs.worker import process_one
 from app.providers.bumpa import BumpaClient
 from app.services import bumpa as bumpa_service
+
+FIXTURES = Path(__file__).parents[3] / "tests" / "contract" / "fixtures" / "bumpa"
+ANALYTICS = json.loads((FIXTURES / "analytics_responses.json").read_text())
 
 
 def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
@@ -29,7 +35,16 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
             calls["orders"] = calls.get("orders", 0) + 1
             return httpx.Response(
                 200,
-                json={"data": [], "pagination": {"current_page": 1, "last_page": 1}},
+                json={
+                    "success": True,
+                    "orders": {
+                        "data": [],
+                        "current_page": 1,
+                        "last_page": 1,
+                        "per_page": 100,
+                        "total": 0,
+                    },
+                },
             )
         area = request.url.path.rsplit("/", 1)[-1]
         dataset = request.url.params["dataset"]
@@ -37,7 +52,13 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         calls[key] = calls.get(key, 0) + 1
         if key == "products.overview":
             raise httpx.ReadTimeout(private_detail, request=request)
-        return httpx.Response(200, json={"data": {"value": "4"}})
+        payload = deepcopy(ANALYTICS[key])
+        if "range" in payload:
+            payload["range"] = {
+                "from": request.url.params["from"],
+                "to": request.url.params["to"],
+            }
+        return httpx.Response(200, json=payload)
 
     class IsolatedTimeoutBumpaClient(BumpaClient):
         def __init__(self, api_key: str, scope_type: str, scope_id: str) -> None:
@@ -120,20 +141,20 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert stored_job.attempts == 1
         assert stored_job.result is not None
         assert stored_job.result["status"] == "partial"
-        assert stored_job.result["completion_quality"] == "degraded"
-        assert stored_job.result["partial_reason"] == "dataset_error"
+        assert stored_job.result["completion_quality"] == "accepted_partial"
+        assert stored_job.result["partial_reason"] == "optional_dataset_unavailable"
 
         run = session.scalar(
             select(BumpaSyncRun).where(BumpaSyncRun.bumpa_connection_id == connection.id)
         )
         assert run is not None
         assert run.status == "partial"
-        assert run.completion_quality == "degraded"
-        assert run.partial_reason == "dataset_error"
-        assert connection.last_successful_sync_at is None
-        assert connection.last_failed_sync_at is not None
+        assert run.completion_quality == "accepted_partial"
+        assert run.partial_reason == "optional_dataset_unavailable"
+        assert connection.last_successful_sync_at is not None
+        assert connection.last_failed_sync_at is None
         assert run.finished_at is not None
-        assert connection.last_failed_sync_at.replace(tzinfo=None) == run.finished_at.replace(
+        assert connection.last_successful_sync_at.replace(tzinfo=None) == run.finished_at.replace(
             tzinfo=None
         )
         raw_failure = session.scalar(

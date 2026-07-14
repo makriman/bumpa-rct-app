@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { connection } from "next/server";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/newsreader";
@@ -7,6 +7,10 @@ import { siteMetadata } from "@/lib/site-metadata";
 import "./globals.css";
 
 export const metadata: Metadata = siteMetadata;
+export const viewport: Viewport = {
+  colorScheme: "light",
+  themeColor: "#123e31",
+};
 
 export default async function RootLayout({
   children,
