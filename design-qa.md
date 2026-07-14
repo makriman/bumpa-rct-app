@@ -41,7 +41,7 @@
   `339px` right) with no horizontal overflow.
 - Browser-rendered desktop and mobile interactions passed with zero console
   warnings or errors.
-- All 32 Playwright journeys passed in desktop and mobile Chromium, including
+- All 34 Playwright journeys passed in desktop and mobile Chromium, including
   Axe WCAG A/AA checks, country normalization, login flow, CSP, and visual
   baselines. All 162 component/unit tests also passed.
 
@@ -52,6 +52,14 @@
   to the established `--ink-soft` token, taking it safely above the WCAG AA
   threshold without changing the visual hierarchy. The desktop and mobile
   open-menu Axe checks then passed.
+
+### Production viewport iteration
+
+- **P2 — The first live 390 × 844 capture showed the open popover extending
+  18px below the viewport.** The picker now measures the available space on
+  open and resize, chooses an above/below placement, and caps the scrollable
+  option region to the actual viewport. A dedicated browser test fixes the
+  390 × 844 contract and asserts both horizontal and vertical containment.
 
 ## Required fidelity surfaces
 

@@ -184,6 +184,28 @@ test("country picker supports search and keyboard selection", async ({
   await expect(page.getByRole("listbox")).toHaveCount(0);
 });
 
+test("country picker menu fits a compact mobile viewport", async ({ page }) => {
+  for (const height of [844, 667]) {
+    await page.setViewportSize({ width: 390, height });
+    await page.goto(`/login?viewport-height=${height}`);
+    await page
+      .getByRole("button", { name: "Country code, United Kingdom +44" })
+      .click();
+
+    const popover = page.locator(".country-code-popover");
+    await expect(popover).toBeVisible();
+    expect(
+      await popover.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          horizontal: bounds.left >= 0 && bounds.right <= window.innerWidth,
+          vertical: bounds.top >= 0 && bounds.bottom <= window.innerHeight,
+        };
+      }),
+    ).toEqual({ horizontal: true, vertical: true });
+  }
+});
+
 test("protected user, admin, and research surfaces fail closed without authorization", async ({
   page,
 }) => {

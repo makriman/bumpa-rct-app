@@ -714,6 +714,10 @@ a {
   background: white;
   box-shadow: 0 20px 50px rgba(19, 42, 33, 0.16);
 }
+.country-code-popover.above {
+  top: auto;
+  bottom: calc(100% + 9px);
+}
 .country-search-control {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -744,7 +748,7 @@ a {
   color: #78837e;
 }
 .country-code-options {
-  max-height: 276px;
+  max-height: var(--country-options-max-height, 276px);
   margin-top: 7px;
   overflow-y: auto;
   overscroll-behavior: contain;

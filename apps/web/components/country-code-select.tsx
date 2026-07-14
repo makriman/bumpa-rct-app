@@ -3,8 +3,10 @@
 import { CaretDown, MagnifyingGlass } from "@phosphor-icons/react";
 import {
   KeyboardEvent,
+  type CSSProperties,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -18,6 +20,12 @@ type CountryCodeSelectProps = {
   describedBy?: string;
 };
 
+const MAX_OPTIONS_HEIGHT = 276;
+const MIN_OPTIONS_HEIGHT = 144;
+const POPOVER_CHROME_HEIGHT = 67;
+const POPOVER_GAP = 9;
+const VIEWPORT_GUTTER = 16;
+
 export default function CountryCodeSelect({
   countries,
   value,
@@ -27,7 +35,12 @@ export default function CountryCodeSelect({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const [popoverLayout, setPopoverLayout] = useState<{
+    side: "above" | "below";
+    optionsHeight: number;
+  }>({ side: "below", optionsHeight: MAX_OPTIONS_HEIGHT });
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listboxId = useId();
   const selected =
@@ -75,6 +88,47 @@ export default function CountryCodeSelect({
     );
   }, [filteredCountries.length]);
 
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const updateLayout = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const spaceBelow =
+        window.innerHeight - triggerRect.bottom - POPOVER_GAP - VIEWPORT_GUTTER;
+      const spaceAbove = triggerRect.top - POPOVER_GAP - VIEWPORT_GUTTER;
+      const minimumPopoverHeight = MIN_OPTIONS_HEIGHT + POPOVER_CHROME_HEIGHT;
+      const side =
+        spaceBelow >= minimumPopoverHeight || spaceBelow >= spaceAbove
+          ? "below"
+          : "above";
+      const availableHeight = side === "below" ? spaceBelow : spaceAbove;
+      const optionsHeight = Math.max(
+        MIN_OPTIONS_HEIGHT,
+        Math.min(
+          MAX_OPTIONS_HEIGHT,
+          Math.floor(availableHeight - POPOVER_CHROME_HEIGHT),
+        ),
+      );
+
+      setPopoverLayout((current) =>
+        current.side === side && current.optionsHeight === optionsHeight
+          ? current
+          : { side, optionsHeight },
+      );
+    };
+
+    updateLayout();
+    window.addEventListener("resize", updateLayout);
+    window.addEventListener("scroll", updateLayout, true);
+    return () => {
+      window.removeEventListener("resize", updateLayout);
+      window.removeEventListener("scroll", updateLayout, true);
+    };
+  }, [open]);
+
   const close = () => {
     setOpen(false);
     setQuery("");
@@ -117,6 +171,7 @@ export default function CountryCodeSelect({
   return (
     <div className="country-code-picker" ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className="country-code-trigger"
         aria-label={`Country code, ${selected.name} +${selected.dialCode}`}
@@ -144,7 +199,14 @@ export default function CountryCodeSelect({
       </button>
 
       {open && (
-        <div className="country-code-popover">
+        <div
+          className={`country-code-popover ${popoverLayout.side}`}
+          style={
+            {
+              "--country-options-max-height": `${popoverLayout.optionsHeight}px`,
+            } as CSSProperties
+          }
+        >
           <div className="country-search-control">
             <MagnifyingGlass size={17} aria-hidden="true" />
             <input
