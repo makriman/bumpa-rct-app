@@ -36,3 +36,14 @@ Successful `COMMITTED`, exact `PREVIOUS_RESTORED`, and verified
 `HYBRID_PERSISTED` terminal journals are retained with mode `0600` under
 `/var/lib/bumpabestie/promotion-history`. The installed launcher is root-owned so
 a Git checkout cannot replace the process that owns locking and crash detection.
+
+Temporary-auth preflight crosses the root-only verifier boundary through the
+separately installed root-owned
+`/usr/local/sbin/bumpabestie-validate-temporary-auth-secret` helper and one
+`visudo`-validated `NOPASSWD` command for the `bumpabestie` account. The target
+deploy invokes that fixed path with `sudo -n`; it never elevates a validator from
+the mutable checkout. Before the privileged call, target deploy code byte-compares
+the installed root-owned non-symlink helper and its reviewed target-revision
+source, including its required mode. Missing or stale helper installation,
+missing or insufficient authorization, or an unsafe verifier therefore fails
+before the forward boundary.

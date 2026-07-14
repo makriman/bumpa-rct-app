@@ -1,5 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
+IFS=$' \t\n'
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
 
 if (( $# != 3 )); then
   echo "Usage: $0 <auth-login-mode> <verifier-host-path> <exact-api-image>" >&2
@@ -9,16 +13,33 @@ fi
 auth_login_mode="$1"
 verifier_path="$2"
 api_image="$3"
-if [[ "$auth_login_mode" != "temporary_static_pin" ]]; then
-  exit 0
+if ((EUID != 0)); then
+  echo "Temporary web PIN validation must use the installed root-owned helper" >&2
+  exit 2
 fi
-if [[ ! "$verifier_path" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ \
-  && ! "$verifier_path" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]; then
-  echo "Temporary web PIN verifier host path is invalid" >&2
+if [[ ! "$auth_login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]]; then
+  echo "Temporary web PIN validation received an invalid login mode" >&2
   exit 2
 fi
 if [[ ! "$api_image" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]; then
   echo "Temporary web PIN validation requires an immutable API image" >&2
+  exit 2
+fi
+if [[ "$auth_login_mode" != "temporary_static_pin" ]]; then
+  if [[ -n "$verifier_path" ]]; then
+    echo "Temporary web PIN verifier path must be blank outside temporary mode" >&2
+    exit 2
+  fi
+  exit 0
+fi
+if [[ "$verifier_path" != "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" \
+  && ! "$verifier_path" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]; then
+  echo "Temporary web PIN verifier host path is invalid" >&2
+  exit 2
+fi
+canonical_verifier_path="$(readlink -f -- "$verifier_path" 2>/dev/null || true)"
+if [[ "$canonical_verifier_path" != "$verifier_path" ]]; then
+  echo "Temporary web PIN verifier path is non-canonical or unsafe" >&2
   exit 2
 fi
 
@@ -39,8 +60,10 @@ if [[ ! -f "$verifier_path" || -L "$verifier_path" ]]; then
 fi
 verifier_permissions="$(stat -c '%a' "$verifier_path" 2>/dev/null || stat -f '%Lp' "$verifier_path")"
 verifier_owner="$(stat -c '%u:%g' "$verifier_path" 2>/dev/null || stat -f '%u:%g' "$verifier_path")"
-if [[ "$verifier_permissions" != "600" || "$verifier_owner" != "0:0" ]]; then
-  echo "Temporary web PIN verifier must be root-owned with mode 0600" >&2
+verifier_links="$(stat -c '%h' "$verifier_path" 2>/dev/null || stat -f '%l' "$verifier_path")"
+if [[ "$verifier_permissions" != "600" || "$verifier_owner" != "0:0" \
+  || "$verifier_links" != "1" ]]; then
+  echo "Temporary web PIN verifier must be a single-link root-owned file with mode 0600" >&2
   exit 2
 fi
 
@@ -76,6 +99,7 @@ if ! docker run --rm --pull never \
     test ! -L "$verifier"
     test "$(stat -c %u:%g "$verifier")" = 0:0
     test "$(stat -c %a "$verifier")" = 600
+    test "$(stat -c %h "$verifier")" = 1
     python3 -c '\''
 import re
 import sys

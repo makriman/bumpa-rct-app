@@ -139,7 +139,7 @@ validate_image_reference() {
 }
 
 validate_temporary_verifier_host_path() {
-  [[ "$1" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]] \
+  [[ "$1" == "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" ]] \
     || [[ "$1" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]
 }
 
