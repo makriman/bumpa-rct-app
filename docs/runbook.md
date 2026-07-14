@@ -4,9 +4,11 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Release
-`b35762ab2a9d5c1a4956530cae63040354805510` is deployed on the branded
-`bumpabestie.com` hosts with all eight services and selectors `meta`, `bumpa` and
-`hermes` at schema `0012_operational_retention`. Always confirm the actual boundary
+`0ec2c58f8b0a26734ca08788787640dca1409821` is deployed on the branded
+`bumpabestie.com` hosts with all eight services at schema
+`0013_web_pin_challenges`. The current contained boundary uses temporary mapped-
+collaborator web sign-in while WhatsApp, Meta test-sender verification and
+proactive/daily/weekly delivery are disabled. Always confirm the actual boundary
 from `.deployed-release.json`, Compose state and
 `/health/ready` before applying an incident procedure; selector state is not a
 provider canary.
@@ -25,12 +27,10 @@ Never:
 
 ## Temporary web-login containment
 
-The temporary web-only candidate is documented in
-[`docs/temporary-web-login.md`](temporary-web-login.md). Until an exact new SHA is
-promoted and its evidence is recorded, the current deployed release and WhatsApp
-selector reported above remain the production source of truth.
-
-When the candidate is promoted, the expected containment boundary is
+The active temporary web-only release is documented in
+[`docs/temporary-web-login.md`](temporary-web-login.md) and evidenced in
+[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md). Its containment
+boundary is
 `AUTH_LOGIN_MODE=temporary_static_pin`, `WHATSAPP_BACKEND=disabled`, disabled Meta
 test-sender verification, and disabled proactive/daily/weekly WhatsApp delivery.
 Meta secrets remain private for later activation. Do not claim that a PIN was sent:
@@ -77,8 +77,8 @@ record, host verifier and recovery plan have been reconciled and reviewed.
 sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
 ```
 
-Supply the six-digit value only at the hidden prompt. The setter creates a unique
-root-only immutable verifier, atomically stages its generated host path and retains
+Supply the six-digit value only at the hidden prompt. The setter creates a unique,
+root-only, non-overwriting versioned verifier, atomically stages its generated host path and retains
 the prior file for rollback. Validate, promote, then run redacted mapped and
 unmapped canaries. A failed promotion restores the recorded prior path and copies
 that file before recreating the API. Never pass the PIN in argv, environment,
@@ -161,24 +161,26 @@ and research branded hosts are Cloudflare-proxied with Full (strict), Always Use
 HTTPS, minimum TLS 1.2 and TLS 1.3 enabled; TLS 1.0/1.1 are rejected and `www`
 canonically redirects to the apex while preserving path/query. Dynamic web
 documents carry a unique nonce-based CSP. Readiness reports
-database/Redis/worker/scheduler `ok` and the intended provider selectors. All 23
-tenant tables have ENABLE+FORCE RLS with one policy each. The non-bypass
-application-role audit exercised 115 tenant/table contexts across 670 scoped rows
-and found zero rows without context and zero cross-tenant rows. The onboarding audit records
-five stores and exactly one approved operator/owner dual role. All five Hermes
-profiles passed health and each completed an explicitly authorized live Claude
-request through its mapped Hermes gateway. Forty foreign-profile gateway/control
-attempts were rejected, and audited restart plus post-restart completion passed.
-Bumpa remains partial: stores 1–4 return 8/10 analytics datasets; degraded store 5
-returns 7/10 because
-`products.overview` hit an upstream timeout/HTTP 504. Missing values remain
-unavailable, not zero.
+database/Redis/worker/scheduler `ok` and the intended provider selectors. Historical
+predecessor data-boundary evidence recorded all 23 tenant tables with ENABLE+FORCE
+RLS and one policy each; its non-bypass application-role audit covered 115
+tenant/table contexts across 670 scoped rows with zero no-context or cross-tenant
+rows. Exact-release CI reran the RLS contracts, while the additive schema 0013
+migration introduced no tenant table or RLS change. The onboarding audit records
+five stores and exactly one approved operator/owner dual role. Historical
+predecessor evidence recorded five Hermes health/live-completion canaries, 40
+rejected foreign-profile gateway/control attempts, and an audited restart plus
+post-restart completion. Historical Bumpa evidence remains partial: stores 1–4
+returned 8/10 analytics datasets; degraded store 5 returned 7/10 because
+`products.overview` hit an upstream timeout/HTTP 504. Those provider canaries were
+not rerun for this web release. Missing values remain unavailable, not zero.
 
-Read-only Graph checks confirm that the configured Meta test WABA and phone-number
-ID pair with `+15550772716`; the sender reports `PENDING` and has five approved
+Historical read-only Graph checks confirmed that the configured Meta test WABA and
+test-sender ID were paired; the sender reported `PENDING` and had five approved
 non-authentication templates but zero authentication templates. Both authentication-
 template create endpoints were denied with Graph code `10`/subcode `2388185`; no
-outbound was sent. The lane remains reply-only with `supports_otp=false`, and
+outbound send or receipt is claimed. The lane remains reply-only with
+`supports_otp=false`, and
 proactive outbound is disabled. These facts do not prove Meta delivery or complete
 Bumpa sync.
 
@@ -341,21 +343,18 @@ and resumes exactly the recorded service set even when backup creation fails. Al
 if no verified backup ID appears within the expected window or any service fails to
 resume.
 
-Pre-promotion backup `20260713T225544Z` passed as the guarded rollback recovery
-point. Post-release backup `20260713T230602Z` passed its format-3 manifest and all
-five SHA-256 entries. Its manifest records application revision
-`b35762ab2a9d5c1a4956530cae63040354805510`, schema
-`0012_operational_retention`, PostgreSQL dump/server 16.14 and backup image
-`ghcr.io/makriman/bumpabestie-backup@sha256:5333c066e1680e8db6a0748ec6e6bc9bb9cb16d907c1540bdaf48dbcd3cf0158`.
-All eight services are running, all seven configured healthchecks pass,
-restart/OOM-kill counts are zero, readiness passes and all five public routes are
-correct. The recorded
-[10m39s observation](release-evidence-b35762a.md#stability-observation) from
-23:08:07Z through 23:18:46Z found no
-health/readiness deviation and no severe or exit-signal log match across all eight
-services. Backup and disk-usage timers are active. `OFFSITE_BACKUP_SCRIPT` is unset,
-and no external alert destination/receipt exists; off-host durability and alert
-delivery therefore remain unconfigured.
+The predecessor release's local recovery points remain historical evidence. The
+active successor's guarded local backup is recorded in
+[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md): its five
+checksums replayed successfully and the format-3 manifest binds revision
+`0ec2c58f8b0a26734ca08788787640dca1409821`, schema
+`0013_web_pin_challenges` and the current exact backup digest. The recorded
+stability observation also passed: every container had at least 20 minutes of
+continuous uptime, five closing samples retained all eight identities, exact
+images/schema/readiness/public smoke/firewall/timers passed, and the bounded log
+review found no restart/OOM/severe/exit-signal event or promotion interlock.
+Off-host durability and external alert delivery remain unconfigured until
+separately evidenced.
 
 ## Restore drill
 

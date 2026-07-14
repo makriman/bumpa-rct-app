@@ -2,16 +2,37 @@
 
 ## Evidence state
 
-This document describes the temporary web-login release candidate. The
-implementation and automated contracts are **implemented-tested** in the working
-release boundary; production promotion, schema `0013_web_pin_challenges`, public
-browser canaries and a deployed-SHA evidence record are **production pending**.
-The existing production evidence in `docs/release-evidence-b35762a.md` predates
-this feature and must not be used as evidence that temporary web login is live.
+This document describes the temporary web-login boundary deployed in release
+`0ec2c58f8b0a26734ca08788787640dca1409821`. Exact-revision merged-main CI
+29333098858 passed 13/13 jobs, image publication 29333505495 passed 7/7 jobs, the
+six immutable indexes were promoted through the guarded two-phase procedure, and
+schema `0013_web_pin_challenges` is live. Older release evidence predates this
+feature and must not be used as proof of the current authentication boundary.
 
 This is a containment mode while WhatsApp verification remains parked. It is not
 the long-term authentication design and it is not equivalent to per-user identity
 proof.
+
+## Production acceptance
+
+The live allowlist contains exactly five approved mapped collaborators. Redacted
+acceptance canaries proved mapped login and generic wrong/unmapped denial without
+recording any identity or credential. The country selector, national-number
+normalization and six-digit provider-free PIN form were exercised on desktop and
+mobile across the apex, admin and research login surfaces, including two different
+country prefixes. The authenticated apex chat and the role-gated admin and research
+destinations rendered without horizontal overflow.
+
+Authentication remained separate from authorization: the apex accepted an active
+mapped membership, while admin and research access still required their independent
+platform roles. Cookies remained host-only, did not cross subdomains and were
+revoked by logout. After canary cleanup, the database contained zero active
+temporary challenges and zero active acceptance sessions.
+
+WhatsApp verification, test-sender verification and proactive/daily/weekly
+WhatsApp delivery remained disabled throughout. A redacted operational-state
+fingerprint was identical before and after the web-login canaries, so this evidence
+does not imply a Meta send, OTP or delivery receipt.
 
 ## Authentication modes
 
@@ -43,7 +64,8 @@ Temporary login is available only when the submitted primary phone belongs to an
 active user and has an approved, non-opted-out phone identity joined to an active
 membership in an active tenant. A platform role alone is not enough. Requesting a
 challenge returns the same accepted response for mapped and unmapped phones, and
-verification returns a generic denial, so the endpoint is not a mapping oracle.
+verification returns a generic denial without identity-specific fields. This is a
+public-shape guarantee, not a claim about network-level timing resistance.
 
 The request creates or retains a provider-free challenge with the normal ten-minute
 TTL. Verification is single-use, attempt-bounded, Redis rate-limited by HMAC-derived
@@ -95,7 +117,7 @@ account and its SSH key must be treated as privileged root access.
 
 The sudoers rule authorizes only the fixed installed helper. The helper requires
 exactly three non-secret arguments, accepts only explicit login modes, one fixed
-legacy path or the immutable versioned path, and an exact image digest. It never
+legacy path or the non-overwriting versioned path, and an exact image digest. It never
 sources `.env.production`. Bootstrap validates the rule with `visudo`, installs it
 root-owned at mode `0440`, and installs the helper root-owned at mode `0755`.
 
@@ -153,7 +175,7 @@ removes the API runtime copy outside temporary mode. Expiry independently disabl
 request and verification even if an operator forgets the kill switch. Do not
 switch to `whatsapp_otp` until the Meta activation gates are complete. A failed
 rotation restores the recorded prior host path, runs `auth-secret-init` against
-that still-immutable file, and recreates the prior API only afterward; it never
+that retained versioned file, and recreates the prior API only afterward; it never
 asks an operator to reconstruct the old PIN. Legacy fixed-path records remain
 accepted solely for rollout compatibility, while every new setter run selects a
 versioned file.
@@ -239,8 +261,15 @@ make e2e-linux
 ```
 
 The exact command syntax is subordinate to the repository's pinned tool versions;
-CI is authoritative. Production acceptance additionally requires exact-SHA CI and
-image publication, migration-head proof, five redacted mapped-login successes,
-unmapped and wrong-PIN negative canaries, role/host denial canaries, confirmation
-that no WhatsApp send/outbox count changed, public desktop/mobile browser checks,
-service stability and a new redacted release-evidence artifact.
+CI is authoritative. For release `0ec2c58f8b0a26734ca08788787640dca1409821`,
+exact-SHA CI/image publication, migration-head proof, the five-mapping acceptance
+set, generic unmapped and wrong-PIN denials, role/host boundaries, unchanged
+WhatsApp operational state and public desktop/mobile browser checks are production
+evidence for this bounded web-login mode only.
+
+Still unproven and outside this release decision are WhatsApp sender/template and
+delivery activation, per-user proof of phone possession, complete provider-backed
+business journeys, an encrypted off-host restore, external alert delivery and
+formal privacy/security/retention approval. Do not describe this temporary bridge
+as completion of the original build plan or as authorization for unrestricted
+provider-backed traffic.
