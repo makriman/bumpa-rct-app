@@ -1,0 +1,11 @@
+{
+	admin off
+}
+
+:3000 {
+	log {
+		output stdout
+		format json
+	}
+	respond "ok" 200
+}
