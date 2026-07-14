@@ -4,6 +4,13 @@
 # shellcheck disable=SC2016
 set -Eeuo pipefail
 
+report_contract_error() {
+  local exit_status="$?"
+  printf 'Production contract failed at line %s\n' "${BASH_LINENO[0]}" >&2
+  return "$exit_status"
+}
+trap report_contract_error ERR
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -135,6 +142,12 @@ render_non_temporary_auth_env disabled disabled "$disabled_auth_env"
 render_non_temporary_auth_env whatsapp_otp meta "$whatsapp_auth_env"
 ./scripts/validate_env.sh "$disabled_auth_env" production
 ./scripts/validate_env.sh "$whatsapp_auth_env" production
+# Compose 2.38 validates this field but omits an explicit false value from its
+# normalized JSON, so retain a source assertion alongside the rendered checks.
+if [[ "$(grep -Fc 'create_host_path: false' compose.prod.yaml)" != 1 ]]; then
+  echo "Production Compose must explicitly disable verifier bind-path creation" >&2
+  exit 1
+fi
 
 for non_temporary_env in "$disabled_auth_env" "$whatsapp_auth_env"; do
   non_temporary_rendered="$(
@@ -149,7 +162,7 @@ for non_temporary_env in "$disabled_auth_env" "$whatsapp_auth_env"; do
         .source == "/dev/null" and
         .target == "/run/host-auth-secret/temporary_web_pin_verifier" and
         .read_only == true and
-        .bind.create_host_path == false
+        (.bind.create_host_path // false) == false
       )] | length == 1) and
     .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER == "" and
     .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER_FILE == "" and
@@ -677,7 +690,7 @@ if ! jq --exit-status '
       .source == "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" and
       .target == "/run/host-auth-secret/temporary_web_pin_verifier" and
       .read_only == true and
-      .bind.create_host_path == false
+      (.bind.create_host_path // false) == false
     )] | length == 1) and
   .services.api.depends_on["auth-secret-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["hermes-staging-init"].condition == "service_completed_successfully" and
