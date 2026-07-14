@@ -37,13 +37,15 @@ Meta secrets remain private for later activation. Do not claim that a PIN was se
 the request creates a provider-free ten-minute challenge for an eligible mapping
 and returns the same accepted shape for unknown phones.
 
-For immediate login containment, set `AUTH_LOGIN_MODE=disabled` and use the normal
-root-owned promotion coordinator. For a planned credential rotation, run as root
-from the checked-out repository:
+For immediate login containment, set `AUTH_LOGIN_MODE=disabled`, blank
+`TEMPORARY_WEB_PIN_VERIFIER`, `TEMPORARY_WEB_PIN_VERIFIER_FILE`,
+`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` and `TEMPORARY_WEB_PIN_EXPIRES_AT`, then use
+the normal root-owned promotion coordinator. Outside temporary mode Compose mounts
+`/dev/null` into the initializer and removes the API runtime copy. For a planned
+credential rotation, run as root from the checked-out repository:
 
 ```bash
-sudo ./scripts/set_temporary_login_pin.sh \
-  /var/lib/bumpabestie-secrets /opt/bumpabestie/.env.production
+sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
 ```
 
 Supply the six-digit value only at the hidden prompt, set a fresh future

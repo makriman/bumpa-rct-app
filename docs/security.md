@@ -55,11 +55,16 @@ challenge; platform role alone is insufficient. Request/verification responses a
 generic, challenges are short-lived and single-use, attempt and Redis phone/IP
 limits apply, and audit resource IDs use a one-way keyed phone reference.
 
-The server stores only an `OTP_SECRET`-peppered HMAC verifier in a root-owned host
-secret file. A networkless initializer creates a dedicated API-only `0400` runtime
-copy; raw PIN material is never written, mounted into other services or displayed
-by the product. A mandatory future expiry and `AUTH_LOGIN_MODE=disabled` are
-independent kill switches. The residual threat is explicit: knowledge of both an
+The server stores only an `OTP_SECRET`-peppered HMAC verifier in a dedicated
+root-owned `0700` host directory as a root-owned `0600` file. An exact-digest,
+networkless, read-only API image with every capability dropped validates it
+without emitting it; a separate networkless initializer creates an API-only
+`0400` runtime copy. The Docker-enabled deployment account is explicitly trusted
+as a root-equivalent operator, so host ownership protects against application
+services and accidental reads—not that privileged principal. Raw PIN material is
+never written, mounted into other services or displayed by the product. A
+mandatory future expiry and `AUTH_LOGIN_MODE=disabled` are independent kill
+switches. The residual threat is explicit: knowledge of both an
 approved phone and the shared PIN is sufficient to impersonate that mapped user,
 so the mode is appropriate only for the bounded pilot and must be rotated or
 removed when WhatsApp identity proof is ready.

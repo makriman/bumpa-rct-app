@@ -10,10 +10,17 @@ services:
       - no-new-privileges:true
     cap_drop: ["ALL"]
     cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    environment:
+      AUTH_LOGIN_MODE: ${AUTH_LOGIN_MODE:?Set AUTH_LOGIN_MODE}
+      TEMPORARY_WEB_PIN_VERIFIER_SOURCE: /run/host-auth-secret/temporary_web_pin_verifier
     volumes:
       - runtime_auth_secret:/runtime-auth-secret
-    secrets:
-      - temporary_web_pin_verifier
+      - type: bind
+        source: ${TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST:-/dev/null}
+        target: /run/host-auth-secret/temporary_web_pin_verifier
+        read_only: true
+        bind:
+          create_host_path: false
     restart: "no"
 
   app-secrets-init:
@@ -102,8 +109,8 @@ services:
       APP_ENV: production
       AUTH_LOGIN_MODE: ${AUTH_LOGIN_MODE:?Set AUTH_LOGIN_MODE}
       TEMPORARY_WEB_PIN_VERIFIER: ""
-      TEMPORARY_WEB_PIN_VERIFIER_FILE: /run/auth-secret/temporary_web_pin_verifier
-      TEMPORARY_WEB_PIN_EXPIRES_AT: ${TEMPORARY_WEB_PIN_EXPIRES_AT:?Set TEMPORARY_WEB_PIN_EXPIRES_AT}
+      TEMPORARY_WEB_PIN_VERIFIER_FILE: ${TEMPORARY_WEB_PIN_VERIFIER_FILE:-}
+      TEMPORARY_WEB_PIN_EXPIRES_AT: ${TEMPORARY_WEB_PIN_EXPIRES_AT:-}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
@@ -469,8 +476,6 @@ services:
         max-file: "5"
 
 secrets:
-  temporary_web_pin_verifier:
-    file: ${SECRETS_DIR:-./.secrets}/temporary_web_pin_verifier
   meta_app_secret:
     file: ${SECRETS_DIR:-./.secrets}/meta_app_secret
   meta_system_user_access_token:

@@ -12,17 +12,34 @@ invalid_env="$(mktemp)"
 duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 verification_env="$(mktemp)"
+disabled_auth_env="$(mktemp)"
+whatsapp_auth_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
 hermes_health_probe="$(mktemp -d)"
+auth_secret_contract_name="bumpabestie-auth-secret-test-$$"
+auth_secret_contract_dir="/var/lib/$auth_secret_contract_name"
+auth_secret_runtime_image='python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df'
+auth_secret_init_volume="bumpabestie-auth-secret-init-contract-$$"
+auth_secret_malformed_volume="$auth_secret_init_volume-malformed"
 runtime_secret_volume="bumpabestie-runtime-secret-contract-$$"
 backup_init_volume="bumpabestie-backup-init-contract-$$"
 offsite_env="$(mktemp)"
 offsite_hook="$(mktemp)"
 offsite_marker="$(mktemp)"
 cleanup() {
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source=/var/lib,target=/host-var-lib \
+    --entrypoint sh "$auth_secret_runtime_image" \
+    -c 'rm -rf "/host-var-lib/$1"' cleanup "$auth_secret_contract_name" \
+    >/dev/null 2>&1 || true
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
-    "$verification_env" "$offsite_env" "$offsite_hook" "$offsite_marker"
+    "$verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
+    "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
+  docker volume rm --force "$auth_secret_init_volume" >/dev/null 2>&1 || true
+  docker volume rm --force "$auth_secret_malformed_volume" >/dev/null 2>&1 || true
   docker volume rm --force "$runtime_secret_volume" >/dev/null 2>&1 || true
   docker volume rm --force "$backup_init_volume" >/dev/null 2>&1 || true
 }
@@ -62,6 +79,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     JWT_SECRET) value=contract-jwt-secret-000000000000000000 ;;
     OTP_SECRET) value=contract-otp-secret-000000000000000000 ;;
     AUTH_LOGIN_MODE) value=temporary_static_pin ;;
+    TEMPORARY_WEB_PIN_VERIFIER_FILE) value=/run/auth-secret/temporary_web_pin_verifier ;;
+    TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST) value=/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier ;;
     TEMPORARY_WEB_PIN_EXPIRES_AT) value=2099-01-01T00:00:00Z ;;
     FIELD_ENCRYPTION_KEY) value=contract-field-key-000000000000000000 ;;
     RESEARCH_PSEUDONYM_KEY) value=contract-research-pseudonym-key-000000000 ;;
@@ -96,21 +115,288 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   printf '%s=%s\n' "$key" "$value"
 done < .env.example > "$contract_env"
 chmod 0600 "$contract_env"
+
+render_non_temporary_auth_env() {
+  local auth_mode="$1"
+  local whatsapp_mode="$2"
+  local destination="$3"
+  awk -F= -v auth_mode="$auth_mode" -v whatsapp_mode="$whatsapp_mode" '
+    $1 == "AUTH_LOGIN_MODE" { print "AUTH_LOGIN_MODE=" auth_mode; next }
+    $1 == "WHATSAPP_BACKEND" { print "WHATSAPP_BACKEND=" whatsapp_mode; next }
+    $1 == "TEMPORARY_WEB_PIN_VERIFIER" ||
+    $1 == "TEMPORARY_WEB_PIN_VERIFIER_FILE" ||
+    $1 == "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" ||
+    $1 == "TEMPORARY_WEB_PIN_EXPIRES_AT" { print $1 "="; next }
+    { print }
+  ' "$contract_env" > "$destination"
+  chmod 0600 "$destination"
+}
+render_non_temporary_auth_env disabled disabled "$disabled_auth_env"
+render_non_temporary_auth_env whatsapp_otp meta "$whatsapp_auth_env"
+./scripts/validate_env.sh "$disabled_auth_env" production
+./scripts/validate_env.sh "$whatsapp_auth_env" production
+
+for non_temporary_env in "$disabled_auth_env" "$whatsapp_auth_env"; do
+  non_temporary_rendered="$(
+    docker compose --env-file "$non_temporary_env" \
+      -f compose.yaml -f compose.prod.yaml config --format json
+  )"
+  jq --exit-status '
+    .services["auth-secret-init"].environment.AUTH_LOGIN_MODE != "temporary_static_pin" and
+    ([.services["auth-secret-init"].volumes[] |
+      select(
+        .type == "bind" and
+        .source == "/dev/null" and
+        .target == "/run/host-auth-secret/temporary_web_pin_verifier" and
+        .read_only == true and
+        .bind.create_host_path == false
+      )] | length == 1) and
+    .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER == "" and
+    .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER_FILE == "" and
+    .services.api.environment.TEMPORARY_WEB_PIN_EXPIRES_AT == "" and
+    (.secrets | has("temporary_web_pin_verifier") | not)
+  ' <<<"$non_temporary_rendered" >/dev/null
+done
+
+docker pull "$auth_secret_runtime_image" >/dev/null
+docker volume create "$auth_secret_init_volume" >/dev/null
+for non_temporary_mode in disabled whatsapp_otp; do
+  docker run --rm --pull never \
+    --network none \
+    --read-only \
+    --user 0:0 \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE \
+    --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env "AUTH_LOGIN_MODE=$non_temporary_mode" \
+    --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret" \
+    --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
+    --mount type=bind,source=/dev/null,target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint /usr/local/bin/init-auth-secret \
+    "$auth_secret_runtime_image"
+  docker run --rm --network none --read-only \
+    --cap-drop ALL \
+    --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges:true \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret:ro" \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      test "$(stat -c %u:%g /runtime-auth-secret)" = 100:101
+      test "$(stat -c %a /runtime-auth-secret)" = 500
+      test -z "$(find /runtime-auth-secret -mindepth 1 -maxdepth 1 -print -quit)"
+    '
+done
+if docker run --rm --pull never \
+    --network none \
+    --read-only \
+    --user 0:0 \
+    --cap-drop ALL \
+    --cap-add CHOWN \
+    --cap-add DAC_OVERRIDE \
+    --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env AUTH_LOGIN_MODE=invalid \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret" \
+    --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
+    --mount type=bind,source=/dev/null,target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint /usr/local/bin/init-auth-secret \
+    "$auth_secret_runtime_image" >/dev/null 2>&1; then
+  echo "Auth-secret initializer accepted an invalid login mode" >&2
+  exit 1
+fi
 for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_verify_token hermes_anthropic_api_key; do
   printf 'contract-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
   chmod 0600 "$contract_secrets/$secret_name"
 done
-printf '%064d\n' 0 > "$contract_secrets/temporary_web_pin_verifier"
-chmod 0600 "$contract_secrets/temporary_web_pin_verifier"
-./scripts/validate_temporary_auth_secret.sh temporary_static_pin "$contract_secrets"
-chmod 0644 "$contract_secrets/temporary_web_pin_verifier"
-if ./scripts/validate_temporary_auth_secret.sh \
-  temporary_static_pin "$contract_secrets" >/dev/null 2>&1; then
-  echo "Temporary web PIN preflight accepted a world-readable host verifier" >&2
-  exit 1
+auth_secret_fixture_supported=0
+if docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source=/var/lib,target=/host-var-lib \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      directory="/host-var-lib/$1"
+      mkdir "$directory"
+      printf "%064d\n" 0 > "$directory/temporary_web_pin_verifier"
+      chown -R 0:0 "$directory"
+      chmod 0700 "$directory"
+      chmod 0600 "$directory/temporary_web_pin_verifier"
+    ' fixture "$auth_secret_contract_name" >/dev/null 2>&1 \
+  && [[ "$(stat -c '%u:%g' "$auth_secret_contract_dir" 2>/dev/null || true)" == "0:0" ]]; then
+  auth_secret_fixture_supported=1
 fi
-chmod 0600 "$contract_secrets/temporary_web_pin_verifier"
-grep -Fq 'AUTH_LOGIN_MODE WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do' scripts/deploy.sh
+if ((auth_secret_fixture_supported)); then
+  ./scripts/validate_temporary_auth_secret.sh \
+    temporary_static_pin \
+    "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+    "$auth_secret_runtime_image"
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c \
+    'printf unexpected > /fixture/unexpected-entry'
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted an extra secret-directory entry" >&2
+    exit 1
+  fi
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint rm "$auth_secret_runtime_image" /fixture/unexpected-entry
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      mv /fixture/temporary_web_pin_verifier /fixture/verifier-target
+      ln -s verifier-target /fixture/temporary_web_pin_verifier
+    '
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a symlinked verifier" >&2
+    exit 1
+  fi
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      rm /fixture/temporary_web_pin_verifier
+      mv /fixture/verifier-target /fixture/temporary_web_pin_verifier
+    '
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint chmod "$auth_secret_runtime_image" 0644 \
+    /fixture/temporary_web_pin_verifier
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a world-readable verifier" >&2
+    exit 1
+  fi
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      chown 1:1 /fixture/temporary_web_pin_verifier
+      chmod 0600 /fixture/temporary_web_pin_verifier
+    '
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a non-root-owned verifier" >&2
+    exit 1
+  fi
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      printf "%s\n" invalid > /fixture/temporary_web_pin_verifier
+      chown 0:0 /fixture/temporary_web_pin_verifier
+      chmod 0600 /fixture/temporary_web_pin_verifier
+    '
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted malformed verifier content" >&2
+    exit 1
+  fi
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      { printf "%064d\n" 0; printf trailing; } > /fixture/temporary_web_pin_verifier
+      chown 0:0 /fixture/temporary_web_pin_verifier
+      chmod 0600 /fixture/temporary_web_pin_verifier
+    '
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted trailing verifier data" >&2
+    exit 1
+  fi
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      { printf "\\n"; printf "%064d" 0; } > /fixture/temporary_web_pin_verifier
+      chown 0:0 /fixture/temporary_web_pin_verifier
+      chmod 0600 /fixture/temporary_web_pin_verifier
+    '
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a leading newline without a final newline" >&2
+    exit 1
+  fi
+
+  docker volume create "$auth_secret_malformed_volume" >/dev/null
+  if docker run --rm --pull never \
+      --network none \
+      --read-only \
+      --user 0:0 \
+      --cap-drop ALL \
+      --cap-add CHOWN \
+      --cap-add DAC_OVERRIDE \
+      --cap-add FOWNER \
+      --security-opt no-new-privileges:true \
+      --env AUTH_LOGIN_MODE=temporary_static_pin \
+      --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
+      --volume "$auth_secret_malformed_volume:/runtime-auth-secret" \
+      --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
+      --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+      --entrypoint /usr/local/bin/init-auth-secret \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Auth-secret initializer accepted a leading newline without a final newline" >&2
+    exit 1
+  fi
+  docker volume rm "$auth_secret_malformed_volume" >/dev/null
+else
+  if [[ "${CI:-}" == "true" ]]; then
+    echo "Root-owned temporary auth-secret runtime contract is required in CI" >&2
+    exit 1
+  fi
+  echo "Root-owned temporary auth-secret runtime contract skipped: host bind ownership is unavailable."
+fi
+grep -Fq 'AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST' scripts/deploy.sh
+grep -Fq 'docker image inspect "$api_image"' scripts/validate_temporary_auth_secret.sh
+for isolated_flag in \
+  '--pull never' '--network none' '--read-only' '--user 0:0' \
+  '--cap-drop ALL' '--security-opt no-new-privileges:true'; do
+  grep -Fq -- "$isolated_flag" scripts/validate_temporary_auth_secret.sh
+done
+grep -Fq 'test "$(stat -c %u:%g "$verifier")" = 0:0' \
+  scripts/validate_temporary_auth_secret.sh
+grep -Fq 'test "$(stat -c %a "$verifier")" = 600' \
+  scripts/validate_temporary_auth_secret.sh
+grep -Fq 're.fullmatch(rb"[0-9a-f]{64}\x0a", verifier_bytes)' \
+  scripts/validate_temporary_auth_secret.sh
 for secret_name in google_oauth_client_secret meta_ads_oauth_client_secret; do
   printf 'optional-oauth-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
   chmod 0600 "$contract_secrets/$secret_name"
@@ -382,7 +668,17 @@ if ! jq --exit-status '
   .services["auth-secret-init"].read_only == true and
   .services["auth-secret-init"].cap_drop == ["ALL"] and
   .services["auth-secret-init"].cap_add == ["CHOWN", "DAC_OVERRIDE", "FOWNER"] and
-  ([.services["auth-secret-init"].secrets[] | .source] == ["temporary_web_pin_verifier"]) and
+  .services["auth-secret-init"].secrets == null and
+  .services["auth-secret-init"].environment.AUTH_LOGIN_MODE == "temporary_static_pin" and
+  .services["auth-secret-init"].environment.TEMPORARY_WEB_PIN_VERIFIER_SOURCE == "/run/host-auth-secret/temporary_web_pin_verifier" and
+  ([.services["auth-secret-init"].volumes[] |
+    select(
+      .type == "bind" and
+      .source == "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" and
+      .target == "/run/host-auth-secret/temporary_web_pin_verifier" and
+      .read_only == true and
+      .bind.create_host_path == false
+    )] | length == 1) and
   .services.api.depends_on["auth-secret-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["hermes-staging-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
@@ -413,6 +709,7 @@ if ! jq --exit-status '
   ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/meta_ads_oauth_client_secret" and .read_only == true)] | length == 1) and
   ([.services.api.volumes[] | select(.target == "/run/runtime-secrets") | .source] == [.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets") | .source]) and
   ([.services.api.volumes[] | select(.target == "/run/auth-secret") | .source] == [.services["auth-secret-init"].volumes[] | select(.target == "/runtime-auth-secret") | .source]) and
+  (.secrets | has("temporary_web_pin_verifier") | not) and
   (.services.scheduler.secrets == null) and (.services.migrate.secrets == null) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-runtime") | .source] == ["hermes_data"]) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-staging") | .source] == ["hermes_staging_data"]) and
@@ -495,6 +792,8 @@ docker run --rm --network none --read-only \
   "$health_probe_image" sh -eu -c "$hermes_healthcheck"
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
+image_pull_line="$(grep -n -F '"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes' scripts/deploy.sh | cut -d: -f1)"
+auth_secret_preflight_line="$(grep -n -F './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
 quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
@@ -504,7 +803,10 @@ reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_herme
 # The following patterns intentionally match literal shell source.
 # shellcheck disable=SC2016
 application_start_line="$(grep -n -F '"${compose[@]}" --profile async up -d --wait' scripts/deploy.sh | tail -1 | cut -d: -f1)"
-if [[ -z "$stop_line" || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
+if [[ -z "$stop_line" || -z "$image_pull_line" || -z "$auth_secret_preflight_line" \
+  || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
+  || "$image_pull_line" -ge "$auth_secret_preflight_line" \
+  || "$auth_secret_preflight_line" -ge "$stop_line" \
   || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_init_line" \
   || "$backup_init_line" -ge "$backup_line" ]]; then
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
@@ -904,12 +1206,10 @@ if ./scripts/validate_env.sh "$duplicate_env" production >/dev/null 2>&1; then
 fi
 
 awk '
-  /^AUTH_LOGIN_MODE=/ { print "AUTH_LOGIN_MODE=whatsapp_otp"; next }
-  /^WHATSAPP_BACKEND=/ { print "WHATSAPP_BACKEND=meta"; next }
   /^AGENT_BACKEND=/ { print "AGENT_BACKEND=hermes"; next }
   /^BUMPA_BACKEND=/ { print "BUMPA_BACKEND=bumpa"; next }
   { print }
-' "$contract_env" > "$live_env"
+' "$whatsapp_auth_env" > "$live_env"
 chmod 0600 "$live_env"
 ./scripts/validate_env.sh "$live_env" production >/dev/null
 

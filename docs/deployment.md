@@ -167,6 +167,8 @@ For the temporary web-only containment release, set:
 
 ```dotenv
 AUTH_LOGIN_MODE=temporary_static_pin
+TEMPORARY_WEB_PIN_VERIFIER_FILE=/run/auth-secret/temporary_web_pin_verifier
+TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier
 TEMPORARY_WEB_PIN_EXPIRES_AT=<future-timezone-aware-timestamp>
 WHATSAPP_BACKEND=disabled
 META_TEST_SENDER_VERIFICATION_MODE=disabled
@@ -175,14 +177,28 @@ DAILY_INSIGHTS_ENABLED=false
 WEEKLY_INSIGHTS_ENABLED=false
 ```
 
-Leave `TEMPORARY_WEB_PIN_VERIFIER` and `TEMPORARY_WEB_PIN_VERIFIER_FILE` blank in
-the host environment; production Compose owns the API-only secret-file path.
-Provision the HMAC verifier through `scripts/set_temporary_login_pin.sh`, validate
-the environment, and use the guarded promotion path. Meta secret files remain in
+Leave `TEMPORARY_WEB_PIN_VERIFIER` blank in the host environment. The non-secret
+`TEMPORARY_WEB_PIN_VERIFIER_FILE` must equal the fixed API-only runtime path shown
+above while this mode is active.
+`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` points to a dedicated root-owned `0600`
+file under a root-owned `0700` directory and must not be placed under the shared
+deploy-user-owned `SECRETS_DIR`. Provision the HMAC verifier through
+`scripts/set_temporary_login_pin.sh`, validate the environment, and use the
+guarded promotion path. The non-root deploy preflight checks the file only through
+the already-pulled exact API image in a networkless, read-only, capability-free
+container; it does not emit the verifier. The Docker-enabled deploy account is a
+trusted root-equivalent production principal, not an isolation boundary. Meta secret files remain in
 their existing scoped boundary for later activation, but no login, test-sender or
 proactive delivery may use them while this mode is selected. The full threat model,
 rotation/rollback procedure, role boundary, client-IP chain and acceptance gates
 are in [`docs/temporary-web-login.md`](temporary-web-login.md).
+
+For the first rollout, do not activate temporary authentication in the same
+promotion that introduces it. First set `AUTH_LOGIN_MODE=disabled`, park WhatsApp,
+leave every `TEMPORARY_WEB_PIN_*` value blank, and promote and verify the new exact
+revision. Then set the three values shown above, provision the verifier, and run
+the coordinator again with the same revision and six digests. This two-phase
+sequence preserves an old-release rollback before the compatibility boundary.
 
 Do not include `DEV_FIXED_OTP` or `DEV_OTP_SINK`. Set the five production domains
 and HTTPS origins, independent high-entropy application/database secrets, internal
@@ -475,7 +491,9 @@ remains a release requirement. Never run a destructive down-migration during an
 outage without a separately reviewed recovery plan.
 
 Temporary web authentication has an additional fail-closed rollback: change
-`AUTH_LOGIN_MODE` to `disabled` and promote through the same coordinator. Its
+`AUTH_LOGIN_MODE` to `disabled`; blank `TEMPORARY_WEB_PIN_VERIFIER`,
+`TEMPORARY_WEB_PIN_VERIFIER_FILE`, `TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST`, and
+`TEMPORARY_WEB_PIN_EXPIRES_AT`; then promote through the same coordinator. Its
 mandatory timestamp also disables request and verification after expiry. Rotating
 the shared pilot PIN requires rerunning `scripts/set_temporary_login_pin.sh` at its
 hidden prompt and recreating the secret initializer and API through the guarded

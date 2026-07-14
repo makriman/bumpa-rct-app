@@ -228,6 +228,7 @@ for old_id, secret in old_keys.items():
   fi
   whatsapp_backend="$(value_for WHATSAPP_BACKEND)"
   auth_login_mode="$(value_for AUTH_LOGIN_MODE)"
+  temporary_web_pin_verifier_file_host="$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST)"
   agent_backend="$(value_for AGENT_BACKEND)"
   bumpa_backend="$(value_for BUMPA_BACKEND)"
   [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || {
@@ -238,13 +239,30 @@ for old_id, secret in old_keys.items():
     echo "AUTH_LOGIN_MODE is invalid" >&2
     failed=1
   }
+  if [[ "$auth_login_mode" == "temporary_static_pin" ]] && ! python3 - "$temporary_web_pin_verifier_file_host" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+if (
+    not re.fullmatch(r"/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier", path)
+    or os.path.normpath(path) != path
+):
+    raise SystemExit(1)
+PY
+  then
+    echo "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST must be an absolute normalized dedicated verifier path" >&2
+    failed=1
+  fi
   if [[ "$auth_login_mode" == "temporary_static_pin" ]]; then
     if [[ "$whatsapp_backend" != "disabled" ]]; then
       echo "Temporary static-PIN authentication requires WHATSAPP_BACKEND=disabled" >&2
       failed=1
     fi
-    if [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" ]]; then
-      echo "Production temporary PIN verifier must use the scoped Compose secret" >&2
+    if [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
+      "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" != "/run/auth-secret/temporary_web_pin_verifier" ]]; then
+      echo "Production temporary PIN verifier must use the fixed API runtime secret path" >&2
       failed=1
     fi
     if [[ "$(value_for META_TEST_SENDER_VERIFICATION_MODE)" != "disabled" ]]; then
@@ -273,6 +291,12 @@ PY
       echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
       failed=1
     fi
+  elif [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
+    -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" || \
+    -n "$temporary_web_pin_verifier_file_host" || \
+    -n "$(value_for TEMPORARY_WEB_PIN_EXPIRES_AT)" ]]; then
+    echo "Temporary web PIN fields must be blank unless temporary_static_pin authentication is active" >&2
+    failed=1
   fi
   [[ "$agent_backend" =~ ^(disabled|hermes)$ ]] || {
     echo "AGENT_BACKEND must be disabled or hermes in production" >&2

@@ -68,38 +68,58 @@ HMAC-SHA256(OTP_SECRET, "web-login-pin:" + PIN)
 ```
 
 The raw PIN is never written by the script. The host verifier is a root-owned
-`0600` regular file in the root-owned `0700` secret directory. A networkless,
-one-shot initializer copies it into a dedicated runtime volume as an API-readable
-`0400` file. Web, worker, scheduler, Hermes and browser processes do not receive
-that verifier. The API recomputes the candidate HMAC and compares it in constant
-time.
+`0600` regular file in its own root-owned `0700` directory, separate from the
+deploy-user-owned Meta and Hermes `SECRETS_DIR`. Before deployment, the non-root
+coordinator asks Docker to validate the verifier through the already-pulled exact
+API image with no network, a read-only root filesystem, no capabilities and
+`no-new-privileges`; the validation command never emits the verifier. A separate
+networkless one-shot initializer copies it into a dedicated runtime volume as an
+API-readable `0400` file. Web, worker, scheduler, Hermes and browser processes do
+not receive that verifier. The API recomputes the candidate HMAC and compares it
+in constant time.
+
+The `bumpabestie` deployment account is deliberately trusted and root-equivalent
+because it can control Docker. Root host ownership protects the verifier from the
+application services, ordinary host processes and accidental direct reads; it is
+not a security boundary against a malicious deployment operator. That operator
+also controls the release and reads `OTP_SECRET`, so production access to the
+account and its SSH key must be treated as privileged root access.
 
 From the checked-out production repository, provision or rotate the verifier as
-root. The defaults target the documented host paths; explicit arguments are useful
-for a staged environment:
+root. The setter reads the dedicated absolute
+`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` from the environment file:
 
 ```bash
 sudo ./scripts/set_temporary_login_pin.sh
-sudo ./scripts/set_temporary_login_pin.sh \
-  /var/lib/bumpabestie-secrets /opt/bumpabestie/.env.production
+sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
 ```
 
-With no directory argument, the setter reads the absolute `SECRETS_DIR` from the
-production environment file; an explicit directory is reserved for a staged
-environment. The operator supplies the PIN only at the hidden prompt. Do not pass
-it as an argument, environment variable or stdin captured by automation. Set a new future
+The operator supplies the PIN only at the hidden prompt. Do not pass it as an
+argument, environment variable or stdin captured by automation. Set a new future
 `TEMPORARY_WEB_PIN_EXPIRES_AT`, validate the environment, and apply the change
 through the guarded promotion procedure in `docs/deployment.md` so the initializer
 and API are recreated together. A verifier rotation does not revoke already issued
 session cookies; contain suspected compromise by setting `AUTH_LOGIN_MODE=disabled`,
 using the normal session-revocation controls, and promoting the containment change.
 
-Rollback is fail-closed: set `AUTH_LOGIN_MODE=disabled` and use the guarded
-promotion path. Expiry independently disables request and verification even if an
-operator forgets the kill switch. Do not switch to `whatsapp_otp` until the Meta
-activation gates are complete. To restore a prior temporary PIN during a controlled
-rollback, rerun the setter at its hidden prompt and repeat the initializer/API
-promotion; never keep a raw rollback copy on the host.
+The first rollout is intentionally two-phase. First set `AUTH_LOGIN_MODE=disabled`,
+leave every `TEMPORARY_WEB_PIN_*` field blank, park WhatsApp delivery and promote
+the compatible release. Verify that release and schema while login remains closed.
+Only then set the fixed runtime path
+`TEMPORARY_WEB_PIN_VERIFIER_FILE=/run/auth-secret/temporary_web_pin_verifier`, the
+dedicated host path and future expiry, run the setter, and promote the same
+immutable revision and six image digests again. This keeps the previous release a
+viable pre-boundary rollback and prevents half-activation of the temporary mode.
+
+Rollback is fail-closed: set `AUTH_LOGIN_MODE=disabled`, blank all four temporary
+PIN fields and use the guarded promotion path. The root-owned dormant verifier may
+remain on disk, but production Compose mounts `/dev/null` and the initializer
+removes the API runtime copy outside temporary mode. Expiry independently disables
+request and verification even if an operator forgets the kill switch. Do not
+switch to `whatsapp_otp` until the Meta activation gates are complete. To restore a
+prior temporary PIN during a controlled rollback, rerun the setter at its hidden
+prompt and repeat the initializer/API promotion; never keep a raw rollback copy on
+the host.
 
 ## Roles, hosts and cookies
 

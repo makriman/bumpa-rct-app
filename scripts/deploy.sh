@@ -135,7 +135,8 @@ for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
   API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
-  AUTH_LOGIN_MODE WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
+  AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST \
+  WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
   value="$(value_for "$key")"
   printf -v "$key" '%s' "$value"
   export "${key?}"
@@ -203,7 +204,6 @@ for secret_name in \
     exit 2
   fi
 done
-./scripts/validate_temporary_auth_secret.sh "$AUTH_LOGIN_MODE" "$SECRETS_DIR"
 
 if [[ -z "${DEPLOY_REF:-}" || -z "${IMAGE_TAG:-}" || -z "${INFRA_IMAGE_TAG:-}" ]]; then
   echo "DEPLOY_REF, IMAGE_TAG and INFRA_IMAGE_TAG are required" >&2
@@ -623,6 +623,8 @@ verify_image_revision "$CADDY_IMAGE" "$infra_commit" caddy
 verify_image_revision "$POSTGRES_IMAGE" "$infra_commit" postgres
 verify_image_revision "$BACKUP_IMAGE" "$infra_commit" backup
 verify_image_revision "$HERMES_IMAGE" "$deploy_commit" hermes
+./scripts/validate_temporary_auth_secret.sh \
+  "$AUTH_LOGIN_MODE" "$TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$API_IMAGE"
 
 target_pg_version="$(docker run --rm --entrypoint postgres "$POSTGRES_IMAGE" --version)"
 target_pg_version="${target_pg_version##* }"
