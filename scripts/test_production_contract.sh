@@ -238,6 +238,7 @@ for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_ve
   chmod 0600 "$contract_secrets/$secret_name"
 done
 auth_secret_fixture_supported=0
+auth_secret_validator_prefix=()
 if docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
     --security-opt no-new-privileges:true \
@@ -253,8 +254,18 @@ if docker run --rm --network none --read-only \
   && [[ "$(stat -c '%u:%g' "$auth_secret_contract_dir" 2>/dev/null || true)" == "0:0" ]]; then
   auth_secret_fixture_supported=1
 fi
+if ((auth_secret_fixture_supported && EUID != 0)); then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    # The production validator is a root-only deployment preflight. Run the
+    # Linux host-bind fixture at the same privilege boundary so its deliberate
+    # 0700 directory and 0600 file remain inaccessible to the CI runner.
+    auth_secret_validator_prefix=(sudo -n)
+  else
+    auth_secret_fixture_supported=0
+  fi
+fi
 if ((auth_secret_fixture_supported)); then
-  ./scripts/validate_temporary_auth_secret.sh \
+  "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
     temporary_static_pin \
     "$auth_secret_contract_dir/temporary_web_pin_verifier" \
     "$auth_secret_runtime_image"
@@ -307,7 +318,7 @@ if ((auth_secret_fixture_supported)); then
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c \
     'printf unexpected > /fixture/unexpected-entry'
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -328,7 +339,7 @@ if ((auth_secret_fixture_supported)); then
       mv /fixture/temporary_web_pin_verifier /fixture/verifier-target
       ln -s verifier-target /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -350,7 +361,7 @@ if ((auth_secret_fixture_supported)); then
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint chmod "$auth_secret_runtime_image" 0644 \
     /fixture/temporary_web_pin_verifier
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -366,7 +377,7 @@ if ((auth_secret_fixture_supported)); then
       chown 1:1 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -383,7 +394,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -400,7 +411,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -417,7 +428,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
