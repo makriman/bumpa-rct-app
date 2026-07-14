@@ -41,7 +41,7 @@
   `339px` right) with no horizontal overflow.
 - Browser-rendered desktop and mobile interactions passed with zero console
   warnings or errors.
-- All 34 Playwright journeys passed in desktop and mobile Chromium, including
+- All 36 Playwright journeys passed in desktop and mobile Chromium, including
   Axe WCAG A/AA checks, country normalization, login flow, CSP, and visual
   baselines. All 162 component/unit tests also passed.
 
@@ -56,10 +56,15 @@
 ### Production viewport iteration
 
 - **P2 — The first live 390 × 844 capture showed the open popover extending
-  18px below the viewport.** The picker now measures the available space on
-  open and resize, chooses an above/below placement, and caps the scrollable
-  option region to the actual viewport. A dedicated browser test fixes the
-  390 × 844 contract and asserts both horizontal and vertical containment.
+  18px below the viewport.** The picker now measures its rendered chrome and
+  the browser's visual viewport, responds to resize and scroll events from a
+  mobile keyboard, chooses an above/below placement, and caps the scrollable
+  option region to the space actually available. Browser regressions cover
+  390 × 844, 390 × 420, 844 × 390, and a simulated visual-viewport transition.
+- The picker dismisses safely if the anchor leaves the visual viewport or the
+  remaining viewport is too short to render even the measured search chrome.
+- Keyboard navigation scrolls the active country into view and restores focus
+  to the country-code trigger after selection or dismissal.
 
 ## Required fidelity surfaces
 

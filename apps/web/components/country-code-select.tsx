@@ -21,8 +21,6 @@ type CountryCodeSelectProps = {
 };
 
 const MAX_OPTIONS_HEIGHT = 276;
-const MIN_OPTIONS_HEIGHT = 144;
-const POPOVER_CHROME_HEIGHT = 67;
 const POPOVER_GAP = 9;
 const VIEWPORT_GUTTER = 16;
 
@@ -42,6 +40,8 @@ export default function CountryCodeSelect({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const optionsRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
   const selected =
     countries.find((country) => country.iso === value) ?? countries[0];
@@ -69,7 +69,7 @@ export default function CountryCodeSelect({
     );
     setActiveIndex(Math.max(0, selectedIndex));
     const frame = window.requestAnimationFrame(() =>
-      searchRef.current?.focus(),
+      searchRef.current?.focus({ preventScroll: true }),
     );
 
     const closeOnOutsidePointer = (event: PointerEvent) => {
@@ -93,23 +93,55 @@ export default function CountryCodeSelect({
 
     const updateLayout = () => {
       const trigger = triggerRef.current;
-      if (!trigger) return;
+      const popover = popoverRef.current;
+      const options = optionsRef.current;
+      if (!trigger || !popover || !options) return;
 
       const triggerRect = trigger.getBoundingClientRect();
-      const spaceBelow =
-        window.innerHeight - triggerRect.bottom - POPOVER_GAP - VIEWPORT_GUTTER;
-      const spaceAbove = triggerRect.top - POPOVER_GAP - VIEWPORT_GUTTER;
-      const minimumPopoverHeight = MIN_OPTIONS_HEIGHT + POPOVER_CHROME_HEIGHT;
+      if (triggerRect.width === 0 && triggerRect.height === 0) return;
+      const viewport = window.visualViewport;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const viewportBottom =
+        viewportTop + (viewport?.height ?? window.innerHeight);
+      if (
+        triggerRect.bottom <= viewportTop ||
+        triggerRect.top >= viewportBottom
+      ) {
+        setOpen(false);
+        setQuery("");
+        return;
+      }
+      const spaceBelow = Math.max(
+        0,
+        viewportBottom - triggerRect.bottom - POPOVER_GAP - VIEWPORT_GUTTER,
+      );
+      const spaceAbove = Math.max(
+        0,
+        triggerRect.top - viewportTop - POPOVER_GAP - VIEWPORT_GUTTER,
+      );
+      const chromeHeight = Math.max(
+        0,
+        popover.getBoundingClientRect().height -
+          options.getBoundingClientRect().height,
+      );
+      if (Math.max(spaceAbove, spaceBelow) < chromeHeight) {
+        setOpen(false);
+        setQuery("");
+        window.requestAnimationFrame(() => triggerRef.current?.focus());
+        return;
+      }
+      const desiredPopoverHeight =
+        chromeHeight + Math.min(MAX_OPTIONS_HEIGHT, options.scrollHeight);
       const side =
-        spaceBelow >= minimumPopoverHeight || spaceBelow >= spaceAbove
+        spaceBelow >= desiredPopoverHeight || spaceBelow >= spaceAbove
           ? "below"
           : "above";
       const availableHeight = side === "below" ? spaceBelow : spaceAbove;
       const optionsHeight = Math.max(
-        MIN_OPTIONS_HEIGHT,
+        0,
         Math.min(
           MAX_OPTIONS_HEIGHT,
-          Math.floor(availableHeight - POPOVER_CHROME_HEIGHT),
+          Math.floor(availableHeight - chromeHeight),
         ),
       );
 
@@ -123,27 +155,53 @@ export default function CountryCodeSelect({
     updateLayout();
     window.addEventListener("resize", updateLayout);
     window.addEventListener("scroll", updateLayout, true);
+    window.visualViewport?.addEventListener("resize", updateLayout);
+    window.visualViewport?.addEventListener("scroll", updateLayout);
     return () => {
       window.removeEventListener("resize", updateLayout);
       window.removeEventListener("scroll", updateLayout, true);
+      window.visualViewport?.removeEventListener("resize", updateLayout);
+      window.visualViewport?.removeEventListener("scroll", updateLayout);
     };
   }, [open]);
 
-  const close = () => {
+  const activeCountry = filteredCountries[activeIndex];
+
+  useLayoutEffect(() => {
+    if (!open || !activeCountry || !optionsRef.current) return;
+
+    const options = optionsRef.current;
+    const activeOption = options.querySelector<HTMLElement>(
+      `[data-country-iso="${activeCountry.iso}"]`,
+    );
+    if (!activeOption) return;
+
+    const optionsRect = options.getBoundingClientRect();
+    const activeRect = activeOption.getBoundingClientRect();
+    if (activeRect.top < optionsRect.top) {
+      options.scrollTop -= optionsRect.top - activeRect.top;
+    } else if (activeRect.bottom > optionsRect.bottom) {
+      options.scrollTop += activeRect.bottom - optionsRect.bottom;
+    }
+  }, [activeCountry, open, popoverLayout.optionsHeight]);
+
+  const close = (restoreTriggerFocus = false) => {
     setOpen(false);
     setQuery("");
+    if (restoreTriggerFocus) {
+      window.requestAnimationFrame(() => triggerRef.current?.focus());
+    }
   };
 
   const choose = (country: PhoneCountry) => {
     onChange(country.iso);
-    close();
+    close(true);
   };
 
   const handleListKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      close();
-      rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      close(true);
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -200,6 +258,7 @@ export default function CountryCodeSelect({
 
       {open && (
         <div
+          ref={popoverRef}
           className={`country-code-popover ${popoverLayout.side}`}
           style={
             {
@@ -229,6 +288,7 @@ export default function CountryCodeSelect({
             />
           </div>
           <div
+            ref={optionsRef}
             id={listboxId}
             className="country-code-options"
             role="listbox"
