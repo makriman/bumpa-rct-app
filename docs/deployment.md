@@ -92,7 +92,10 @@ application environment.
 ## Host prerequisites
 
 - Ubuntu 24.04 LTS on `linux/amd64`, a stable IP, provider backups and monitoring.
-- Cloud firewall: public TCP 80/443; SSH 22 only from a trusted `/32` or VPN CIDR.
+- Cloud firewall: SSH 22 only from a trusted `/32` or VPN CIDR. While branded
+  DNS is Cloudflare-proxied, origin TCP 80/443 must accept only Cloudflare's
+  current published IPv4/IPv6 ranges; an `Anywhere` origin rule is not a live
+  production configuration.
 - SSH keys only, non-root `bumpabestie` deploy user and `/opt/bumpabestie` mode 0750.
 - No public Postgres, Redis, Docker API or Hermes ports.
 - Enough free disk for current data, image rollback, one local backup and restore
@@ -111,6 +114,10 @@ the backup timer when the unit files are present. When the script is streamed to
 fresh host before checkout, install the units from the checked-out release after
 the production environment and first manual backup are ready.
 
+Bootstrap's public 80/443 rules are a temporary certificate/DNS bring-up state,
+not the Cloudflare-proxied live state. Complete the origin-firewall procedure
+below before declaring the branded hosts production-ready.
+
 ## DNS
 
 Create these records at the authoritative DNS provider, all pointing to the stable
@@ -128,6 +135,203 @@ Remove conflicting A/AAAA/CNAME records. If IPv6 is not configured on the host a
 firewall, do not publish AAAA records. Before deployment, verify each hostname from
 an external resolver. Caddy cannot obtain public certificates until resolution and
 ports 80/443 are correct.
+
+## Cloudflare origin firewall
+
+The orange-cloud DNS proxy does not, on its own, stop a client from resolving the
+origin address elsewhere and sending the branded `Host` header directly. Three
+host checks form one boundary: UFW protects normal host ingress, a managed raw
+`PREROUTING` chain drops non-Cloudflare web traffic before DNAT, and a managed
+`DOCKER-USER` chain repeats that decision after Docker starts. UFW alone is not
+acceptable because Docker-published ports bypass its `INPUT` chain. A post-Docker
+oneshot alone is also unacceptable because a restarted Docker daemon can restore
+published ports before that oneshot runs.
+
+After all five records are proxied and the edge-to-origin health check passes,
+keep an already-tested SSH session open and use the same canonical administrator
+CIDR recorded during bootstrap. Start with the read-only UFW plan:
+
+```bash
+sudo python3 ./scripts/configure_cloudflare_ufw.py plan \
+  --ssh-cidr 203.0.113.10/32
+```
+
+The command retrieves `https://www.cloudflare.com/ips-v4/` and
+`https://www.cloudflare.com/ips-v6/` directly over verified TLS. It fails closed
+on an empty, malformed, non-canonical, non-global, mixed-family, duplicate or
+overlapping response; an inactive/non-deny UFW baseline; disabled UFW IPv6
+support; broad or secondary SSH `ALLOW IN`/`LIMIT IN` access; all-port,
+application-profile, unknown or unmanaged inbound allows or limits; and any rule
+needing human review. It preflights every
+proposed UFW allow and reports only rule counts.
+
+Review the plan and apply with the explicit confirmation phrase:
+
+```bash
+sudo python3 ./scripts/configure_cloudflare_ufw.py apply \
+  --ssh-cidr 203.0.113.10/32 \
+  --confirm restrict-origin-to-cloudflare
+```
+
+The apply is additive before it is subtractive. It snapshots `/etc/ufw`, ensures
+and verifies the nominated SSH allow, adds and verifies every current Cloudflare
+range for TCP 80/443, and only then removes broad `Anywhere` rules and stale rules
+managed by this script. A process lock prevents concurrent runs. Any failure after
+the snapshot triggers restoration and reload of the complete prior UFW state.
+Re-running the command against a compliant host makes no firewall changes. This
+step does not yet close Docker's forwarding path.
+
+Install the reviewed Docker boundary executable without enabling its unit:
+
+```bash
+sudo install -m 0755 -o root -g root \
+  ./scripts/cloudflare_docker_firewall.py \
+  /usr/local/sbin/bumpabestie-cloudflare-docker-firewall
+ip -br address show scope global
+ip -4 route show default
+ip -6 route show default
+```
+
+The current single-interface Droplet uses the same external interface for both
+families. Substitute the externally verified interface name below; the tool
+rejects a bridge or other interface that does not match the host's unambiguous
+default ingress. Docker must use its iptables backend and both IPv4 and IPv6
+`DOCKER-USER` chains must exist. The verified host uses the `iptables`/`ip6tables`
+v1.8.10 nf_tables compatibility frontends with Docker's iptables firewall
+backend; that combination is supported. Docker's separate native nftables
+firewall backend is not supported by this tool.
+
+```bash
+sudo /usr/local/sbin/bumpabestie-cloudflare-docker-firewall plan \
+  --ipv4-interface eth0 --ipv6-interface eth0
+sudo /usr/local/sbin/bumpabestie-cloudflare-docker-firewall refresh \
+  --ipv4-interface eth0 --ipv6-interface eth0 \
+  --confirm enforce-cloudflare-in-docker-user
+sudo /usr/local/sbin/bumpabestie-cloudflare-docker-firewall verify-state
+```
+
+`refresh` retrieves and strictly validates the same official lists, applies and
+verifies both live families, then atomically commits a root-owned `0600` state
+file. It installs `BUMPABESTIE_CF_PRE` first in raw `PREROUTING`, before DNAT,
+and `BUMPABESTIE_CF_P` first in `DOCKER-USER`, after Docker. For ports 80 and
+443, current Cloudflare sources return to normal processing and all other sources
+drop; each chain's final `RETURN` preserves non-web traffic. There is deliberately
+no blanket established-connection bypass. Reapplication first verifies the exact
+ordered rules and is mutation-free when already compliant. A failed first refresh
+retains an emergency empty-allowlist web deny in both layers; a failed update
+restores the previously verified state.
+
+Only after `verify-state` passes, install and enable persistence:
+
+```bash
+sudo install -m 0644 -o root -g root \
+  ./infra/systemd/bumpabestie-cloudflare-origin-pregate.service \
+  /etc/systemd/system/bumpabestie-cloudflare-origin-pregate.service
+sudo install -d -m 0755 -o root -g root \
+  /etc/systemd/system/docker.service.d
+sudo install -m 0644 -o root -g root \
+  ./infra/systemd/docker.service.d/10-bumpabestie-cloudflare-origin-pregate.conf \
+  /etc/systemd/system/docker.service.d/10-bumpabestie-cloudflare-origin-pregate.conf
+sudo install -m 0644 -o root -g root \
+  ./infra/systemd/bumpabestie-cloudflare-docker-firewall.service \
+  /etc/systemd/system/bumpabestie-cloudflare-docker-firewall.service
+sudo install -m 0644 -o root -g root \
+  ./infra/systemd/bumpabestie-cloudflare-docker-firewall-failure.service \
+  /etc/systemd/system/bumpabestie-cloudflare-docker-firewall-failure.service
+sudo systemctl daemon-reload
+sudo systemctl start bumpabestie-cloudflare-origin-pregate.service
+sudo systemctl enable --now bumpabestie-cloudflare-docker-firewall.service
+sudo systemctl is-enabled bumpabestie-cloudflare-docker-firewall.service
+sudo systemctl is-active bumpabestie-cloudflare-docker-firewall.service
+```
+
+The Docker drop-in requires the pre-gate oneshot and orders Docker after it. The
+pre-gate has no `RemainAfterExit`, so every Docker activation re-reads persistent
+state and verifies raw `PREROUTING` before Docker can publish anything; a failed
+pre-gate prevents Docker from starting. The second oneshot is ordered after and
+bound to Docker and reproduces `DOCKER-USER` as defense in depth. It has no stop
+action that removes live rules. If its normal state application and emergency
+deny both fail, its failure handler stops Docker. A pre-gate failure also invokes
+the same stop handler, covering a manual reapply while Docker is already active.
+Bootstrap installs only the executable when no state exists; it installs the
+units and Docker drop-in only after persistent state and both live layers already
+pass `verify-state`.
+
+In a maintenance window, prove restart persistence before removing any temporary
+operator-created chain:
+
+```bash
+sudo systemctl restart docker.service
+sudo systemctl is-active bumpabestie-cloudflare-docker-firewall.service
+sudo systemctl show bumpabestie-cloudflare-origin-pregate.service \
+  --property=Result --property=ExecMainStatus
+sudo /usr/local/sbin/bumpabestie-cloudflare-docker-firewall verify-state
+sudo iptables -t raw -S PREROUTING
+sudo ip6tables -t raw -S PREROUTING
+sudo iptables -S DOCKER-USER
+sudo ip6tables -S DOCKER-USER
+```
+
+If a temporary `BUMPABESTIE_CF` chain protected the live gap, retain it through
+all steps above. Remove only that temporary hook and chain after the distinct
+`BUMPABESTIE_CF_P` state survives the Docker restart and both positive/negative
+external probes pass. Never flush `DOCKER-USER` or restore the complete filter
+table; both actions can destroy Docker and unrelated forwarding rules.
+
+Record the printed root-only rollback snapshot path. From a second external
+terminal, verify all of the following without closing the first SSH session:
+
+```bash
+sudo ufw status numbered
+SMOKE_SCHEME=https SMOKE_PORT=443 \
+  APP_DOMAIN=bumpabestie.com WWW_DOMAIN=www.bumpabestie.com \
+  API_DOMAIN=api.bumpabestie.com ADMIN_DOMAIN=admin.bumpabestie.com \
+  RESEARCH_DOMAIN=research.bumpabestie.com \
+  ./scripts/smoke_test.sh
+```
+
+- SSH still works from the nominated CIDR.
+- UFW has no broad SSH allow/limit, TCP 80/443 `Anywhere`, application-profile,
+  all-port or other unmanaged inbound allow/limit.
+- Both raw `PREROUTING` families and both `DOCKER-USER` families have the
+  persistent hook first and pass `verify-state`; unrelated ports retain their
+  previous behavior.
+- Every normal hostname still resolves to Cloudflare and the production smoke
+  gate passes through the edge.
+- From a non-Cloudflare external network, a direct-origin probe such as
+  `curl --noproxy '*' --resolve bumpabestie.com:443:<origin-ip>
+  https://bumpabestie.com/` cannot connect. Do not run that negative probe from a
+  Cloudflare address.
+
+If the Docker boundary update fails, use its printed snapshot first. An update
+snapshot restores and verifies the prior allowlist. When no prior persistent
+state existed, rollback intentionally retains emergency web deny instead of
+reopening the origin:
+
+```bash
+sudo /usr/local/sbin/bumpabestie-cloudflare-docker-firewall rollback \
+  --backup /var/lib/bumpabestie/firewall-backups/docker/<printed-snapshot> \
+  --confirm restore-previous-docker-firewall
+```
+
+If the earlier UFW update itself must be reverted, keep the original SSH session
+open and restore its separately printed snapshot:
+
+```bash
+sudo python3 ./scripts/configure_cloudflare_ufw.py rollback \
+  --backup /var/lib/bumpabestie/firewall-backups/<printed-snapshot> \
+  --confirm restore-previous-ufw-rules
+sudo ufw status verbose
+```
+
+The rollback rejects paths outside the configured root and verifies every
+snapshotted file against the root-only manifest before staging and swapping the
+configuration directory and reloading UFW. After rollback, diagnose the failed
+edge or SSH condition before attempting a new plan. Do not call either boundary
+complete until edge-positive requests pass, direct-origin TCP 80 and 443 time out
+from a non-Cloudflare network, SSH remains available, and a Docker restart has
+run the successful pre-gate before Docker and reproduced and verified both
+ordered IPv4/IPv6 layers.
 
 For an infrastructure-only baseline while the branded domain is unavailable, a
 temporary wildcard DNS service such as sslip.io may point five dedicated preview
@@ -168,7 +372,7 @@ For the temporary web-only containment release, set:
 ```dotenv
 AUTH_LOGIN_MODE=temporary_static_pin
 TEMPORARY_WEB_PIN_VERIFIER_FILE=/run/auth-secret/temporary_web_pin_verifier
-TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier
+TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=
 TEMPORARY_WEB_PIN_EXPIRES_AT=<future-timezone-aware-timestamp>
 WHATSAPP_BACKEND=disabled
 META_TEST_SENDER_VERIFICATION_MODE=disabled
@@ -180,10 +384,13 @@ WEEKLY_INSIGHTS_ENABLED=false
 Leave `TEMPORARY_WEB_PIN_VERIFIER` blank in the host environment. The non-secret
 `TEMPORARY_WEB_PIN_VERIFIER_FILE` must equal the fixed API-only runtime path shown
 above while this mode is active.
-`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` points to a dedicated root-owned `0600`
-file under a root-owned `0700` directory and must not be placed under the shared
+Before first activation, leave `TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` blank. The
+root-only setter creates an exclusive `0600` version under the root-owned `0700`
+`/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/` directory and
+atomically writes that generated path into the environment. Never choose or reuse
+a version filename manually, and do not place these files under the shared
 deploy-user-owned `SECRETS_DIR`. Provision the HMAC verifier through
-`scripts/set_temporary_login_pin.sh`, validate the environment, and use the
+`scripts/set_temporary_login_pin.sh`, validate the now-complete environment, and use the
 guarded promotion path. The non-root deploy preflight checks the file only through
 the already-pulled exact API image in a networkless, read-only, capability-free
 container; it does not emit the verifier. The Docker-enabled deploy account is a
@@ -196,7 +403,8 @@ are in [`docs/temporary-web-login.md`](temporary-web-login.md).
 For the first rollout, do not activate temporary authentication in the same
 promotion that introduces it. First set `AUTH_LOGIN_MODE=disabled`, park WhatsApp,
 leave every `TEMPORARY_WEB_PIN_*` value blank, and promote and verify the new exact
-revision. Then set the three values shown above, provision the verifier, and run
+revision. Then stage temporary mode, the fixed runtime path, blank host path and
+future expiry shown above, run the setter, and run
 the coordinator again with the same revision and six digests. This two-phase
 sequence preserves an old-release rollback before the compatibility boundary.
 
@@ -467,12 +675,17 @@ fail closed; reactivation is a separate administrative decision.
 
 ## Rollback boundary
 
-`scripts/deploy.sh` records the verified revision and actual running repository
-digests. It validates that record as private, immutable metadata and compares its
+`scripts/deploy.sh` records the verified revision, actual running repository
+digests, and the non-secret authentication boundary (`AUTH_LOGIN_MODE`, the
+temporary verifier paths and expiry, and `WHATSAPP_BACKEND`). It validates that
+record as private, immutable metadata and compares its
 API, worker, scheduler, web, Hermes, Caddy, PostgreSQL and Redis references with
 the actual running containers before enabling automatic rollback. A mismatch is a
 hard preflight stop. Any pre-deployment failure after a valid record is loaded
-atomically restores all nine prior release pointers in `.env.production`.
+atomically restores all nine prior release pointers and the recorded authentication
+boundary in `.env.production`. A legacy record without the auth object loads as
+the fail-closed disabled boundary; the first compatibility promotion must therefore
+be the documented disabled phase.
 
 After migrations begin, a failed later release can restore the prior application
 images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
@@ -482,22 +695,45 @@ the prior application revision/tag and API/web/Hermes references with the target
 infrastructure tag and Caddy/PostgreSQL/backup references. Its separate
 `operations_revision` remains the target checkout so subsequent recovery and
 promotion use schema-compatible tooling; older records default this field to their
-application `revision`. If either smoke or
-persistence fails, it leaves the deployment failed for operator intervention and
-does not claim a verified rollback. Before the recovery-point backup, the deploy script quiesces every
+application `revision`. Before recreating rollback services, the coordinator
+stops and removes the failed target Caddy and API containers, verifies that neither
+container remains, then atomically selects that hybrid image boundary together with the prior auth boundary,
+runs the reviewed target release's `auth-secret-init`, and only then recreates the
+prior API image. Restoring disabled mode
+therefore removes any verifier from the runtime volume even when the target and
+previous image digests are identical. If pull, secret initialization, recreation,
+or smoke fails, containment removes Caddy and API again before setting the
+maintenance interlock; availability is sacrificed rather than leaving the target
+login mode reachable. If persistence fails after a healthy prior-boundary recreate,
+the maintenance interlock remains and the deployment is not claimed as a verified
+rollback. Before the recovery-point backup, the deploy script quiesces every
 application writer; if backup or compatibility validation then fails, it restarts
 the exact previously running containers. Forward/backward schema compatibility
 remains a release requirement. Never run a destructive down-migration during an
 outage without a separately reviewed recovery plan.
 
-Temporary web authentication has an additional fail-closed rollback: change
+An unsuccessful guarded promotion automatically restores the recorded auth boundary
+before application recreation. Manual temporary-web containment remains fail-closed:
+change
 `AUTH_LOGIN_MODE` to `disabled`; blank `TEMPORARY_WEB_PIN_VERIFIER`,
 `TEMPORARY_WEB_PIN_VERIFIER_FILE`, `TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST`, and
 `TEMPORARY_WEB_PIN_EXPIRES_AT`; then promote through the same coordinator. Its
 mandatory timestamp also disables request and verification after expiry. Rotating
-the shared pilot PIN requires rerunning `scripts/set_temporary_login_pin.sh` at its
-hidden prompt and recreating the secret initializer and API through the guarded
-path; it never requires placing a raw PIN in `.env.production`.
+the shared pilot PIN requires leaving the currently recorded host path selected,
+setting a new expiry, and rerunning `scripts/set_temporary_login_pin.sh` at its
+hidden prompt. The setter creates a distinct immutable host file and changes only
+the host-path setting; the guarded path recreates the secret initializer and API.
+Rollback selects the retained prior file before initializer/API recreation, so it
+never requires placing a raw PIN in `.env.production` or reconstructing an old PIN.
+Retain old versions until a separately reviewed retirement policy proves they are
+outside every active, journaled and protected rollback boundary.
+
+The deploy preflight does not promise to contain an already missing or compromised
+host verifier before the forward boundary. For that incident, use the runbook's
+root-only emergency procedure first: remove Caddy and API, prove both labeled
+containers are absent and leave the maintenance interlock active. Treat the site
+as deliberately offline until the recorded boundary and recovery plan are
+reconciled; do not substitute an ordinary promotion for immediate containment.
 
 Migration `0007_legacy_sync_writer` preserves the application-image rollback
 boundary introduced by `0006_sync_completion`. SQL that omits the new completion

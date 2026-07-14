@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AdminOverview,
   ProviderFailures,
   TenantDetail,
   UsageList,
@@ -95,6 +96,24 @@ vi.mock("@/lib/use-api-resource", () => ({
         error: null,
         reload: vi.fn(),
         replace: vi.fn(),
+      };
+    }
+    if (path === "/admin/system/errors") {
+      return {
+        data: [
+          {
+            id: "system-error-1",
+            tenant_id: tenant.id,
+            service: "worker",
+            severity: "error",
+            message: "Bounded terminal-failure canary",
+            created_at: "2026-07-14T09:00:00Z",
+          },
+        ],
+        status: "ready",
+        source: "live",
+        error: null,
+        reload: vi.fn(),
       };
     }
     if (path.includes("whatsapp-delivery-failures")) {
@@ -223,6 +242,18 @@ describe("operator tenant operations", () => {
       screen.getByRole("heading", { name: "Approve WhatsApp number" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Tenant member")).toHaveValue("");
+  });
+});
+
+describe("admin overview semantics", () => {
+  it("describes retained error records without inventing an open state", () => {
+    render(<AdminOverview />);
+
+    expect(screen.getByText("Recent system errors")).toBeInTheDocument();
+    expect(
+      screen.getByText("Bounded recent records returned by the API"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Open system errors")).not.toBeInTheDocument();
   });
 });
 

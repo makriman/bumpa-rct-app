@@ -92,7 +92,9 @@ export async function apiRequest<T>(
         .catch(() => null)) as ErrorPayload | null;
       throw responseError(response, payload);
     }
-    if (response.status === 204) return undefined as T;
+    if (response.status === 204 || response.status === 205) {
+      return undefined as T;
+    }
     return response.json() as Promise<T>;
   } catch (error) {
     if (demoData !== undefined && demoFallbackEnabled) {

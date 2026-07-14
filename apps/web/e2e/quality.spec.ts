@@ -67,6 +67,34 @@ test("public landing and login have zero automated Axe WCAG A/AA violations", as
   await expectWcagAA(page);
 });
 
+test("login hydrates without locale-derived text mismatches", async ({
+  page,
+}) => {
+  const hydrationErrors: string[] = [];
+  const recordHydrationError = (message: string) => {
+    if (
+      message.includes("Hydration failed") ||
+      message.includes("Minified React error #418")
+    ) {
+      hydrationErrors.push(message);
+    }
+  };
+  page.on("pageerror", (error) => {
+    recordHydrationError(error.message);
+  });
+  page.on("console", (message) => {
+    if (message.type() === "error") recordHydrationError(message.text());
+  });
+
+  await page.goto("/login");
+  await expect(
+    page.getByRole("heading", { name: "Welcome back." }),
+  ).toBeVisible();
+  await page.waitForLoadState("networkidle");
+
+  expect(hydrationErrors).toEqual([]);
+});
+
 test("authenticated surfaces have zero automated Axe violations and keyboard-reachable tables", async ({
   page,
 }) => {

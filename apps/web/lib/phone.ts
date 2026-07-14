@@ -20,32 +20,40 @@ const EXAMPLES: Partial<Record<CountryCode, string>> = {
   NG: "801 234 5678",
   US: "202 555 0123",
 };
-const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
 
 /**
  * Comprehensive ISO country metadata from libphonenumber-js. Current team
  * regions are surfaced first in the selector while every supported dialing
- * plan remains available without maintaining a second country-code table.
+ * plan remains available without maintaining a second country-code table. The
+ * caller owns display-name resolution so an SSR boundary can serialize one
+ * canonical list instead of relying on matching Node and browser ICU data.
  */
-export const PHONE_COUNTRIES: readonly PhoneCountry[] = getCountries()
-  .map((iso) => ({
-    iso,
-    name: regionNames.of(iso) ?? iso,
-    dialCode: getCountryCallingCode(iso),
-    example: EXAMPLES[iso],
-    priority: TEAM_COUNTRIES.has(iso),
-  }))
-  .toSorted((a, b) => a.name.localeCompare(b.name));
+export function createPhoneCountries(
+  displayNameFor: (iso: CountryCode) => string,
+): readonly PhoneCountry[] {
+  return getCountries()
+    .map((iso) => ({
+      iso,
+      name: displayNameFor(iso),
+      dialCode: getCountryCallingCode(iso),
+      example: EXAMPLES[iso],
+      priority: TEAM_COUNTRIES.has(iso),
+    }))
+    .toSorted((a, b) => a.name.localeCompare(b.name, "en"));
+}
 
 export type PhoneAssemblyResult =
   | { ok: true; e164: string; nationalDigits: string }
   | { ok: false; error: string };
 
-export function countryByIso(iso: string): PhoneCountry {
+export function countryByIso(
+  countries: readonly PhoneCountry[],
+  iso: string,
+): PhoneCountry {
   return (
-    PHONE_COUNTRIES.find((country) => country.iso === iso) ??
-    PHONE_COUNTRIES.find((country) => country.iso === "GB") ??
-    PHONE_COUNTRIES[0]
+    countries.find((country) => country.iso === iso) ??
+    countries.find((country) => country.iso === "GB") ??
+    countries[0]
   );
 }
 

@@ -225,11 +225,11 @@ export function AdminOverview() {
               note={`${runs.length} recent run${runs.length === 1 ? "" : "s"}`}
             />
             <Metric
-              label="Open system errors"
+              label="Recent system errors"
               value={
                 errorResource.status === "ready" ? String(errors.length) : "—"
               }
-              note="Latest redacted error records"
+              note="Bounded recent records returned by the API"
             />
           </div>
           <div className="grid grid-2" style={{ marginTop: 18 }}>

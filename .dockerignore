@@ -14,5 +14,14 @@ hermes_data
 .env
 .env.*
 !.env.example
+# Local operator credential notes are never application build inputs. Git
+# ignore rules do not protect the Docker/BuildKit context or cache.
+**/*[Ss]ecret*.md
+/.secrets/
+/.evidence/
+*.pem
+*.key
+*.p12
 *.log
 .deployed-revision
+.deployed-release.json
