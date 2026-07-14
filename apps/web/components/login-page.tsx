@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Brand } from "@/components/ui";
+import CountryCodeSelect from "@/components/country-code-select";
 import {
   homeForRole,
   resolvePostLoginDestination,
@@ -250,44 +251,24 @@ export default function LoginPage({
                 <fieldset className="phone-fieldset">
                   <legend>Approved mobile number</legend>
                   <div className="phone-fields">
-                    <div className="field phone-country-field">
-                      <label htmlFor="country">Country or region</label>
-                      <select
-                        id="country"
-                        className={`select ${error ? "input-error" : ""}`}
-                        value={countryIso}
-                        onChange={(event) => {
-                          setCountryIso(event.target.value);
-                          setError("");
-                        }}
-                        autoComplete="country"
-                        aria-describedby="phone-help"
-                        aria-invalid={Boolean(error)}
-                      >
-                        <optgroup label="Current team">
-                          {phoneCountries
-                            .filter((candidate) => candidate.priority)
-                            .map((candidate) => (
-                              <option key={candidate.iso} value={candidate.iso}>
-                                {candidate.name} (+{candidate.dialCode})
-                              </option>
-                            ))}
-                        </optgroup>
-                        <optgroup label="More regions">
-                          {phoneCountries
-                            .filter((candidate) => !candidate.priority)
-                            .map((candidate) => (
-                              <option key={candidate.iso} value={candidate.iso}>
-                                {candidate.name} (+{candidate.dialCode})
-                              </option>
-                            ))}
-                        </optgroup>
-                      </select>
-                    </div>
                     <div className="field phone-number-field">
                       <label htmlFor="national-number">Mobile number</label>
-                      <div className="national-number-control">
-                        <span aria-hidden="true">+{country.dialCode}</span>
+                      <div
+                        className={`phone-input-control ${
+                          error ? "input-error" : ""
+                        }`}
+                      >
+                        <CountryCodeSelect
+                          countries={phoneCountries}
+                          value={countryIso}
+                          onChange={(iso) => {
+                            setCountryIso(iso);
+                            setError("");
+                          }}
+                          describedBy={
+                            error ? "phone-help login-error" : "phone-help"
+                          }
+                        />
                         <input
                           id="national-number"
                           className={`input ${error ? "input-error" : ""}`}
@@ -309,8 +290,8 @@ export default function LoginPage({
                     </div>
                   </div>
                   <span className="field-help" id="phone-help">
-                    Select the country code, then enter the rest of the number.
-                    A leading zero is fine.
+                    Choose the country code, then enter the mobile number. A
+                    leading zero is fine.
                   </span>
                   {error && (
                     <span className="field-error" id="login-error" role="alert">

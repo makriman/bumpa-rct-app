@@ -35,9 +35,31 @@ describe("pilot web sign-in", () => {
   it("does not prefill an identity in a non-demo build", () => {
     render(<LoginPage />);
 
-    expect(screen.getByLabelText("Country or region")).toHaveValue("GB");
+    expect(
+      screen.getByRole("button", { name: "Country code, GB +44" }),
+    ).toBeVisible();
     expect(screen.getByLabelText("Mobile number")).toHaveValue("");
     expect(screen.queryByText("Local demo access")).not.toBeInTheDocument();
+  });
+
+  it("selects a calling code from the searchable flag picker", () => {
+    render(<LoginPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Country code, GB +44" }),
+    );
+    fireEvent.change(
+      screen.getByRole("textbox", {
+        name: "Search countries or calling codes",
+      }),
+      { target: { value: "IN" } },
+    );
+    fireEvent.click(screen.getByRole("option", { name: "IN +91" }));
+
+    expect(
+      screen.getByRole("button", { name: "Country code, IN +91" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
   it("validates the national input before making a request", () => {
@@ -229,9 +251,8 @@ describe("pilot web sign-in", () => {
       .mockResolvedValue(accepted("whatsapp"));
     render(<LoginPage />);
 
-    fireEvent.change(screen.getByLabelText("Country or region"), {
-      target: { value: "IN" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /Country code/ }));
+    fireEvent.click(screen.getByRole("option", { name: "IN +91" }));
     fireEvent.change(screen.getByLabelText("Mobile number"), {
       target: { value: "98765 43210" },
     });
