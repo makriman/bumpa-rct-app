@@ -31,6 +31,16 @@ export type PlatformAdmin = {
   created_at: string;
 };
 
+export type PlatformAccess = {
+  user_id: string;
+  name: string | null;
+  phone_e164: string;
+  status: string;
+  has_active_mapping: boolean;
+  platform_roles: Array<"operator" | "researcher" | "superadmin">;
+  created_at: string;
+};
+
 export type WhatsAppNumber = {
   id: string;
   user_id: string;

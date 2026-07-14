@@ -45,6 +45,46 @@ through connectors and compromised dependencies/images.
 - Authentication responses avoid account enumeration and all login events are
   correlated without logging the raw phone number or OTP.
 
+### Temporary web-only authentication
+
+The release candidate adds a deliberately temporary shared six-digit pilot PIN
+while WhatsApp authentication is parked. It is **implemented-tested but not yet
+production evidence**. Only an active user whose primary phone has an approved,
+non-opted-out mapping to an active tenant membership can receive a provider-free
+challenge; platform role alone is insufficient. Request/verification responses are
+generic, challenges are short-lived and single-use, attempt and Redis phone/IP
+limits apply, and audit resource IDs use a one-way keyed phone reference.
+
+The server stores only an `OTP_SECRET`-peppered HMAC verifier in a dedicated
+root-owned `0700` host directory as a root-owned `0600` file. An exact-digest,
+networkless, read-only API image with every capability dropped validates it
+without emitting it; a separate networkless initializer creates an API-only
+`0400` runtime copy. The Docker-enabled deployment account is explicitly trusted
+as a root-equivalent operator, so host ownership protects against application
+services and accidental reads—not that privileged principal. Raw PIN material is
+never written, mounted into other services or displayed by the product. A
+mandatory future expiry and `AUTH_LOGIN_MODE=disabled` are independent kill
+switches. The residual threat is explicit: knowledge of both an
+approved phone and the shared PIN is sufficient to impersonate that mapped user,
+so the mode is appropriate only for the bounded pilot and must be rotated or
+removed when WhatsApp identity proof is ready.
+
+Authorization is unchanged. Tenant membership, `operator`, `researcher` and the
+protected `superadmin` role remain independent. A superadmin can auditably grant or
+revoke only operator/researcher access through the ordinary lifecycle. In temporary
+PIN mode, grants are limited to collaborators whose primary phone is already mapped
+to an active membership and tenant; legacy grant calls cannot create an unmapped
+platform identity. Cookies stay host-only, `Secure`, `HttpOnly` and `SameSite=Lax`;
+host-aware navigation never elevates a user or widens a cookie to sibling
+subdomains.
+
+At the public ingress, strict Cloudflare trusted-proxy ranges allow Caddy to replace
+the private client-IP header from `CF-Connecting-IP`; direct or untrusted peers use
+their socket address. The Next.js proxy accepts one validated IP, discards browser
+forwarding chains and passes it to FastAPI only for privacy-preserving limits. See
+[`docs/temporary-web-login.md`](temporary-web-login.md) for the complete operating
+and verification contract.
+
 ### Tenant and role isolation
 
 - Application authorization and Postgres RLS both enforce tenant scope.

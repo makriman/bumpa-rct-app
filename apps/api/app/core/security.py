@@ -8,6 +8,7 @@ from uuid import uuid4
 import jwt
 from fastapi import HTTPException, status
 from sqlalchemy import and_, exists, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -77,6 +78,130 @@ def find_login_eligible_user(db: Session, phone: str) -> User | None:
             ~opted_out_identity,
         )
     )
+
+
+def find_mapped_login_user(db: Session, phone: str) -> User | None:
+    """Resolve only an active user with an approved, active tenant mapping."""
+
+    normalized = normalize_phone(phone)
+    mapped_identity = exists(
+        select(PhoneIdentity.id)
+        .join(
+            TenantMembership,
+            and_(
+                TenantMembership.tenant_id == PhoneIdentity.tenant_id,
+                TenantMembership.user_id == PhoneIdentity.user_id,
+            ),
+        )
+        .join(Tenant, Tenant.id == PhoneIdentity.tenant_id)
+        .where(
+            PhoneIdentity.user_id == User.id,
+            PhoneIdentity.phone_e164 == normalized,
+            PhoneIdentity.status == "approved",
+            PhoneIdentity.opt_out.is_(False),
+            TenantMembership.status == "active",
+            Tenant.status == "active",
+        )
+    )
+    return db.scalar(
+        select(User).where(
+            User.primary_phone_e164 == normalized,
+            User.status == "active",
+            mapped_identity,
+        )
+    )
+
+
+def issue_temporary_web_pin_challenge(
+    db: Session,
+    phone: str,
+    settings: Settings,
+) -> None:
+    """Create or retain a short-lived provider-free challenge for a mapped identity."""
+
+    normalized = normalize_phone(phone)
+    now = utcnow()
+    latest = db.scalar(
+        select(OtpSession)
+        .where(
+            OtpSession.phone_e164 == normalized,
+            OtpSession.purpose == "temporary_web_pin",
+            OtpSession.consumed_at.is_(None),
+        )
+        .order_by(OtpSession.created_at.desc())
+    )
+    if latest and _aware_timestamp(latest.expires_at) >= now.timestamp():
+        return
+    if latest:
+        latest.consumed_at = now
+        db.flush()
+    challenge_nonce = str(uuid4())
+    db.add(
+        OtpSession(
+            phone_e164=normalized,
+            code_hash=secret_hash(
+                f"web-pin-challenge:{normalized}:{challenge_nonce}",
+                settings.otp_secret,
+            ),
+            purpose="temporary_web_pin",
+            expires_at=now + timedelta(minutes=settings.otp_ttl_minutes),
+        )
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent = db.scalar(
+            select(OtpSession)
+            .where(
+                OtpSession.phone_e164 == normalized,
+                OtpSession.purpose == "temporary_web_pin",
+                OtpSession.consumed_at.is_(None),
+            )
+            .order_by(OtpSession.created_at.desc())
+        )
+        if concurrent and _aware_timestamp(concurrent.expires_at) >= now.timestamp():
+            return
+        raise
+
+
+def verify_temporary_web_pin(
+    db: Session,
+    phone: str,
+    code: str,
+    settings: Settings,
+) -> User | None:
+    """Return a strictly mapped user or a single privacy-preserving denial value."""
+
+    normalized = normalize_phone(phone)
+    candidate = secret_hash(f"web-login-pin:{code}", settings.otp_secret)
+    pin_matches = secure_equals(settings.effective_temporary_web_pin_verifier, candidate)
+    now = utcnow()
+    challenge = db.scalar(
+        select(OtpSession)
+        .where(
+            OtpSession.phone_e164 == normalized,
+            OtpSession.purpose == "temporary_web_pin",
+            OtpSession.consumed_at.is_(None),
+        )
+        .order_by(OtpSession.created_at.desc())
+        .with_for_update()
+    )
+    challenge_active = bool(
+        challenge
+        and _aware_timestamp(challenge.expires_at) >= now.timestamp()
+        and challenge.attempts < settings.otp_max_attempts
+    )
+    if not pin_matches or not challenge_active:
+        if challenge and _aware_timestamp(challenge.expires_at) >= now.timestamp():
+            challenge.attempts += 1
+            if challenge.attempts >= settings.otp_max_attempts:
+                challenge.consumed_at = now
+        return None
+    user = find_mapped_login_user(db, normalized)
+    if challenge:
+        challenge.consumed_at = now
+    return user
 
 
 def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, str]:
@@ -180,11 +305,15 @@ def decode_access_token(db: Session, token: str, settings: Settings) -> User:
     if not auth_session or _aware_timestamp(auth_session.expires_at) < utcnow().timestamp():
         raise unauthorized
     user = db.get(User, user_id)
-    if (
-        not user
-        or user.status != "active"
-        or find_login_eligible_user(db, user.primary_phone_e164) is None
-    ):
+    eligible_user: User | None = None
+    if user:
+        resolver = (
+            find_mapped_login_user
+            if settings.auth_login_mode == "temporary_static_pin"
+            else find_login_eligible_user
+        )
+        eligible_user = resolver(db, user.primary_phone_e164)
+    if not user or user.status != "active" or eligible_user is None:
         raise unauthorized
     return user
 

@@ -3,7 +3,7 @@ import type {
   BumpaStatus,
   McpConnection,
   McpRegistryItem,
-  PlatformAdmin,
+  PlatformAccess,
   Report,
   ResearchConversationDetail,
   ResearchConversationSummary,
@@ -61,13 +61,14 @@ export const previewTenants: Tenant[] = [
   },
 ];
 
-export const previewPlatformAdmins: PlatformAdmin[] = [
+export const previewPlatformAdmins: PlatformAccess[] = [
   {
     user_id: "demo-platform-superadmin",
     name: "Demo superadmin",
     phone_e164: "+2348099990000",
     status: "active",
-    platform_roles: ["operator", "superadmin"],
+    has_active_mapping: true,
+    platform_roles: ["superadmin", "operator", "researcher"],
     created_at: "2026-05-19T09:00:00Z",
   },
   {
@@ -75,8 +76,27 @@ export const previewPlatformAdmins: PlatformAdmin[] = [
     name: "Demo operator",
     phone_e164: "+2348099990001",
     status: "active",
+    has_active_mapping: false,
     platform_roles: ["operator"],
     created_at: "2026-06-02T11:20:00Z",
+  },
+  {
+    user_id: "demo-platform-researcher",
+    name: "Demo researcher",
+    phone_e164: "+2348099990002",
+    status: "active",
+    has_active_mapping: false,
+    platform_roles: ["researcher"],
+    created_at: "2026-06-03T08:40:00Z",
+  },
+  {
+    user_id: "demo-mapped-collaborator",
+    name: "Demo mapped collaborator",
+    phone_e164: "+2348030001442",
+    status: "active",
+    has_active_mapping: true,
+    platform_roles: [],
+    created_at: "2026-06-04T10:10:00Z",
   },
 ];
 

@@ -64,6 +64,12 @@ describe("workspace mobile navigation", () => {
     ).toBe("https://admin.bumpabestie.165-227-228-20.sslip.io/admin");
     expect(
       crossSurfaceHref(
+        "research",
+        "https://admin.bumpabestie.165-227-228-20.sslip.io/admin",
+      ),
+    ).toBe("https://research.bumpabestie.165-227-228-20.sslip.io/research");
+    expect(
+      crossSurfaceHref(
         "admin",
         "https://www.bumpabestie.165-227-228-20.sslip.io/chat?view=owner#latest",
       ),
@@ -107,6 +113,24 @@ describe("workspace mobile navigation", () => {
     expect(
       screen.queryByRole("link", { name: "Administrators" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers a discoverable research switch to a dual-role operator", async () => {
+    apiRequest.mockResolvedValueOnce({
+      ...session,
+      platform_roles: ["operator", "researcher"],
+    });
+    render(
+      <AppShell surface="admin" title="Platform administration">
+        <p>Admin content</p>
+      </AppShell>,
+    );
+
+    const switcher = await screen.findByRole("link", {
+      name: "Switch to research workspace",
+    });
+    expect(switcher).toHaveAttribute("href", "/research");
+    expect(screen.getByText("Open redacted research tools")).toBeVisible();
   });
 
   it("shows administrator management only to superadmins", async () => {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -49,6 +50,10 @@ class Settings(BaseSettings):
     auth_request_ip_limit: int = Field(default=60, ge=1, le=10_000)
     auth_verify_phone_limit: int = Field(default=10, ge=1, le=100)
     auth_verify_ip_limit: int = Field(default=120, ge=1, le=10_000)
+    auth_login_mode: Literal["disabled", "whatsapp_otp", "temporary_static_pin"] = "disabled"
+    temporary_web_pin_verifier: str | None = None
+    temporary_web_pin_verifier_file: Path | None = None
+    temporary_web_pin_expires_at: datetime | None = None
     operation_rate_limit_enabled: bool | None = None
     chat_rate_limit_window_seconds: int = Field(default=60, ge=10, le=3600)
     chat_rate_limit: int = Field(default=12, ge=1, le=1000)
@@ -159,6 +164,8 @@ class Settings(BaseSettings):
         "meta_test_sender_waba_id",
         "meta_test_sender_phone_number_id",
         "meta_test_sender_display_phone_e164",
+        "temporary_web_pin_verifier_file",
+        "temporary_web_pin_expires_at",
         mode="before",
     )
     @classmethod
@@ -185,6 +192,14 @@ class Settings(BaseSettings):
     @property
     def effective_local_otp_code(self) -> str:
         return self.dev_fixed_otp or self.local_otp_code
+
+    @property
+    def effective_temporary_web_pin_verifier(self) -> str:
+        return self._provider_secret(
+            "TEMPORARY_WEB_PIN_VERIFIER",
+            self.temporary_web_pin_verifier,
+            self.temporary_web_pin_verifier_file,
+        )
 
     @property
     def effective_cors_origins(self) -> list[str]:
@@ -316,6 +331,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self) -> Settings:
         self._validate_meta_test_sender_verification()
+        self._validate_auth_login_mode()
         if self.app_env != "production":
             self._validate_field_encryption_keys()
         if self.system_error_retention_days * 24 < self.ops_alert_scan_lookback_hours:
@@ -453,6 +469,30 @@ class Settings(BaseSettings):
             self._validate_ops_alerts()
             self._validate_mcp_oauth_configuration()
         return self
+
+    def _validate_auth_login_mode(self) -> None:
+        if self.app_env == "production" and self.temporary_web_pin_verifier:
+            raise ValueError("TEMPORARY_WEB_PIN_VERIFIER must use a secret file in production")
+        if self.auth_login_mode != "temporary_static_pin":
+            return
+        if self.whatsapp_backend != "disabled":
+            raise ValueError(
+                "Temporary static-PIN authentication requires WHATSAPP_BACKEND=disabled"
+            )
+        if self.app_env == "production" and self.temporary_web_pin_verifier_file is None:
+            raise ValueError(
+                "TEMPORARY_WEB_PIN_VERIFIER_FILE is required for temporary static-PIN authentication"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", self.effective_temporary_web_pin_verifier):
+            raise ValueError("Temporary web PIN verifier must be a lowercase SHA-256 HMAC")
+        if self.temporary_web_pin_expires_at is None:
+            raise ValueError("TEMPORARY_WEB_PIN_EXPIRES_AT is required")
+        expires_at = self.temporary_web_pin_expires_at
+        if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+            raise ValueError("TEMPORARY_WEB_PIN_EXPIRES_AT must include a timezone")
+        # Deployment validation requires a future timestamp. Runtime settings
+        # must still load after that deadline so the API remains healthy while
+        # the auth route's kill switch fails closed with a scoped 503.
 
     def _validate_field_encryption_keys(self) -> None:
         if len(self.field_encryption_old_keys) > 16:

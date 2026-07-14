@@ -23,6 +23,56 @@ Never:
 - report unavailable data as zero;
 - run the local `make restore` convenience target for a production restore.
 
+## Temporary web-login containment
+
+The temporary web-only candidate is documented in
+[`docs/temporary-web-login.md`](temporary-web-login.md). Until an exact new SHA is
+promoted and its evidence is recorded, the current deployed release and WhatsApp
+selector reported above remain the production source of truth.
+
+When the candidate is promoted, the expected containment boundary is
+`AUTH_LOGIN_MODE=temporary_static_pin`, `WHATSAPP_BACKEND=disabled`, disabled Meta
+test-sender verification, and disabled proactive/daily/weekly WhatsApp delivery.
+Meta secrets remain private for later activation. Do not claim that a PIN was sent:
+the request creates a provider-free ten-minute challenge for an eligible mapping
+and returns the same accepted shape for unknown phones.
+
+For immediate login containment, set `AUTH_LOGIN_MODE=disabled`, blank
+`TEMPORARY_WEB_PIN_VERIFIER`, `TEMPORARY_WEB_PIN_VERIFIER_FILE`,
+`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` and `TEMPORARY_WEB_PIN_EXPIRES_AT`, then use
+the normal root-owned promotion coordinator. Outside temporary mode Compose mounts
+`/dev/null` into the initializer and removes the API runtime copy. For a planned
+credential rotation, run as root from the checked-out repository:
+
+```bash
+sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
+```
+
+Supply the six-digit value only at the hidden prompt, set a fresh future
+`TEMPORARY_WEB_PIN_EXPIRES_AT`, validate, promote, then run redacted mapped and
+unmapped canaries. Never pass the PIN in argv, environment, shell history, logs or
+chat. Rotation does not revoke an already issued cookie; use session revocation or
+wait for the bounded session TTL as appropriate. Expiry and the kill switch are
+independent containment controls.
+
+Login is not a role grant. Mapped collaborators retain only their existing tenant,
+`operator` and/or `researcher` access. Superadmin may manage the two ordinary
+platform roles through the audited platform-access directory; the protected
+superadmin role is outside that lifecycle. A host-only session cookie is not shared
+with sibling hosts, so verify public, admin and research destinations separately
+and expect a role denial on a surface the user is not authorized to access.
+
+During incident triage, compare redacted counts rather than raw identities:
+
+- eligible mapped users, successful and denied login audits;
+- active temporary challenges and locked/expired attempts;
+- WhatsApp outbound/outbox rows before and after the canary; and
+- service health, schema head `0013_web_pin_challenges` and the exact image SHA.
+
+Any Meta send, a successful unmapped login, a non-expiring verifier, a verifier
+visible outside the API-only secret volume, or admin/research access without the
+matching role is a release blocker.
+
 ## Triage order
 
 1. Establish impact: hostname, tenant pseudonym, channel, UTC start time, revision

@@ -45,7 +45,7 @@ required=(
   APP_ENV APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN
   PUBLIC_ORIGIN ADMIN_ORIGIN RESEARCH_ORIGIN API_ORIGIN API_BASE_URL
   TRUSTED_HOSTS CORS_ALLOWED_ORIGINS
-  JWT_SECRET OTP_SECRET FIELD_ENCRYPTION_KEY INTERNAL_SERVICE_TOKEN COOKIE_SECRET
+  JWT_SECRET OTP_SECRET AUTH_LOGIN_MODE FIELD_ENCRYPTION_KEY INTERNAL_SERVICE_TOKEN COOKIE_SECRET
   POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB APP_POSTGRES_PASSWORD
   DATABASE_URL MIGRATION_DATABASE_URL SYNC_DATABASE_URL REDIS_URL
   ASYNC_RUNTIME_ENABLED ASYNC_QUEUE_NAME ASYNC_QUEUE_KEY_PREFIX
@@ -227,12 +227,77 @@ for old_id, secret in old_keys.items():
     failed=1
   fi
   whatsapp_backend="$(value_for WHATSAPP_BACKEND)"
+  auth_login_mode="$(value_for AUTH_LOGIN_MODE)"
+  temporary_web_pin_verifier_file_host="$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST)"
   agent_backend="$(value_for AGENT_BACKEND)"
   bumpa_backend="$(value_for BUMPA_BACKEND)"
   [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || {
     echo "WHATSAPP_BACKEND must be disabled or meta in production" >&2
     failed=1
   }
+  [[ "$auth_login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]] || {
+    echo "AUTH_LOGIN_MODE is invalid" >&2
+    failed=1
+  }
+  if [[ "$auth_login_mode" == "temporary_static_pin" ]] && ! python3 - "$temporary_web_pin_verifier_file_host" <<'PY'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+if (
+    not re.fullmatch(r"/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier", path)
+    or os.path.normpath(path) != path
+):
+    raise SystemExit(1)
+PY
+  then
+    echo "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST must be an absolute normalized dedicated verifier path" >&2
+    failed=1
+  fi
+  if [[ "$auth_login_mode" == "temporary_static_pin" ]]; then
+    if [[ "$whatsapp_backend" != "disabled" ]]; then
+      echo "Temporary static-PIN authentication requires WHATSAPP_BACKEND=disabled" >&2
+      failed=1
+    fi
+    if [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
+      "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" != "/run/auth-secret/temporary_web_pin_verifier" ]]; then
+      echo "Production temporary PIN verifier must use the fixed API runtime secret path" >&2
+      failed=1
+    fi
+    if [[ "$(value_for META_TEST_SENDER_VERIFICATION_MODE)" != "disabled" ]]; then
+      echo "Temporary static-PIN authentication requires the Meta test sender to be disabled" >&2
+      failed=1
+    fi
+    if [[ "$(value_for PROACTIVE_INSIGHTS_ENABLED)" != "false" || \
+      "$(value_for DAILY_INSIGHTS_ENABLED)" != "false" || \
+      "$(value_for WEEKLY_INSIGHTS_ENABLED)" != "false" ]]; then
+      echo "Temporary static-PIN authentication requires proactive WhatsApp delivery to be disabled" >&2
+      failed=1
+    fi
+    pin_expiry="$(value_for TEMPORARY_WEB_PIN_EXPIRES_AT)"
+    if ! python3 - "$pin_expiry" <<'PY'
+from datetime import datetime, timezone
+import sys
+
+try:
+    expires_at = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(1)
+if expires_at.tzinfo is None or expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+    raise SystemExit(1)
+PY
+    then
+      echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
+      failed=1
+    fi
+  elif [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
+    -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" || \
+    -n "$temporary_web_pin_verifier_file_host" || \
+    -n "$(value_for TEMPORARY_WEB_PIN_EXPIRES_AT)" ]]; then
+    echo "Temporary web PIN fields must be blank unless temporary_static_pin authentication is active" >&2
+    failed=1
+  fi
   [[ "$agent_backend" =~ ^(disabled|hermes)$ ]] || {
     echo "AGENT_BACKEND must be disabled or hermes in production" >&2
     failed=1

@@ -1739,6 +1739,7 @@ def _exercise_role(
 
     auth_settings = Settings(
         app_env="test",
+        auth_login_mode="whatsapp_otp",
         whatsapp_backend="mock",
         auth_rate_limit_enabled=False,
         expose_local_otp=True,

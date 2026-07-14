@@ -41,10 +41,11 @@ function navFor(surface: Surface): NavGroup[] {
 }
 
 export function crossSurfaceHref(
-  target: "tenant" | "admin",
+  target: "tenant" | "admin" | "research",
   currentHref: string,
 ): string {
-  const path = target === "tenant" ? "/chat" : "/admin";
+  const path =
+    target === "tenant" ? "/chat" : target === "admin" ? "/admin" : "/research";
   try {
     const url = new URL(currentHref);
     const baseHostname = url.hostname.replace(/^(admin|research|www)\./, "");
@@ -55,7 +56,12 @@ export function crossSurfaceHref(
     ) {
       return path;
     }
-    url.hostname = target === "admin" ? `admin.${baseHostname}` : baseHostname;
+    url.hostname =
+      target === "admin"
+        ? `admin.${baseHostname}`
+        : target === "research"
+          ? `research.${baseHostname}`
+          : baseHostname;
     url.pathname = path;
     url.search = "";
     url.hash = "";
@@ -92,6 +98,7 @@ export function AppShell({
   const [workspaceLinks, setWorkspaceLinks] = useState({
     tenant: "/chat",
     admin: "/admin",
+    research: "/research",
   });
   useEffect(() => {
     void apiRequest<SessionView>("/auth/me")
@@ -113,6 +120,7 @@ export function AppShell({
     setWorkspaceLinks({
       tenant: crossSurfaceHref("tenant", window.location.href),
       admin: crossSurfaceHref("admin", window.location.href),
+      research: crossSurfaceHref("research", window.location.href),
     });
   }, []);
   useEffect(() => {
@@ -191,6 +199,11 @@ export function AppShell({
   const hasPlatformAdminAccess = Boolean(
     session?.platform_roles.some((role) =>
       ["operator", "superadmin"].includes(role),
+    ),
+  );
+  const hasResearchAccess = Boolean(
+    session?.platform_roles.some((role) =>
+      ["researcher", "superadmin"].includes(role),
     ),
   );
   const hasActiveWorkspace = currentMembership?.status === "active";
@@ -301,6 +314,54 @@ export function AppShell({
               <span>
                 <strong>Platform administration</strong>
                 <small>Manage tenant mappings</small>
+              </span>
+            </Link>
+          )}
+          {surface !== "research" && hasResearchAccess && (
+            <Link
+              className="workspace-switch"
+              href={workspaceLinks.research}
+              aria-label="Switch to research workspace"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="workspace-switch-icon" aria-hidden="true">
+                <AppIcon name="external" />
+              </span>
+              <span>
+                <strong>Research workspace</strong>
+                <small>Open redacted research tools</small>
+              </span>
+            </Link>
+          )}
+          {surface === "research" && hasPlatformAdminAccess && (
+            <Link
+              className="workspace-switch"
+              href={workspaceLinks.admin}
+              aria-label="Switch to platform administration"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="workspace-switch-icon" aria-hidden="true">
+                <AppIcon name="external" />
+              </span>
+              <span>
+                <strong>Platform administration</strong>
+                <small>Manage tenant mappings</small>
+              </span>
+            </Link>
+          )}
+          {surface === "research" && hasActiveWorkspace && (
+            <Link
+              className="workspace-switch"
+              href={workspaceLinks.tenant}
+              aria-label="Switch to your tenant workspace"
+              onClick={() => setMenuOpen(false)}
+            >
+              <span className="workspace-switch-icon" aria-hidden="true">
+                <AppIcon name="external" />
+              </span>
+              <span>
+                <strong>My tenant workspace</strong>
+                <small>Open your store membership</small>
               </span>
             </Link>
           )}

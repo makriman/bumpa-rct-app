@@ -65,7 +65,10 @@ def test_onboarding_migration_is_in_head_lineage_and_has_forced_tenant_rls(
 ) -> None:
     config = _config("sqlite://", monkeypatch)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_current_head() == "0012_operational_retention"
+    assert scripts.get_current_head() == "0013_web_pin_challenges"
+    assert scripts.get_revision("0013_web_pin_challenges").down_revision == (
+        "0012_operational_retention"
+    )
     assert scripts.get_revision("0012_operational_retention").down_revision == (
         "0011_tenant_onboarding"
     )
@@ -179,6 +182,98 @@ def test_onboarding_migration_constraints_and_round_trip(
         downgraded.dispose()
 
     command.upgrade(config, "head")
+
+
+def test_temporary_web_pin_migration_preserves_login_rows_and_round_trips(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'web-pin.db'}"
+    config = _config(database_url, monkeypatch)
+    command.upgrade(config, "0012_operational_retention")
+    engine = create_engine(database_url)
+    insert = text(
+        "INSERT INTO otp_sessions "
+        "(id, phone_e164, code_hash, purpose, attempts, expires_at, created_at) "
+        "VALUES (:id, :phone, :code_hash, :purpose, 0, "
+        "datetime('now', '+10 minutes'), CURRENT_TIMESTAMP)"
+    )
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                insert,
+                {
+                    "id": "otp-login-before-upgrade",
+                    "phone": "+447700900001",
+                    "code_hash": "a" * 64,
+                    "purpose": "login",
+                },
+            )
+
+        command.upgrade(config, "head")
+        web_pin_indexes = {
+            index["name"]: index for index in inspect(engine).get_indexes("otp_sessions")
+        }
+        assert web_pin_indexes["uq_otp_sessions_active_temporary_web_pin"]["unique"]
+        with engine.begin() as connection:
+            connection.execute(
+                insert,
+                {
+                    "id": "otp-temporary-after-upgrade",
+                    "phone": "+447700900002",
+                    "code_hash": "b" * 64,
+                    "purpose": "temporary_web_pin",
+                },
+            )
+            assert connection.execute(
+                text("SELECT purpose FROM otp_sessions ORDER BY id")
+            ).scalars().all() == ["login", "temporary_web_pin"]
+
+        with engine.begin() as connection, pytest.raises(IntegrityError):
+            connection.execute(
+                insert,
+                {
+                    "id": "otp-duplicate-active-temporary",
+                    "phone": "+447700900002",
+                    "code_hash": "c" * 64,
+                    "purpose": "temporary_web_pin",
+                },
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE otp_sessions SET consumed_at = CURRENT_TIMESTAMP "
+                    "WHERE id = 'otp-temporary-after-upgrade'"
+                )
+            )
+            connection.execute(
+                insert,
+                {
+                    "id": "otp-new-after-consumption",
+                    "phone": "+447700900002",
+                    "code_hash": "d" * 64,
+                    "purpose": "temporary_web_pin",
+                },
+            )
+
+        command.downgrade(config, "0012_operational_retention")
+        with engine.begin() as connection:
+            assert connection.execute(
+                text("SELECT id FROM otp_sessions ORDER BY id")
+            ).scalars().all() == ["otp-login-before-upgrade"]
+            with pytest.raises(IntegrityError):
+                connection.execute(
+                    insert,
+                    {
+                        "id": "otp-temporary-rejected-after-downgrade",
+                        "phone": "+447700900003",
+                        "code_hash": "c" * 64,
+                        "purpose": "temporary_web_pin",
+                    },
+                )
+    finally:
+        engine.dispose()
 
 
 def test_onboarding_migration_rejects_invalid_legacy_tenant_status(

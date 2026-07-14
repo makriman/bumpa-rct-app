@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { GET, POST } from "@/app/api/backend/[...path]/route";
+import { GET, POST, PUT } from "@/app/api/backend/[...path]/route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -84,8 +84,9 @@ describe("same-origin backend proxy", () => {
           origin: "https://bumpabestie.example",
           referer: "https://bumpabestie.example/settings/bumpa",
           "x-correlation-id": correlationId,
-          "x-forwarded-for": "203.0.113.9",
-          "x-real-ip": "203.0.113.9",
+          "x-bumpa-client-ip": "203.0.113.9",
+          "x-forwarded-for": "198.51.100.91, 192.0.2.44",
+          "x-real-ip": "198.51.100.92",
           "idempotency-key": "sync-019f",
           "if-match": "7",
           "x-tenant-id": "tenant-live",
@@ -113,7 +114,7 @@ describe("same-origin backend proxy", () => {
       "https://bumpabestie.example/settings/bumpa",
     );
     expect(headers.get("x-forwarded-for")).toBe("203.0.113.9");
-    expect(headers.get("x-real-ip")).toBe("203.0.113.9");
+    expect(headers.has("x-real-ip")).toBe(false);
     expect(headers.get("x-correlation-id")).toBe(correlationId);
     expect(headers.get("idempotency-key")).toBe("sync-019f");
     expect(headers.get("if-match")).toBe("7");
@@ -124,6 +125,103 @@ describe("same-origin backend proxy", () => {
     expect(headers.has("authorization")).toBe(false);
     expect(headers.has("connection")).toBe(false);
     expect(headers.has("x-internal-secret")).toBe(false);
+  });
+
+  it("forwards audited platform access grants as PUT requests", async () => {
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          user_id: "target-user",
+          platform_roles: ["operator"],
+          has_active_mapping: true,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const request = new NextRequest(
+      "https://admin.bumpabestie.example/api/backend/admin/platform-access/target-user/operator",
+      {
+        method: "PUT",
+        headers: {
+          cookie: "bb_session=signed",
+          origin: "https://admin.bumpabestie.example",
+          "x-access-reason": "Approved pilot collaborator access",
+        },
+      },
+    );
+
+    const response = await PUT(
+      request,
+      context("admin", "platform-access", "target-user", "operator"),
+    );
+
+    expect(response.status).toBe(200);
+    const [url, init] = upstream.mock.calls[0];
+    expect(String(url)).toBe(
+      "http://127.0.0.1:8000/v1/admin/platform-access/target-user/operator",
+    );
+    expect(init?.method).toBe("PUT");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("cookie")).toBe("bb_session=signed");
+    expect(headers.get("origin")).toBe("https://admin.bumpabestie.example");
+    expect(headers.get("x-access-reason")).toBe(
+      "Approved pilot collaborator access",
+    );
+  });
+
+  it.each([
+    ["a forwarding chain", "203.0.113.9, 198.51.100.4"],
+    ["a non-canonical IPv4 value", "010.0.0.1"],
+    ["a non-IP value", "client-controlled"],
+  ])(
+    "drops %s from the Caddy-owned client-IP boundary",
+    async (_label, value) => {
+      const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const request = new NextRequest(
+        "https://bumpabestie.example/api/backend/auth/me",
+        {
+          headers: {
+            "x-bumpa-client-ip": value,
+            "x-forwarded-for": "192.0.2.77",
+            "x-real-ip": "192.0.2.78",
+          },
+        },
+      );
+
+      const response = await GET(request, context("auth", "me"));
+
+      expect(response.status).toBe(200);
+      const headers = new Headers(upstream.mock.calls[0][1]?.headers);
+      expect(headers.has("x-forwarded-for")).toBe(false);
+      expect(headers.has("x-real-ip")).toBe(false);
+      expect(headers.has("x-bumpa-client-ip")).toBe(false);
+    },
+  );
+
+  it("forwards one canonical IPv6 client address", async () => {
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ status: "ok" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const request = new NextRequest(
+      "https://bumpabestie.example/api/backend/auth/me",
+      { headers: { "x-bumpa-client-ip": "2001:db8::9" } },
+    );
+
+    await GET(request, context("auth", "me"));
+
+    const headers = new Headers(upstream.mock.calls[0][1]?.headers);
+    expect(headers.get("x-forwarded-for")).toBe("2001:db8::9");
   });
 
   it("replaces secret-shaped IDs and returns the API's validated correlation ID", async () => {

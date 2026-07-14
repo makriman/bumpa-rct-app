@@ -63,6 +63,7 @@ secrets retain local defaults.
 - [Security model](docs/security.md)
 - [Privacy and retention policy](docs/privacy-retention-policy.md)
 - [Deployment](docs/deployment.md)
+- [Temporary web-only login](docs/temporary-web-login.md)
 - [Operations runbook](docs/runbook.md)
 - [Build-plan compliance ledger](docs/build-plan-compliance.md)
 - [Verification ledger](docs/verification.md)
@@ -129,3 +130,12 @@ contract-tested. The deployable provider-disabled mode remains available for saf
 infrastructure verification and never substitutes local mocks for a live provider.
 See the verification ledger for the distinction between implemented, canaried,
 and production-active capabilities.
+
+The current candidate adds an **implemented-tested, production-pending** temporary
+web-only login mode for approved mapped collaborators while WhatsApp is parked.
+It uses a country-aware phone entry flow and a shared six-digit pilot PIN behind a
+mandatory expiry, explicit kill switch, mapped-only eligibility, privacy-preserving
+rate limits and an API-only HMAC verifier secret. This paragraph is not live
+evidence: production remains on the exact release described above until a new
+immutable revision is promoted and verified. See
+[`docs/temporary-web-login.md`](docs/temporary-web-login.md).

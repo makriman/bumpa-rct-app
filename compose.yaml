@@ -17,6 +17,10 @@ x-app-environment: &app-environment
   CORS_ORIGINS: ${CORS_ORIGINS:-["http://bumpabestie.localhost:8080","http://admin.bumpabestie.localhost:8080","http://research.bumpabestie.localhost:8080"]}
   JWT_SECRET: ${JWT_SECRET:-local-only-change-me-at-least-32-characters}
   OTP_SECRET: ${OTP_SECRET:-local-only-change-me-at-least-32-characters}
+  AUTH_LOGIN_MODE: ${AUTH_LOGIN_MODE:-whatsapp_otp}
+  TEMPORARY_WEB_PIN_VERIFIER: ${TEMPORARY_WEB_PIN_VERIFIER:-}
+  TEMPORARY_WEB_PIN_VERIFIER_FILE: ${TEMPORARY_WEB_PIN_VERIFIER_FILE:-}
+  TEMPORARY_WEB_PIN_EXPIRES_AT: ${TEMPORARY_WEB_PIN_EXPIRES_AT:-}
   FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-local-only-change-me-at-least-32-characters}
   FIELD_ENCRYPTION_KEY_ID: ${FIELD_ENCRYPTION_KEY_ID:-primary}
   FIELD_ENCRYPTION_WRITE_VERSION: ${FIELD_ENCRYPTION_WRITE_VERSION:-v1}
@@ -223,7 +227,7 @@ services:
 
   api:
     <<: *api-service
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7", "--no-access-log"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
       interval: 10s

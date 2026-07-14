@@ -93,7 +93,7 @@ def create_app(*, settings_config: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=config.effective_cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Authorization",
             "Content-Type",
@@ -101,6 +101,7 @@ def create_app(*, settings_config: Settings | None = None) -> FastAPI:
             "Idempotency-Key",
             "X-Tenant-ID",
             "X-Correlation-ID",
+            "X-Access-Reason",
         ],
     )
 

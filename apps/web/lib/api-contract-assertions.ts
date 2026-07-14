@@ -10,6 +10,7 @@ import type {
   HermesCallError,
   McpAdminConnection,
   McpConnection,
+  PlatformAccess,
   PlatformAdmin,
   Report,
   TenantOnboarding,
@@ -27,6 +28,7 @@ type Assert<T extends true> = T;
 
 type ContractAssertions = [
   Assert<Compatible<PlatformAdmin, Schemas["PlatformAdminView"]>>,
+  Assert<Compatible<PlatformAccess, Schemas["PlatformAccessView"]>>,
   Assert<Compatible<TenantOnboarding, Schemas["OnboardingView"]>>,
   Assert<Compatible<TenantOperations, Schemas["TenantOperationsView"]>>,
   Assert<

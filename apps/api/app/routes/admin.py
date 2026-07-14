@@ -1,9 +1,9 @@
 import hashlib
-from typing import cast
+from typing import NoReturn, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -56,9 +56,12 @@ from app.schemas import (
     AsyncJobView,
     BumpaConnectionCreate,
     PhoneCreate,
+    PlatformAccessRole,
+    PlatformAccessView,
     PlatformAdminCreate,
     PlatformAdminRole,
     PlatformAdminView,
+    PlatformRoleName,
     TenantCreate,
     TenantUpdate,
     TenantUserCreate,
@@ -71,8 +74,126 @@ from app.services.admin_operations import (
     whatsapp_delivery_failures,
 )
 from app.services.audit import audit
+from app.services.platform_access import (
+    PlatformAccessConflict,
+    PlatformAccessTargetInactive,
+    PlatformAccessTargetNotFound,
+    PlatformAccessTargetUnmapped,
+    ProtectedSuperadmin,
+)
+from app.services.platform_access import (
+    grant_platform_access as grant_access_role,
+)
+from app.services.platform_access import (
+    revoke_platform_access as revoke_access_role,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/platform-access", response_model=list[PlatformAccessView])
+def list_platform_access(
+    _principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> list[PlatformAccessView]:
+    """List mapped collaborators and current platform-role holders."""
+
+    mapped_collaborator = exists(
+        select(PhoneIdentity.id)
+        .join(
+            TenantMembership,
+            (TenantMembership.tenant_id == PhoneIdentity.tenant_id)
+            & (TenantMembership.user_id == PhoneIdentity.user_id),
+        )
+        .join(Tenant, Tenant.id == PhoneIdentity.tenant_id)
+        .where(
+            PhoneIdentity.user_id == User.id,
+            PhoneIdentity.phone_e164 == User.primary_phone_e164,
+            PhoneIdentity.status == "approved",
+            PhoneIdentity.opt_out.is_(False),
+            TenantMembership.status == "active",
+            Tenant.status == "active",
+        )
+    )
+    role_holder = exists(select(PlatformRole.id).where(PlatformRole.user_id == User.id))
+    users = db.scalars(
+        select(User)
+        .where(or_(mapped_collaborator, role_holder))
+        .order_by(User.created_at.asc(), User.id.asc())
+    ).all()
+    roles_by_user = _platform_access_roles(db, [user.id for user in users])
+    mapped_user_ids = _active_mapped_user_ids(db, [user.id for user in users])
+    return [
+        _platform_access_view(
+            user,
+            roles_by_user.get(user.id, []),
+            has_active_mapping=user.id in mapped_user_ids,
+        )
+        for user in users
+    ]
+
+
+@router.put("/platform-access/{user_id}/{role}", response_model=PlatformAccessView)
+def grant_platform_access(
+    user_id: str,
+    role: PlatformAccessRole,
+    principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PlatformAccessView:
+    """Idempotently grant operator or researcher access to an existing user."""
+
+    try:
+        result = grant_access_role(
+            db,
+            actor_user_id=principal.user.id,
+            user_id=user_id,
+            role=role,
+            require_mapped_collaborator=settings.auth_login_mode == "temporary_static_pin",
+        )
+        db.commit()
+    except (
+        PlatformAccessTargetNotFound,
+        PlatformAccessTargetInactive,
+        PlatformAccessTargetUnmapped,
+        ProtectedSuperadmin,
+        PlatformAccessConflict,
+    ) as exc:
+        db.rollback()
+        _raise_platform_access_error(exc)
+    roles = _platform_access_roles(db, [result.user.id]).get(result.user.id, [])
+    return _platform_access_view(
+        result.user,
+        roles,
+        has_active_mapping=result.user.id in _active_mapped_user_ids(db, [result.user.id]),
+    )
+
+
+@router.delete("/platform-access/{user_id}/{role}", status_code=204)
+def revoke_platform_access_role(
+    user_id: str,
+    role: PlatformAccessRole,
+    principal: Principal = Depends(require_superadmin),
+    db: Session = Depends(get_db),
+) -> None:
+    """Idempotently revoke operator or researcher access from an existing user."""
+
+    try:
+        revoke_access_role(
+            db,
+            actor_user_id=principal.user.id,
+            user_id=user_id,
+            role=role,
+        )
+        db.commit()
+    except (
+        PlatformAccessTargetNotFound,
+        PlatformAccessTargetInactive,
+        ProtectedSuperadmin,
+        PlatformAccessConflict,
+    ) as exc:
+        db.rollback()
+        _raise_platform_access_error(exc)
 
 
 @router.get("/platform-admins", response_model=list[PlatformAdminView])
@@ -98,6 +219,7 @@ def grant_platform_admin(
     payload: PlatformAdminCreate,
     principal: Principal = Depends(require_superadmin),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> PlatformAdminView:
     """Grant operator access; only a superadministrator may call this endpoint."""
 
@@ -106,6 +228,8 @@ def grant_platform_admin(
         user = db.scalar(select(User).where(User.primary_phone_e164 == phone))
         created_user = False
         if user is None:
+            if settings.auth_login_mode == "temporary_static_pin":
+                raise PlatformAccessTargetUnmapped
             user = User(name=payload.name, primary_phone_e164=phone, status="active")
             db.add(user)
             # The unique phone constraint is the final authority when two
@@ -115,32 +239,28 @@ def grant_platform_admin(
         elif user.status != "active":
             raise HTTPException(status_code=409, detail="User is not active")
 
-        existing = db.scalar(
-            select(PlatformRole).where(
-                PlatformRole.user_id == user.id,
-                PlatformRole.role == "operator",
-            )
-        )
-        if existing is not None:
-            raise HTTPException(status_code=409, detail="User is already a platform administrator")
-
-        role = PlatformRole(user_id=user.id, role="operator")
-        db.add(role)
-        # Keep the role uniqueness race inside the same stable conflict
-        # boundary as user creation.
-        db.flush()
-        audit(
+        result = grant_access_role(
             db,
             actor_user_id=principal.user.id,
-            action="platform.operator.granted",
-            resource_type="platform_role",
-            resource_id=role.id,
-            after={"user_id": user.id, "role": "operator", "user_created": created_user},
+            user_id=user.id,
+            role="operator",
+            user_created=created_user,
+            require_mapped_collaborator=settings.auth_login_mode == "temporary_static_pin",
         )
+        if not result.changed:
+            raise HTTPException(status_code=409, detail="User is already a platform administrator")
         db.commit()
-    except IntegrityError as exc:
+    except (IntegrityError, PlatformAccessConflict) as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Platform administrator conflict") from exc
+    except (
+        PlatformAccessTargetNotFound,
+        PlatformAccessTargetInactive,
+        PlatformAccessTargetUnmapped,
+        ProtectedSuperadmin,
+    ) as exc:
+        db.rollback()
+        _raise_platform_access_error(exc)
     roles = _admin_roles(db, [user.id]).get(user.id, [])
     return _platform_admin_view(user, roles)
 
@@ -187,17 +307,22 @@ def revoke_platform_admin(
             status_code=409, detail="The last active platform administrator cannot be revoked"
         )
 
-    role_id = role.id
-    db.delete(role)
-    audit(
-        db,
-        actor_user_id=principal.user.id,
-        action="platform.operator.revoked",
-        resource_type="platform_role",
-        resource_id=role_id,
-        before={"user_id": user_id, "role": "operator"},
-    )
-    db.commit()
+    try:
+        revoke_access_role(
+            db,
+            actor_user_id=principal.user.id,
+            user_id=user_id,
+            role="operator",
+        )
+        db.commit()
+    except (
+        PlatformAccessTargetNotFound,
+        PlatformAccessTargetInactive,
+        ProtectedSuperadmin,
+        PlatformAccessConflict,
+    ) as exc:
+        db.rollback()
+        _raise_platform_access_error(exc)
 
 
 @router.get("/tenants")
@@ -958,6 +1083,51 @@ def _admin_roles(db: Session, user_ids: list[str]) -> dict[str, list[PlatformAdm
     return result
 
 
+def _platform_access_roles(db: Session, user_ids: list[str]) -> dict[str, list[PlatformRoleName]]:
+    if not user_ids:
+        return {}
+    rows = db.execute(
+        select(PlatformRole.user_id, PlatformRole.role).where(
+            PlatformRole.user_id.in_(user_ids),
+            PlatformRole.role.in_(("operator", "researcher", "superadmin")),
+        )
+    ).all()
+    result: dict[str, list[PlatformRoleName]] = {}
+    for user_id, role in rows:
+        result.setdefault(user_id, []).append(cast(PlatformRoleName, role))
+    order = {"superadmin": 0, "operator": 1, "researcher": 2}
+    for roles in result.values():
+        roles.sort(key=lambda value: order[value])
+    return result
+
+
+def _active_mapped_user_ids(db: Session, user_ids: list[str]) -> set[str]:
+    if not user_ids:
+        return set()
+    return set(
+        db.scalars(
+            select(User.id)
+            .join(PhoneIdentity, PhoneIdentity.user_id == User.id)
+            .join(
+                TenantMembership,
+                (TenantMembership.tenant_id == PhoneIdentity.tenant_id)
+                & (TenantMembership.user_id == PhoneIdentity.user_id),
+            )
+            .join(Tenant, Tenant.id == PhoneIdentity.tenant_id)
+            .where(
+                User.id.in_(user_ids),
+                User.status == "active",
+                PhoneIdentity.phone_e164 == User.primary_phone_e164,
+                PhoneIdentity.status == "approved",
+                PhoneIdentity.opt_out.is_(False),
+                TenantMembership.status == "active",
+                Tenant.status == "active",
+            )
+            .distinct()
+        ).all()
+    )
+
+
 def _platform_admin_view(user: User, roles: list[PlatformAdminRole]) -> PlatformAdminView:
     return PlatformAdminView(
         user_id=user.id,
@@ -967,6 +1137,40 @@ def _platform_admin_view(user: User, roles: list[PlatformAdminRole]) -> Platform
         platform_roles=roles,
         created_at=user.created_at,
     )
+
+
+def _platform_access_view(
+    user: User,
+    roles: list[PlatformRoleName],
+    *,
+    has_active_mapping: bool,
+) -> PlatformAccessView:
+    return PlatformAccessView(
+        user_id=user.id,
+        name=user.name,
+        phone_e164=user.primary_phone_e164,
+        status=user.status,
+        has_active_mapping=has_active_mapping,
+        platform_roles=roles,
+        created_at=user.created_at,
+    )
+
+
+def _raise_platform_access_error(exc: Exception) -> NoReturn:
+    if isinstance(exc, PlatformAccessTargetNotFound):
+        raise HTTPException(status_code=404, detail="Platform access target not found") from exc
+    if isinstance(exc, PlatformAccessTargetInactive):
+        raise HTTPException(status_code=409, detail="User is not active") from exc
+    if isinstance(exc, PlatformAccessTargetUnmapped):
+        raise HTTPException(
+            status_code=409,
+            detail="Map this collaborator to an active workspace before granting platform access",
+        ) from exc
+    if isinstance(exc, ProtectedSuperadmin):
+        raise HTTPException(
+            status_code=409, detail="Superadministrator access is protected"
+        ) from exc
+    raise HTTPException(status_code=409, detail="Platform access conflict") from exc
 
 
 def _tenant_view(tenant: Tenant) -> dict:

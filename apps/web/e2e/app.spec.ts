@@ -23,16 +23,51 @@ test("public lander presents the product and reaches login", async ({
   ).toBeVisible();
 });
 
-test("OTP login reaches live SME chat through the browser BFF", async ({
+test("temporary web PIN login reaches live SME chat through the browser BFF", async ({
   page,
 }) => {
+  let releaseRequest: (() => void) | undefined;
+  const requestGate = new Promise<void>((resolve) => {
+    releaseRequest = resolve;
+  });
+  let markRequestObserved: (() => void) | undefined;
+  const requestObserved = new Promise<void>((resolve) => {
+    markRequestObserved = resolve;
+  });
+  let releaseVerification: (() => void) | undefined;
+  const verificationGate = new Promise<void>((resolve) => {
+    releaseVerification = resolve;
+  });
+  let markVerificationObserved: (() => void) | undefined;
+  const verificationObserved = new Promise<void>((resolve) => {
+    markVerificationObserved = resolve;
+  });
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (path === "/api/backend/auth/request-otp") {
-      await json(route, { message: "Code sent", dev_code: "246810" }, 202);
+      expect(route.request().postDataJSON()).toEqual({
+        phone_e164: "+12025550123",
+      });
+      markRequestObserved?.();
+      await requestGate;
+      await json(
+        route,
+        {
+          delivery: "web_pin",
+          expires_in_seconds: 600,
+          dev_code: null,
+        },
+        202,
+      );
       return;
     }
     if (path === "/api/backend/auth/verify-otp") {
+      expect(route.request().postDataJSON()).toEqual({
+        phone_e164: "+12025550123",
+        code: "246810",
+      });
+      markVerificationObserved?.();
+      await verificationGate;
       await json(route, { message: "Verified" });
       return;
     }
@@ -48,23 +83,68 @@ test("OTP login reaches live SME chat through the browser BFF", async ({
   });
 
   await page.goto("/login");
-  await page
-    .getByRole("textbox", { name: "WhatsApp phone number" })
-    .fill("+15550102716");
-  await page.getByRole("button", { name: "Send WhatsApp code" }).click();
+  await page.getByLabel("Country or region").selectOption("US");
+  await page.getByLabel("Mobile number").fill("202 555 0123");
+  const submitButton = page.locator(".auth-submit");
+  const continueClick = submitButton.click();
+  await requestObserved;
+  await expect(submitButton).toHaveText("Checking number…");
+  await expect(submitButton).toBeDisabled();
+  releaseRequest?.();
+  await continueClick;
   await expect(
-    page.getByRole("heading", { name: "Check WhatsApp." }),
+    page.getByRole("heading", { name: "Enter your web PIN." }),
   ).toBeVisible();
-  await expect(page.getByText("Local API code:")).toContainText("246810");
-  for (const [index, digit] of [..."246810"].entries()) {
-    await page.getByRole("textbox", { name: `Digit ${index + 1}` }).fill(digit);
-  }
-  await page.getByRole("button", { name: "Verify and sign in" }).click();
+  await expect(page.getByText(/no WhatsApp message was sent/i)).toBeVisible();
+  await page.getByLabel("Six-digit web PIN").fill("246810");
+  const signInClick = submitButton.click();
+  await verificationObserved;
+  await expect(submitButton).toHaveText("Signing in…");
+  await expect(submitButton).toBeDisabled();
+  releaseVerification?.();
+  await signInClick;
   await expect(page).toHaveURL(/\/chat$/);
   await expect(page.getByText("Tenant API", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "Message Bumpa Bestie" }),
   ).toBeVisible();
+});
+
+test("country-aware sign-in validates input and normalizes UK and India numbers", async ({
+  page,
+}) => {
+  const requestedPhones: string[] = [];
+  await page.route("**/api/backend/auth/request-otp", async (route) => {
+    requestedPhones.push(route.request().postDataJSON().phone_e164 as string);
+    await json(
+      route,
+      { delivery: "web_pin", expires_in_seconds: 600, dev_code: null },
+      202,
+    );
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("Mobile number").fill("+44 7400 123456");
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await expect(page.locator("#login-error")).toContainText(
+    "Enter only the number after +44.",
+  );
+  expect(requestedPhones).toEqual([]);
+
+  await page.getByLabel("Mobile number").fill("07400 123456");
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your web PIN." }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Change number" }).click();
+
+  await page.getByLabel("Country or region").selectOption("IN");
+  await page.getByLabel("Mobile number").fill("98765 43210");
+  await page.getByRole("button", { name: "Continue securely" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Enter your web PIN." }),
+  ).toBeVisible();
+  expect(requestedPhones).toEqual(["+447400123456", "+919876543210"]);
 });
 
 test("protected user, admin, and research surfaces fail closed without authorization", async ({

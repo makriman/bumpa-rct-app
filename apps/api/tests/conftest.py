@@ -20,6 +20,7 @@ os.environ.update(
         "ARTIFACT_ROOT": str(TEST_ROOT / "exports"),
         "SEED_DEMO_DATA": "true",
         "EXPOSE_LOCAL_OTP": "true",
+        "AUTH_LOGIN_MODE": "whatsapp_otp",
         "LOCAL_OTP_CODE": "246810",
     }
 )

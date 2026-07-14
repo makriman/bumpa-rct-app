@@ -263,6 +263,50 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/admin/platform-access": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List Platform Access
+     * @description List mapped collaborators and current platform-role holders.
+     */
+    get: operations["list_platform_access_v1_admin_platform_access_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/admin/platform-access/{user_id}/{role}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Grant Platform Access
+     * @description Idempotently grant operator or researcher access to an existing user.
+     */
+    put: operations["grant_platform_access_v1_admin_platform_access__user_id___role__put"];
+    post?: never;
+    /**
+     * Revoke Platform Access Role
+     * @description Idempotently revoke operator or researcher access from an existing user.
+     */
+    delete: operations["revoke_platform_access_role_v1_admin_platform_access__user_id___role__delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/admin/platform-admins": {
     parameters: {
       query?: never;
@@ -2003,6 +2047,12 @@ export interface components {
     };
     /** OtpRequested */
     OtpRequested: {
+      /**
+       * Delivery
+       * @default whatsapp
+       * @enum {string}
+       */
+      delivery: "whatsapp" | "web_pin";
       /** Dev Code */
       dev_code?: string | null;
       /** Expires In Seconds */
@@ -2010,9 +2060,9 @@ export interface components {
       /**
        * Status
        * @default sent
-       * @constant
+       * @enum {string}
        */
-      status: "sent";
+      status: "sent" | "accepted";
     };
     /** OtpVerify */
     OtpVerify: {
@@ -2027,6 +2077,26 @@ export interface components {
       label?: string | null;
       /** Phone E164 */
       phone_e164: string;
+      /** User Id */
+      user_id: string;
+    };
+    /** PlatformAccessView */
+    PlatformAccessView: {
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string;
+      /** Has Active Mapping */
+      has_active_mapping: boolean;
+      /** Name */
+      name: string | null;
+      /** Phone E164 */
+      phone_e164: string;
+      /** Platform Roles */
+      platform_roles: ("operator" | "researcher" | "superadmin")[];
+      /** Status */
+      status: string;
       /** User Id */
       user_id: string;
     };
@@ -2969,6 +3039,112 @@ export interface operations {
         content: {
           "application/json": components["schemas"]["OnboardingView"];
         };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  list_platform_access_v1_admin_platform_access_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PlatformAccessView"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  grant_platform_access_v1_admin_platform_access__user_id___role__put: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        user_id: string;
+        role: "operator" | "researcher";
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PlatformAccessView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  revoke_platform_access_role_v1_admin_platform_access__user_id___role__delete: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        user_id: string;
+        role: "operator" | "researcher";
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
       /** @description Validation Error */
       422: {
