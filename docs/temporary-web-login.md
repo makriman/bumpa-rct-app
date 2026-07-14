@@ -73,9 +73,14 @@ The raw PIN is never written by the script. Each rotation is a new root-owned
 directories are root-owned `0700`. The random 32-hex filename is a non-secret
 version identifier, never a verifier, hash or PIN. The files are separate from
 the deploy-user-owned Meta and Hermes `SECRETS_DIR`. Before deployment, the non-root
-coordinator asks Docker to validate the verifier through the already-pulled exact
-API image with no network, a read-only root filesystem, no capabilities and
-`no-new-privileges`; the validation command never emits the verifier. A separate
+coordinator invokes the fixed root-owned
+`/usr/local/sbin/bumpabestie-validate-temporary-auth-secret` helper through one
+non-interactive sudoers command. The helper, never the mutable checkout copy,
+validates canonical path components, root ownership, private modes, single-link
+regular-file shape and exact content. It then asks Docker to mount only that exact
+file into the already-pulled API image with no network, a read-only root filesystem,
+no capabilities and `no-new-privileges`; the validation command never emits the
+verifier. A separate
 networkless one-shot initializer copies it into a dedicated runtime volume as an
 API-readable `0400` file. Web, worker, scheduler, Hermes and browser processes do
 not receive that verifier. The API recomputes the candidate HMAC and compares it
@@ -87,6 +92,12 @@ application services, ordinary host processes and accidental direct reads; it is
 not a security boundary against a malicious deployment operator. That operator
 also controls the release and reads `OTP_SECRET`, so production access to the
 account and its SSH key must be treated as privileged root access.
+
+The sudoers rule authorizes only the fixed installed helper. The helper requires
+exactly three non-secret arguments, accepts only explicit login modes, one fixed
+legacy path or the immutable versioned path, and an exact image digest. It never
+sources `.env.production`. Bootstrap validates the rule with `visudo`, installs it
+root-owned at mode `0440`, and installs the helper root-owned at mode `0755`.
 
 From the checked-out production repository, provision or rotate the verifier as
 root:

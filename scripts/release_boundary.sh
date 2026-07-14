@@ -10,7 +10,7 @@ release_file_mode() {
 }
 
 temporary_verifier_host_path_is_legacy() {
-  [[ "$1" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]]
+  [[ "$1" == "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" ]]
 }
 
 temporary_verifier_host_path_is_versioned() {
@@ -106,7 +106,7 @@ load_release_boundary() {
           .temporary_web_pin_verifier_file ==
             "/run/auth-secret/temporary_web_pin_verifier" and
           (.temporary_web_pin_verifier_file_host |
-            test("^/var/lib/([A-Za-z0-9._-]+/temporary_web_pin_verifier|bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32})$")) and
+            test("^/var/lib/bumpabestie-auth-secret/(temporary_web_pin_verifier|temporary-web-pin-verifiers/[a-f0-9]{32})$")) and
           (.temporary_web_pin_expires_at |
             test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"))
         else

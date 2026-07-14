@@ -25,7 +25,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
-apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 unattended-upgrades ufw util-linux
+apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 sudo unattended-upgrades ufw util-linux
 
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -45,6 +45,18 @@ install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie
 if [[ -n "$ROOT_DIR" && -f "$ROOT_DIR/infra/bin/bumpabestie-promote" ]]; then
   install -m 0755 -o root -g root \
     "$ROOT_DIR/infra/bin/bumpabestie-promote" /usr/local/sbin/bumpabestie-promote
+fi
+if [[ -n "$ROOT_DIR" \
+  && -f "$ROOT_DIR/scripts/validate_temporary_auth_secret.sh" \
+  && -f "$ROOT_DIR/infra/sudoers/bumpabestie-temporary-auth-secret" ]]; then
+  install -m 0755 -o root -g root \
+    "$ROOT_DIR/scripts/validate_temporary_auth_secret.sh" \
+    /usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+  visudo -cf "$ROOT_DIR/infra/sudoers/bumpabestie-temporary-auth-secret" >/dev/null
+  install -m 0440 -o root -g root \
+    "$ROOT_DIR/infra/sudoers/bumpabestie-temporary-auth-secret" \
+    /etc/sudoers.d/bumpabestie-temporary-auth-secret
+  visudo -cf /etc/sudoers.d/bumpabestie-temporary-auth-secret >/dev/null
 fi
 if [[ -f /root/.ssh/authorized_keys ]]; then
   install -d -m 0700 -o bumpabestie -g bumpabestie /home/bumpabestie/.ssh

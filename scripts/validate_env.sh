@@ -240,7 +240,7 @@ for old_id, secret in old_keys.items():
     failed=1
   }
   if [[ "$auth_login_mode" == "temporary_static_pin" ]] \
-    && [[ ! "$temporary_web_pin_verifier_file_host" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]] \
+    && [[ "$temporary_web_pin_verifier_file_host" != "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" ]] \
     && [[ ! "$temporary_web_pin_verifier_file_host" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]; then
     echo "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST must select a supported private verifier path" >&2
     failed=1

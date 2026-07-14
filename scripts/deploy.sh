@@ -703,7 +703,16 @@ verify_image_revision "$CADDY_IMAGE" "$infra_commit" caddy
 verify_image_revision "$POSTGRES_IMAGE" "$infra_commit" postgres
 verify_image_revision "$BACKUP_IMAGE" "$infra_commit" backup
 verify_image_revision "$HERMES_IMAGE" "$deploy_commit" hermes
-./scripts/validate_temporary_auth_secret.sh \
+auth_validator=/usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+if [[ ! -f "$auth_validator" || -L "$auth_validator" ]] \
+  || [[ "$(stat -c '%u:%g:%a' "$auth_validator")" != "0:0:755" ]] \
+  || ! cmp -s \
+  scripts/validate_temporary_auth_secret.sh \
+  "$auth_validator"; then
+  echo "Installed temporary-auth validator does not match the target release" >&2
+  exit 1
+fi
+sudo -n /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
   "$AUTH_LOGIN_MODE" "$TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$API_IMAGE"
 
 target_pg_version="$(docker run --rm --entrypoint postgres "$POSTGRES_IMAGE" --version)"

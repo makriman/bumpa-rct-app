@@ -33,8 +33,11 @@ whatsapp_auth_env="$(mktemp)"
 versioned_auth_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
 hermes_health_probe="$(mktemp -d)"
-auth_secret_contract_name="bumpabestie-auth-secret-test-$$"
-auth_secret_contract_dir="/var/lib/$auth_secret_contract_name"
+auth_secret_contract_name="bumpabestie-auth-secret"
+auth_secret_contract_token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+auth_secret_contract_root="/var/lib/$auth_secret_contract_name"
+auth_secret_contract_dir="$auth_secret_contract_root/temporary-web-pin-verifiers"
+auth_secret_contract_file="$auth_secret_contract_dir/$auth_secret_contract_token"
 auth_secret_runtime_image='python@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df'
 auth_secret_init_volume="bumpabestie-auth-secret-init-contract-$$"
 auth_secret_malformed_volume="$auth_secret_init_volume-malformed"
@@ -43,14 +46,33 @@ backup_init_volume="bumpabestie-backup-init-contract-$$"
 offsite_env="$(mktemp)"
 offsite_hook="$(mktemp)"
 offsite_marker="$(mktemp)"
+auth_secret_fixture_created=0
+auth_helper_contract_user_created=0
+auth_helper_contract_installed=0
 cleanup() {
-  docker run --rm --network none --read-only \
-    --cap-drop ALL --cap-add DAC_OVERRIDE \
-    --security-opt no-new-privileges:true \
-    --mount type=bind,source=/var/lib,target=/host-var-lib \
-    --entrypoint sh "$auth_secret_runtime_image" \
-    -c 'rm -rf "/host-var-lib/$1"' cleanup "$auth_secret_contract_name" \
-    >/dev/null 2>&1 || true
+  if ((auth_helper_contract_installed)); then
+    sudo rm -f \
+      /etc/sudoers.d/bumpabestie-temporary-auth-secret \
+      /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
+      >/dev/null 2>&1 || true
+  fi
+  if ((auth_helper_contract_user_created)); then
+    sudo userdel --remove bumpabestie >/dev/null 2>&1 || true
+  fi
+  if ((auth_secret_fixture_created)); then
+    docker run --rm --network none --read-only \
+      --cap-drop ALL --cap-add DAC_OVERRIDE \
+      --security-opt no-new-privileges:true \
+      --mount type=bind,source=/var/lib,target=/host-var-lib \
+      --entrypoint sh "$auth_secret_runtime_image" \
+      -eu -c '
+        verifier="/host-var-lib/$1/temporary-web-pin-verifiers/$2"
+        rm -f -- "$verifier"
+        rmdir -- "/host-var-lib/$1/temporary-web-pin-verifiers"
+        rmdir -- "/host-var-lib/$1"
+      ' cleanup "$auth_secret_contract_name" "$auth_secret_contract_token" \
+      >/dev/null 2>&1 || true
+  fi
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
     "$versioned_auth_env" \
@@ -244,21 +266,98 @@ if docker run --rm --network none --read-only \
     --security-opt no-new-privileges:true \
     --mount type=bind,source=/var/lib,target=/host-var-lib \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      directory="/host-var-lib/$1"
-      mkdir "$directory"
-      printf "%064d\n" 0 > "$directory/temporary_web_pin_verifier"
-      chown -R 0:0 "$directory"
-      chmod 0700 "$directory"
-      chmod 0600 "$directory/temporary_web_pin_verifier"
-    ' fixture "$auth_secret_contract_name" >/dev/null 2>&1 \
-  && [[ "$(stat -c '%u:%g' "$auth_secret_contract_dir" 2>/dev/null || true)" == "0:0" ]]; then
+      complete=0
+      root="/host-var-lib/$1"
+      versions="$root/temporary-web-pin-verifiers"
+      verifier="$versions/$2"
+      cleanup_partial() {
+        if test "$complete" != 1; then
+          rm -f -- "$verifier"
+          rmdir -- "$versions" 2>/dev/null || true
+          rmdir -- "$root" 2>/dev/null || true
+        fi
+      }
+      trap cleanup_partial EXIT
+      test ! -e "$root"
+      test ! -L "$root"
+      mkdir -m 0700 "$root"
+      chown 0:0 "$root"
+      mkdir -m 0700 "$versions"
+      chown 0:0 "$versions"
+      test ! -e "$verifier"
+      test ! -L "$verifier"
+      (umask 077; set -C; printf "%064d\n" 0 > "$verifier")
+      chown 0:0 "$verifier"
+      chmod 0600 "$verifier"
+      test "$(stat -c %u:%g:%a:%h "$verifier")" = 0:0:600:1
+      complete=1
+    ' fixture "$auth_secret_contract_name" "$auth_secret_contract_token" >/dev/null 2>&1; then
+  auth_secret_fixture_created=1
   auth_secret_fixture_supported=1
 fi
+if ((auth_secret_fixture_supported && EUID != 0)) \
+  && [[ "${CI:-}" == "true" ]]; then
+  command -v sudo >/dev/null 2>&1
+  command -v visudo >/dev/null 2>&1
+  getent group docker >/dev/null
+  if id -u bumpabestie >/dev/null 2>&1; then
+    echo "Installed-helper contract requires an isolated bumpabestie account" >&2
+    exit 1
+  fi
+  sudo test ! -e /usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+  sudo test ! -e /etc/sudoers.d/bumpabestie-temporary-auth-secret
+  sudo useradd --create-home --shell /bin/bash --groups docker bumpabestie
+  auth_helper_contract_user_created=1
+  if sudo -u bumpabestie -H sudo -n \
+      /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
+      disabled '' "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary-auth helper unexpectedly ran before installation" >&2
+    exit 1
+  fi
+  sudo install -m 0755 -o root -g root \
+    scripts/validate_temporary_auth_secret.sh \
+    /usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+  auth_helper_contract_installed=1
+  if sudo -u bumpabestie -H sudo -n \
+      /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
+      disabled '' "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary-auth helper ran without its narrow sudoers policy" >&2
+    exit 1
+  fi
+  sudo visudo -cf infra/sudoers/bumpabestie-temporary-auth-secret >/dev/null
+  sudo install -m 0440 -o root -g root \
+    infra/sudoers/bumpabestie-temporary-auth-secret \
+    /etc/sudoers.d/bumpabestie-temporary-auth-secret
+  sudo visudo -cf /etc/sudoers.d/bumpabestie-temporary-auth-secret >/dev/null
+  test "$(sudo stat -c '%U:%G:%a' \
+    /usr/local/sbin/bumpabestie-validate-temporary-auth-secret)" = root:root:755
+  test "$(sudo stat -c '%U:%G:%a' \
+    /etc/sudoers.d/bumpabestie-temporary-auth-secret)" = root:root:440
+  if sudo -u bumpabestie -H sudo -n \
+      "$ROOT_DIR/scripts/validate_temporary_auth_secret.sh" \
+      disabled '' "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Sudoers policy elevated the mutable checkout validator" >&2
+    exit 1
+  fi
+  sudo -u bumpabestie -H sudo -n \
+    /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
+    disabled '' "$auth_secret_runtime_image"
+  sudo -u bumpabestie -H sudo -n \
+    /usr/local/sbin/bumpabestie-validate-temporary-auth-secret \
+    temporary_static_pin "$auth_secret_contract_file" \
+    "$auth_secret_runtime_image"
+fi
 if ((auth_secret_fixture_supported && EUID != 0)); then
+  if ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_file" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Mutable checkout validator crossed the root-only verifier boundary" >&2
+    exit 1
+  fi
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    # The production validator is a root-only deployment preflight. Run the
-    # Linux host-bind fixture at the same privilege boundary so its deliberate
-    # 0700 directory and 0600 file remain inaccessible to the CI runner.
+    # The installed-policy harness above proves the production crossing. These
+    # calls exercise the helper implementation's root-only negative matrix.
     auth_secret_validator_prefix=(sudo -n)
   else
     auth_secret_fixture_supported=0
@@ -266,8 +365,32 @@ if ((auth_secret_fixture_supported && EUID != 0)); then
 fi
 if ((auth_secret_fixture_supported)); then
   "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+    disabled '' "$auth_secret_runtime_image"
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+      disabled "$auth_secret_contract_file" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Disabled authentication accepted a verifier host path" >&2
+    exit 1
+  fi
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+      invalid '' "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted an invalid login mode" >&2
+    exit 1
+  fi
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin /var/lib/../temporary_web_pin_verifier \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a non-canonical host path" >&2
+    exit 1
+  fi
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+      disabled '' 'python:latest' >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a mutable API image" >&2
+    exit 1
+  fi
+  "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
     temporary_static_pin \
-    "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+    "$auth_secret_contract_file" \
     "$auth_secret_runtime_image"
 
   # Exercise the exact rollback transition: populate the runtime volume in
@@ -281,7 +404,7 @@ if ((auth_secret_fixture_supported)); then
     --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
     --volume "$auth_secret_init_volume:/runtime-auth-secret" \
     --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
-    --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+    --mount type=bind,source="$auth_secret_contract_file",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
     --entrypoint /usr/local/bin/init-auth-secret \
     "$auth_secret_runtime_image"
   docker run --rm --network none --read-only \
@@ -323,12 +446,12 @@ if ((auth_secret_fixture_supported)); then
   # containing directory into the isolated validation runtime.
   "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
     temporary_static_pin \
-    "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+    "$auth_secret_contract_file" \
     "$auth_secret_runtime_image"
   docker run --rm --pull never \
     --network none --read-only --user 0:0 \
     --cap-drop ALL --security-opt no-new-privileges:true \
-    --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/temporary-auth-secret/temporary_web_pin_verifier,readonly \
+    --mount type=bind,source="$auth_secret_contract_file",target=/run/temporary-auth-secret/temporary_web_pin_verifier,readonly \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
       test -f /run/temporary-auth-secret/temporary_web_pin_verifier
       test ! -e /run/temporary-auth-secret/unexpected-entry
@@ -344,12 +467,12 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      mv /fixture/temporary_web_pin_verifier /fixture/verifier-target
-      ln -s verifier-target /fixture/temporary_web_pin_verifier
-    '
+      mv "/fixture/$1" /fixture/verifier-target
+      ln -s verifier-target "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted a symlinked verifier" >&2
     exit 1
@@ -359,19 +482,38 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      rm /fixture/temporary_web_pin_verifier
-      mv /fixture/verifier-target /fixture/temporary_web_pin_verifier
-    '
+      rm "/fixture/$1"
+      mv /fixture/verifier-target "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
+
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint ln "$auth_secret_runtime_image" \
+    "/fixture/$auth_secret_contract_token" /fixture/verifier-hardlink
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+      temporary_static_pin \
+      "$auth_secret_contract_file" \
+      "$auth_secret_runtime_image" >/dev/null 2>&1; then
+    echo "Temporary web PIN preflight accepted a multiply-linked verifier" >&2
+    exit 1
+  fi
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_OVERRIDE \
+    --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
+    --entrypoint rm "$auth_secret_runtime_image" /fixture/verifier-hardlink
 
   docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add FOWNER \
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint chmod "$auth_secret_runtime_image" 0644 \
-    /fixture/temporary_web_pin_verifier
+    "/fixture/$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted a world-readable verifier" >&2
     exit 1
@@ -382,12 +524,12 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      chown 1:1 /fixture/temporary_web_pin_verifier
-      chmod 0600 /fixture/temporary_web_pin_verifier
-    '
+      chown 1:1 "/fixture/$1"
+      chmod 0600 "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted a non-root-owned verifier" >&2
     exit 1
@@ -398,13 +540,13 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      printf "%s\n" invalid > /fixture/temporary_web_pin_verifier
-      chown 0:0 /fixture/temporary_web_pin_verifier
-      chmod 0600 /fixture/temporary_web_pin_verifier
-    '
+      printf "%s\n" invalid > "/fixture/$1"
+      chown 0:0 "/fixture/$1"
+      chmod 0600 "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted malformed verifier content" >&2
     exit 1
@@ -415,13 +557,13 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      { printf "%064d\n" 0; printf trailing; } > /fixture/temporary_web_pin_verifier
-      chown 0:0 /fixture/temporary_web_pin_verifier
-      chmod 0600 /fixture/temporary_web_pin_verifier
-    '
+      { printf "%064d\n" 0; printf trailing; } > "/fixture/$1"
+      chown 0:0 "/fixture/$1"
+      chmod 0600 "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted trailing verifier data" >&2
     exit 1
@@ -432,13 +574,13 @@ if ((auth_secret_fixture_supported)); then
     --security-opt no-new-privileges:true \
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c '
-      { printf "\\n"; printf "%064d" 0; } > /fixture/temporary_web_pin_verifier
-      chown 0:0 /fixture/temporary_web_pin_verifier
-      chmod 0600 /fixture/temporary_web_pin_verifier
-    '
+      { printf "\\n"; printf "%064d" 0; } > "/fixture/$1"
+      chown 0:0 "/fixture/$1"
+      chmod 0600 "/fixture/$1"
+    ' fixture "$auth_secret_contract_token"
   if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+      "$auth_secret_contract_file" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Temporary web PIN preflight accepted a leading newline without a final newline" >&2
     exit 1
@@ -458,7 +600,7 @@ if ((auth_secret_fixture_supported)); then
       --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
       --volume "$auth_secret_malformed_volume:/runtime-auth-secret" \
       --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
-      --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+      --mount type=bind,source="$auth_secret_contract_file",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
       --entrypoint /usr/local/bin/init-auth-secret \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
     echo "Auth-secret initializer accepted a leading newline without a final newline" >&2
@@ -475,6 +617,10 @@ fi
 grep -Fq 'AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE' scripts/deploy.sh
 grep -Fq 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST TEMPORARY_WEB_PIN_EXPIRES_AT' scripts/deploy.sh
 grep -Fq 'docker image inspect "$api_image"' scripts/validate_temporary_auth_secret.sh
+grep -Fq 'if ((EUID != 0)); then' scripts/validate_temporary_auth_secret.sh
+grep -Fq 'canonical_verifier_path="$(readlink -f -- "$verifier_path"' \
+  scripts/validate_temporary_auth_secret.sh
+grep -Fq 'verifier_links="$(stat -c '\''%h'\''' scripts/validate_temporary_auth_secret.sh
 for isolated_flag in \
   '--pull never' '--network none' '--read-only' '--user 0:0' \
   '--cap-drop ALL' '--security-opt no-new-privileges:true'; do
@@ -904,8 +1050,9 @@ docker run --rm --network none --read-only \
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 image_pull_line="$(grep -n -F '"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes' scripts/deploy.sh | cut -d: -f1)"
-target_auth_secret_preflight_line="$(grep -n -F './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh | cut -d: -f1)"
-auth_secret_preflight_count="$(grep -Fc './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh)"
+target_auth_secret_preflight_line="$(grep -n -F 'sudo -n /usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/deploy.sh | cut -d: -f1)"
+auth_secret_preflight_count="$(grep -Fc 'sudo -n /usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/deploy.sh)"
+target_auth_secret_match_line="$(grep -n -F '|| ! cmp -s' scripts/deploy.sh | cut -d: -f1)"
 rollback_enable_line="$(grep -n -F 'automatic_rollback_available=1' scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
@@ -919,6 +1066,7 @@ application_start_line="$(grep -n -F -- '--profile async up -d --wait --wait-tim
 require_single_line_number stop_line "$stop_line"
 require_single_line_number image_pull_line "$image_pull_line"
 require_single_line_number target_auth_secret_preflight_line "$target_auth_secret_preflight_line"
+require_single_line_number target_auth_secret_match_line "$target_auth_secret_match_line"
 require_single_line_number rollback_enable_line "$rollback_enable_line"
 require_single_line_number backup_line "$backup_line"
 require_single_line_number backup_init_line "$backup_init_line"
@@ -929,10 +1077,12 @@ require_single_line_number reconcile_line "$reconcile_line"
 require_single_line_number application_start_line "$application_start_line"
 if [[ -z "$stop_line" || -z "$image_pull_line" \
   || -z "$target_auth_secret_preflight_line" \
+  || -z "$target_auth_secret_match_line" \
   || "$auth_secret_preflight_count" != 1 \
   || -z "$rollback_enable_line" \
   || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
-  || "$image_pull_line" -ge "$target_auth_secret_preflight_line" \
+  || "$image_pull_line" -ge "$target_auth_secret_match_line" \
+  || "$target_auth_secret_match_line" -ge "$target_auth_secret_preflight_line" \
   || "$target_auth_secret_preflight_line" -ge "$stop_line" \
   || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_init_line" \
   || "$backup_init_line" -ge "$backup_line" ]]; then
@@ -970,6 +1120,10 @@ grep -Fq 'restore_previous_release_boundary' scripts/deploy.sh
 grep -Fq 'auth: {' scripts/deploy.sh
 grep -Fq 'previous_auth: {' infra/bin/bumpabestie-promote
 grep -Fq 'canonical_previous_env_sha256' infra/bin/bumpabestie-promote
+if grep -Fq './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh; then
+  echo "Deployment elevates the mutable checkout validator" >&2
+  exit 1
+fi
 grep -Fq 'for service in api worker scheduler web hermes caddy postgres redis' scripts/deploy.sh
 grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
@@ -1021,6 +1175,19 @@ grep -Fq 'BUMPABESTIE_STABLE_COORDINATOR' scripts/promote_release.sh
 grep -Fq 'git -C "$repo" show "$revision:scripts/$helper"' infra/bin/bumpabestie-promote
 grep -Fq 'BUMPABESTIE_COORDINATOR_JOURNAL="$journal"' infra/bin/bumpabestie-promote
 grep -Fq 'install -m 0755 -o root -g root' scripts/bootstrap_server.sh
+grep -Fq '/usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/bootstrap_server.sh
+grep -Fq '/etc/sudoers.d/bumpabestie-temporary-auth-secret' scripts/bootstrap_server.sh
+grep -Fq 'visudo -cf' scripts/bootstrap_server.sh
+grep -Fq 'apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 sudo' \
+  scripts/bootstrap_server.sh
+test -f infra/sudoers/bumpabestie-temporary-auth-secret
+grep -Fxq 'Defaults!/usr/local/sbin/bumpabestie-validate-temporary-auth-secret env_reset,!setenv,secure_path=/usr/sbin\:/usr/bin\:/sbin\:/bin' \
+  infra/sudoers/bumpabestie-temporary-auth-secret
+grep -Fxq 'bumpabestie ALL=(root) NOPASSWD: /usr/local/sbin/bumpabestie-validate-temporary-auth-secret' \
+  infra/sudoers/bumpabestie-temporary-auth-secret
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf infra/sudoers/bumpabestie-temporary-auth-secret >/dev/null
+fi
 grep -Fq '/usr/local/sbin/bumpabestie-promote' Makefile
 if grep -Fq './scripts/deploy.sh' Makefile; then
   echo "Makefile bypasses the stable promotion coordinator" >&2

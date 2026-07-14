@@ -391,10 +391,12 @@ atomically writes that generated path into the environment. Never choose or reus
 a version filename manually, and do not place these files under the shared
 deploy-user-owned `SECRETS_DIR`. Provision the HMAC verifier through
 `scripts/set_temporary_login_pin.sh`, validate the now-complete environment, and use the
-guarded promotion path. The non-root deploy preflight checks the file only through
-the already-pulled exact API image in a networkless, read-only, capability-free
-container; it does not emit the verifier. The Docker-enabled deploy account is a
-trusted root-equivalent production principal, not an isolation boundary. Meta secret files remain in
+guarded promotion path. The non-root deploy preflight invokes a fixed root-owned
+helper for host metadata checks before an exact-file check through the already-pulled
+API image in a networkless, read-only, capability-free container; neither step emits
+the verifier. The mutable checkout validator is never elevated. The Docker-enabled
+deploy account is a trusted root-equivalent production principal, not an isolation
+boundary. Meta secret files remain in
 their existing scoped boundary for later activation, but no login, test-sender or
 proactive delivery may use them while this mode is selected. The full threat model,
 rotation/rollback procedure, role boundary, client-IP chain and acceptance gates
@@ -490,24 +492,15 @@ only on operator request as root with a separate narrow capability set, includin
 
 1. Confirm the exact revision's CI and local integration gates are green.
 2. Confirm SSH, DNS, firewall, free disk and GHCR pull access.
-3. Run the installed, root-owned promotion coordinator with the reviewed merge
-   SHA and exact published digests. It acquires the maintenance lock before
+3. From a root login shell, fetch the reviewed target, install its root-owned
+   promotion prerequisites, and only then start the coordinator as `bumpabestie`
+   with the reviewed merge SHA and exact published digests. Do not attempt the
+   promotion before the helper and policy block below succeeds. The coordinator
+   acquires the maintenance lock before
    reading the mutable checkout or environment, writes a private durable journal,
    fetches and verifies `origin/main`, extracts and syntax-checks the target
    promotion helpers into `/var/lib/bumpabestie`, and runs that target worker as a
-   child while retaining the lock:
-
-   ```bash
-   target_revision=<full-reviewed-merge-sha>
-   /usr/local/sbin/bumpabestie-promote \
-     "$target_revision" "sha-<infra-commit>" \
-     'ghcr.io/<owner>/bumpabestie-api@sha256:<digest>' \
-     'ghcr.io/<owner>/bumpabestie-web@sha256:<digest>' \
-     'ghcr.io/<owner>/bumpabestie-caddy@sha256:<digest>' \
-     'ghcr.io/<owner>/bumpabestie-postgres@sha256:<digest>' \
-     'ghcr.io/<owner>/bumpabestie-backup@sha256:<digest>' \
-     'ghcr.io/<owner>/bumpabestie-hermes@sha256:<digest>'
-   ```
+   child while retaining the lock.
 
    Run it as `bumpabestie`, not as root. The inherited descriptor keeps the same
    host lock across target selection, checkout, pointer selection and deploy;
@@ -526,21 +519,44 @@ only on operator request as root with a separate narrow capability set, includin
    hostname, normal CA/SAN verification, and no proxy. A second 60-second gate
    then exercises public edge DNS with any origin override explicitly cleared.
 
-   For the one-time upgrade from a release that predates the coordinator, install
-   the reviewed launcher directly from the fetched target commit without checking
-   out that commit. This is the only root step; the launcher remains root-owned and
-   immutable to the deployment account:
+   Run the following block from that root login shell before every promotion. It
+   installs the reviewed temporary-auth validator and its narrow sudoers rule
+   directly from the fetched target commit without
+   checking out that commit. The deploy preflight byte-compares the installed
+   helper with the target checkout and fails before the forward boundary when it is
+   missing or stale. Installing a coordinator does not imply that this newer helper
+   is present. The block also re-installs the reviewed launcher; this makes a
+   coordinator upgrade explicit and is idempotent when its bytes are unchanged.
+   These root-owned executable/policy changes remain immutable to the deployment
+   account:
 
    ```bash
+   target_revision=<full-reviewed-merge-sha>
    cd /opt/bumpabestie
    sudo -u bumpabestie -H git fetch --tags --prune origin main
    test "$(sudo -u bumpabestie -H git rev-parse origin/main)" = "$target_revision"
    launcher_tmp="$(mktemp)"
+   validator_tmp="$(mktemp)"
+   sudoers_tmp="$(mktemp)"
    sudo -u bumpabestie -H git show \
      "$target_revision:infra/bin/bumpabestie-promote" >"$launcher_tmp"
+   sudo -u bumpabestie -H git show \
+     "$target_revision:scripts/validate_temporary_auth_secret.sh" >"$validator_tmp"
+   sudo -u bumpabestie -H git show \
+     "$target_revision:infra/sudoers/bumpabestie-temporary-auth-secret" >"$sudoers_tmp"
    bash -n "$launcher_tmp"
+   bash -n "$validator_tmp"
+   visudo -cf "$sudoers_tmp"
    install -o root -g root -m 0755 "$launcher_tmp" /usr/local/sbin/bumpabestie-promote
-   rm -f "$launcher_tmp"
+   install -o root -g root -m 0755 "$validator_tmp" \
+     /usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+   install -o root -g root -m 0440 "$sudoers_tmp" \
+     /etc/sudoers.d/bumpabestie-temporary-auth-secret
+   visudo -cf /etc/sudoers.d/bumpabestie-temporary-auth-secret
+   cmp -s "$launcher_tmp" /usr/local/sbin/bumpabestie-promote
+   cmp -s "$validator_tmp" \
+     /usr/local/sbin/bumpabestie-validate-temporary-auth-secret
+   rm -f "$launcher_tmp" "$validator_tmp" "$sudoers_tmp"
    sudo -u bumpabestie -H /usr/local/sbin/bumpabestie-promote \
      "$target_revision" "sha-<infra-commit>" \
      '<api-digest-ref>' '<web-digest-ref>' '<caddy-digest-ref>' \

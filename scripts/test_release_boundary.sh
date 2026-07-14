@@ -29,6 +29,17 @@ new_backup="registry.example/bumpa/backup@sha256:5555555555555555555555555555555
 new_hermes="registry.example/bumpa/hermes@sha256:6666666666666666666666666666666666666666666666666666666666666666"
 legacy_verifier_path="/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier"
 versioned_verifier_path="/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/0123456789abcdef0123456789abcdef"
+for invalid_verifier_path in \
+  /var/lib/../temporary_web_pin_verifier \
+  /var/lib/other/temporary_web_pin_verifier \
+  /var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/short; do
+  if validate_temporary_verifier_host_path "$invalid_verifier_path"; then
+    echo "Unsafe temporary verifier path was accepted" >&2
+    exit 1
+  fi
+done
+validate_temporary_verifier_host_path "$legacy_verifier_path"
+validate_temporary_verifier_host_path "$versioned_verifier_path"
 
 release_file="$test_dir/.deployed-release.json"
 jq --null-input \
