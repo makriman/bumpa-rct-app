@@ -502,7 +502,6 @@ persist_release_metadata() {
 }
 
 deployment_started=0
-writers_quiesced=0
 writer_stop_attempted=0
 rollback() {
   local result=$?
@@ -749,7 +748,6 @@ postgres_container="$("${compose[@]}" ps --status running -q postgres)"
 writer_stop_attempted=1
 "${compose[@]}" stop --timeout 60 caddy web api worker scheduler hermes
 assert_application_writers_stopped
-writers_quiesced=1
 if [[ -n "$postgres_container" ]]; then
   running_pg_version_num="$(
     docker exec "$postgres_container" psql \

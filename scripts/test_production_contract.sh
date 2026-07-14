@@ -1056,7 +1056,6 @@ target_auth_secret_match_line="$(grep -n -F '|| ! cmp -s' scripts/deploy.sh | cu
 rollback_enable_line="$(grep -n -F 'automatic_rollback_available=1' scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
-quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
 writer_stop_attempted_line="$(grep -n -F 'writer_stop_attempted=1' scripts/deploy.sh | cut -d: -f1)"
 writer_guard_lines="$(grep -n -E '^assert_application_writers_stopped$' scripts/deploy.sh | cut -d: -f1)"
 first_writer_guard_line="$(sed -n '1p' <<<"$writer_guard_lines")"
@@ -1075,7 +1074,6 @@ require_single_line_number target_auth_secret_match_line "$target_auth_secret_ma
 require_single_line_number rollback_enable_line "$rollback_enable_line"
 require_single_line_number backup_line "$backup_line"
 require_single_line_number backup_init_line "$backup_init_line"
-require_single_line_number quiesced_line "$quiesced_line"
 require_single_line_number writer_stop_attempted_line "$writer_stop_attempted_line"
 require_single_line_number first_writer_guard_line "$first_writer_guard_line"
 require_single_line_number boundary_writer_guard_line "$boundary_writer_guard_line"
@@ -1089,15 +1087,14 @@ if [[ -z "$stop_line" || -z "$image_pull_line" \
   || -z "$target_auth_secret_match_line" \
   || "$auth_secret_preflight_count" != 1 \
   || -z "$rollback_enable_line" \
-  || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
+  || -z "$backup_init_line" || -z "$backup_line" \
   || "$(wc -l <<<"$writer_guard_lines" | tr -d ' ')" != 2 \
   || "$image_pull_line" -ge "$target_auth_secret_match_line" \
   || "$target_auth_secret_match_line" -ge "$target_auth_secret_preflight_line" \
   || "$target_auth_secret_preflight_line" -ge "$stop_line" \
   || "$writer_stop_attempted_line" -ge "$stop_line" \
   || "$stop_line" -ge "$first_writer_guard_line" \
-  || "$first_writer_guard_line" -ge "$quiesced_line" \
-  || "$quiesced_line" -ge "$backup_init_line" \
+  || "$first_writer_guard_line" -ge "$backup_init_line" \
   || "$backup_init_line" -ge "$backup_line" \
   || "$backup_line" -ge "$boundary_writer_guard_line" \
   || "$boundary_writer_guard_line" -ge "$forward_boundary_line" \
