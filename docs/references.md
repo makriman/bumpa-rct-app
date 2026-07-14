@@ -79,6 +79,20 @@ prerequisites. Never put a Droplet password or SSH private key in this repositor
 - [FastAPI behind a proxy](https://fastapi.tiangolo.com/advanced/behind-a-proxy/) — forwarded-header and trusted-proxy guidance.
 - [Next.js deployment](https://nextjs.org/docs/pages/getting-started/deploying) — standalone server deployment guidance.
 
+## Phone parsing and Cloudflare client identity
+
+- [libphonenumber-js](https://github.com/catamphetamine/libphonenumber-js) —
+  country-aware parsing and E.164 normalization used by the browser login form.
+- [Cloudflare IP ranges](https://www.cloudflare.com/ips/) — authoritative proxy
+  ranges pinned into Caddy's strict trusted-proxy configuration.
+- [Cloudflare original visitor IP](https://developers.cloudflare.com/support/troubleshooting/restoring-visitor-ips/restoring-original-visitor-ips/) —
+  `CF-Connecting-IP` trust and origin-restoration guidance.
+
+Browser parsing is usability validation, not the authorization boundary. FastAPI
+still normalizes and validates E.164 values, and Caddy trusts the Cloudflare header
+only for a connection from one of the pinned official ranges. Updating the package
+or the range list requires contract tests and an origin-spoofing review.
+
 ## PostgreSQL
 
 - [Row security policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html) —

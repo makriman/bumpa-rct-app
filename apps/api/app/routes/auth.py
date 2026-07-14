@@ -4,18 +4,23 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.crypto import secret_hash
 from app.core.dependencies import Principal, extract_token, get_principal
 from app.core.rate_limit import enforce_auth_rate_limit
 from app.core.security import (
     create_access_token,
     find_login_eligible_user,
+    find_mapped_login_user,
     issue_otp,
+    issue_temporary_web_pin_challenge,
     normalize_phone,
     revoke_other_tokens,
     revoke_token,
     verify_otp,
+    verify_temporary_web_pin,
 )
 from app.core.time import utcnow
+from app.db.models import User
 from app.db.session import get_db, set_security_context
 from app.providers.diagnostics import provider_failure_log_extra
 from app.providers.local import LocalMessagingProvider
@@ -41,13 +46,30 @@ def request_otp(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> OtpRequested:
-    if settings.whatsapp_backend == "disabled":
+    if settings.auth_login_mode == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Web authentication is not configured",
+        )
+    if settings.auth_login_mode == "whatsapp_otp" and settings.whatsapp_backend == "disabled":
         raise HTTPException(
             status_code=503,
             detail="WhatsApp OTP delivery is not configured",
         )
     phone_e164 = normalize_phone(payload.phone_e164)
     enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="request", settings=settings)
+    if settings.auth_login_mode == "temporary_static_pin":
+        _ensure_temporary_web_pin_active(settings)
+        # Eligibility is intentionally not reflected in the response. An active
+        # mapped identity receives a provider-free, short-lived challenge only.
+        set_security_context(db, privileged=True)
+        if find_mapped_login_user(db, phone_e164) is not None:
+            issue_temporary_web_pin_challenge(db, phone_e164, settings)
+        return OtpRequested(
+            status="accepted",
+            expires_in_seconds=settings.otp_ttl_minutes * 60,
+            delivery="web_pin",
+        )
     # Eligibility spans tenant-scoped identity/membership rows before a tenant
     # principal exists. Restrict this privileged context to the bounded auth
     # transaction, then resolve only the submitted normalized phone.
@@ -109,8 +131,17 @@ def verify_code(
 ) -> AuthResponse:
     phone_e164 = normalize_phone(payload.phone_e164)
     enforce_auth_rate_limit(request, phone_e164=phone_e164, operation="verify", settings=settings)
+    if settings.auth_login_mode == "disabled":
+        raise HTTPException(status_code=503, detail="Web authentication is not configured")
+    if settings.auth_login_mode == "temporary_static_pin":
+        _ensure_temporary_web_pin_active(settings)
     set_security_context(db, privileged=True)
-    user = verify_otp(db, phone_e164, payload.code, settings)
+    if settings.auth_login_mode == "temporary_static_pin":
+        user = _verify_temporary_static_pin(db, phone_e164, payload.code, settings)
+    elif settings.auth_login_mode == "whatsapp_otp":
+        user = verify_otp(db, phone_e164, payload.code, settings)
+    else:  # pragma: no cover - exhaustive guard for future modes
+        raise RuntimeError("Unsupported authentication mode")
     token, _session = create_access_token(db, user, settings)
     response.set_cookie(
         settings.session_cookie_name,
@@ -126,6 +157,47 @@ def verify_code(
         access_token=token,
         user={"id": user.id, "name": user.name, "phone_e164": user.primary_phone_e164},
     )
+
+
+def _verify_temporary_static_pin(
+    db: Session,
+    phone_e164: str,
+    submitted_code: str,
+    settings: Settings,
+) -> User:
+    """Verify the temporary shared credential without making identity an oracle."""
+
+    user = verify_temporary_web_pin(db, phone_e164, submitted_code, settings)
+    phone_reference = secret_hash(f"auth-audit:phone:{phone_e164}", settings.otp_secret)
+    if user is None:
+        audit(
+            db,
+            actor_user_id=None,
+            action="auth.temporary_static_pin.denied",
+            resource_type="phone_identity",
+            resource_id=phone_reference,
+            after={"outcome": "invalid_credentials"},
+        )
+        db.commit()
+        raise HTTPException(status_code=401, detail="Invalid or expired code")
+    audit(
+        db,
+        actor_user_id=user.id,
+        action="auth.temporary_static_pin.verified",
+        resource_type="phone_identity",
+        resource_id=phone_reference,
+        after={"outcome": "success"},
+    )
+    return user
+
+
+def _ensure_temporary_web_pin_active(settings: Settings) -> None:
+    expires_at = settings.temporary_web_pin_expires_at
+    if expires_at is None or utcnow() >= expires_at:
+        raise HTTPException(
+            status_code=503,
+            detail="Temporary web authentication is unavailable",
+        )
 
 
 @router.post("/logout", response_model=MessageResponse)

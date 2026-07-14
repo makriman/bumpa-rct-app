@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, mo
 
 ReportFormat = Literal["csv", "jsonl", "pdf"]
 PlatformAdminRole = Literal["operator", "superadmin"]
+PlatformAccessRole = Literal["operator", "researcher"]
+PlatformRoleName = Literal["operator", "researcher", "superadmin"]
 McpProvider = Literal["google_drive", "google_sheets", "gmail", "calendar", "meta_ads"]
 McpToolPermissionValue = Literal["deny", "read", "write_with_confirmation"]
 AsyncJobStatus = Literal[
@@ -71,14 +73,15 @@ class OtpRequest(BaseModel):
 
 
 class OtpRequested(BaseModel):
-    status: Literal["sent"] = "sent"
+    status: Literal["sent", "accepted"] = "sent"
     expires_in_seconds: int
+    delivery: Literal["whatsapp", "web_pin"] = "whatsapp"
     dev_code: str | None = None
 
 
 class OtpVerify(BaseModel):
     phone_e164: str
-    code: str = Field(min_length=6, max_length=10)
+    code: str = Field(pattern=r"^\d{6}$")
 
 
 class AuthResponse(BaseModel):
@@ -138,6 +141,16 @@ class PlatformAdminView(BaseModel):
     phone_e164: str
     status: str
     platform_roles: list[PlatformAdminRole]
+    created_at: datetime
+
+
+class PlatformAccessView(BaseModel):
+    user_id: str
+    name: str | None
+    phone_e164: str
+    status: str
+    has_active_mapping: bool
+    platform_roles: list[PlatformRoleName]
     created_at: datetime
 
 

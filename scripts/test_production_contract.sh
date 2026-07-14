@@ -61,6 +61,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     CORS_ORIGINS) value='["https://bumpabestie.example.com","https://admin.bumpabestie.example.com","https://research.bumpabestie.example.com"]' ;;
     JWT_SECRET) value=contract-jwt-secret-000000000000000000 ;;
     OTP_SECRET) value=contract-otp-secret-000000000000000000 ;;
+    AUTH_LOGIN_MODE) value=temporary_static_pin ;;
+    TEMPORARY_WEB_PIN_EXPIRES_AT) value=2099-01-01T00:00:00Z ;;
     FIELD_ENCRYPTION_KEY) value=contract-field-key-000000000000000000 ;;
     RESEARCH_PSEUDONYM_KEY) value=contract-research-pseudonym-key-000000000 ;;
     ONBOARDING_INTEGRITY_KEY) value=contract-onboarding-integrity-key-0000000 ;;
@@ -98,6 +100,17 @@ for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_ve
   printf 'contract-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
   chmod 0600 "$contract_secrets/$secret_name"
 done
+printf '%064d\n' 0 > "$contract_secrets/temporary_web_pin_verifier"
+chmod 0600 "$contract_secrets/temporary_web_pin_verifier"
+./scripts/validate_temporary_auth_secret.sh temporary_static_pin "$contract_secrets"
+chmod 0644 "$contract_secrets/temporary_web_pin_verifier"
+if ./scripts/validate_temporary_auth_secret.sh \
+  temporary_static_pin "$contract_secrets" >/dev/null 2>&1; then
+  echo "Temporary web PIN preflight accepted a world-readable host verifier" >&2
+  exit 1
+fi
+chmod 0600 "$contract_secrets/temporary_web_pin_verifier"
+grep -Fq 'AUTH_LOGIN_MODE WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do' scripts/deploy.sh
 for secret_name in google_oauth_client_secret meta_ads_oauth_client_secret; do
   printf 'optional-oauth-secret-value-at-least-32-characters' > "$contract_secrets/$secret_name"
   chmod 0600 "$contract_secrets/$secret_name"
@@ -364,11 +377,24 @@ if ! jq --exit-status '
   .services["app-secrets-init"].cap_add == ["CHOWN", "DAC_OVERRIDE", "FOWNER"] and
   (.services["app-secrets-init"].secrets | length == 3) and
   ([.services["app-secrets-init"].secrets[] | .source] | sort == ["meta_app_secret", "meta_system_user_access_token", "meta_webhook_verify_token"]) and
+  .services["auth-secret-init"].image == .services.api.image and
+  .services["auth-secret-init"].network_mode == "none" and
+  .services["auth-secret-init"].read_only == true and
+  .services["auth-secret-init"].cap_drop == ["ALL"] and
+  .services["auth-secret-init"].cap_add == ["CHOWN", "DAC_OVERRIDE", "FOWNER"] and
+  ([.services["auth-secret-init"].secrets[] | .source] == ["temporary_web_pin_verifier"]) and
+  .services.api.depends_on["auth-secret-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["hermes-staging-init"].condition == "service_completed_successfully" and
   .services.api.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
   .services.worker.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
   .services.scheduler.depends_on["app-secrets-init"].condition == "service_completed_successfully" and
   .services.api.environment.META_APP_SECRET_FILE == "/run/runtime-secrets/meta_app_secret" and
+  .services.api.environment.AUTH_LOGIN_MODE == "temporary_static_pin" and
+  .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER == "" and
+  .services.api.environment.TEMPORARY_WEB_PIN_VERIFIER_FILE == "/run/auth-secret/temporary_web_pin_verifier" and
+  .services.api.environment.TEMPORARY_WEB_PIN_EXPIRES_AT == "2099-01-01T00:00:00Z" and
+  .services.worker.environment.AUTH_LOGIN_MODE == "disabled" and
+  .services.scheduler.environment.AUTH_LOGIN_MODE == "disabled" and
   .services.worker.environment.META_SYSTEM_USER_ACCESS_TOKEN_FILE == "/run/runtime-secrets/meta_system_user_access_token" and
   .services.worker.environment.OPS_ALERT_HMAC_SECRET_FILE == "/run/runtime-secrets/ops_alert_hmac_secret" and
   .services.scheduler.environment.OPS_ALERT_HMAC_SECRET_FILE == "/run/runtime-secrets/ops_alert_hmac_secret" and
@@ -377,6 +403,7 @@ if ! jq --exit-status '
   .services.scheduler.environment.GOOGLE_OAUTH_CLIENT_SECRET_FILE == "/run/runtime-secrets/google_oauth_client_secret" and
   (.services.api.secrets == null) and (.services.worker.secrets == null) and
   ([.services.api.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
+  ([.services.api.volumes[] | select(.target == "/run/auth-secret" and .read_only == true)] | length == 1) and
   ([.services.worker.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
   ([.services.scheduler.volumes[] | select(.target == "/run/runtime-secrets" and .read_only == true)] | length == 1) and
   ([.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets" and .read_only != true)] | length == 1) and
@@ -385,6 +412,7 @@ if ! jq --exit-status '
   ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/google_oauth_client_secret" and .read_only == true)] | length == 1) and
   ([.services["app-secrets-init"].volumes[] | select(.type == "bind" and .source == "/dev/null" and .target == "/run/optional-secrets/meta_ads_oauth_client_secret" and .read_only == true)] | length == 1) and
   ([.services.api.volumes[] | select(.target == "/run/runtime-secrets") | .source] == [.services["app-secrets-init"].volumes[] | select(.target == "/runtime-secrets") | .source]) and
+  ([.services.api.volumes[] | select(.target == "/run/auth-secret") | .source] == [.services["auth-secret-init"].volumes[] | select(.target == "/runtime-auth-secret") | .source]) and
   (.services.scheduler.secrets == null) and (.services.migrate.secrets == null) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-runtime") | .source] == ["hermes_data"]) and
   ([.services.backup.volumes[] | select(.target == "/source/hermes-staging") | .source] == ["hermes_staging_data"]) and
@@ -596,6 +624,37 @@ grep -Fq 'header ?Content-Security-Policy "default-src '\''none'\'';' \
 grep -Fq 'header_up -Content-Security-Policy' infra/caddy/Caddyfile
 grep -Fq 'header_up -Content-Security-Policy-Report-Only' infra/caddy/Caddyfile
 grep -Fq 'header_up -X-Nonce' infra/caddy/Caddyfile
+grep -Fq 'trusted_proxies_strict' infra/caddy/Caddyfile
+grep -Fq 'client_ip_headers CF-Connecting-IP' infra/caddy/Caddyfile
+grep -Fq 'header_up X-Forwarded-For {client_ip}' infra/caddy/Caddyfile
+grep -Fq 'header_up X-Real-IP {client_ip}' infra/caddy/Caddyfile
+grep -Fq 'header_up X-Bumpa-Client-IP {client_ip}' infra/caddy/Caddyfile
+grep -Fq 'header_up -CF-Connecting-IP' infra/caddy/Caddyfile
+if grep -Fq 'trusted_proxies static private_ranges' infra/caddy/Caddyfile; then
+  echo "Caddy trusts private peers to supply public client-IP headers" >&2
+  exit 1
+fi
+cloudflare_ranges="$(
+  awk '/^[[:space:]]*trusted_proxies static / { for (field_number = 3; field_number <= NF; field_number++) print $field_number }' \
+    infra/caddy/Caddyfile
+)"
+test "$(wc -w <<<"$cloudflare_ranges" | tr -d '[:space:]')" = 22
+for cloudflare_range in \
+  173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 \
+  141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 \
+  197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 \
+  104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 \
+  2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 \
+  2a06:98c0::/29 2c0f:f248::/32; do
+  grep -Fxq "$cloudflare_range" <<<"$cloudflare_ranges"
+done
+grep -Fq -- '--forwarded-allow-ips=127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7' \
+  apps/api/Dockerfile
+if grep -Fq -- '--forwarded-allow-ips=*' apps/api/Dockerfile \
+  || grep -Fq -- '"--forwarded-allow-ips", "*"' compose.yaml; then
+  echo "Uvicorn trusts proxy headers from every network peer" >&2
+  exit 1
+fi
 if grep -Eq "script-src[^;]*'unsafe-inline'" \
   infra/caddy/Caddyfile apps/web/lib/content-security-policy.ts; then
   echo "Document script CSP permits unsafe inline execution" >&2
@@ -845,6 +904,7 @@ if ./scripts/validate_env.sh "$duplicate_env" production >/dev/null 2>&1; then
 fi
 
 awk '
+  /^AUTH_LOGIN_MODE=/ { print "AUTH_LOGIN_MODE=whatsapp_otp"; next }
   /^WHATSAPP_BACKEND=/ { print "WHATSAPP_BACKEND=meta"; next }
   /^AGENT_BACKEND=/ { print "AGENT_BACKEND=hermes"; next }
   /^BUMPA_BACKEND=/ { print "BUMPA_BACKEND=bumpa"; next }

@@ -14,7 +14,7 @@ import {
   type AsyncJobReplayReason,
   type AuditEvent,
   type HermesCallError,
-  type PlatformAdmin,
+  type PlatformAccess,
   type SyncRun,
   type SystemError,
   type Tenant,
@@ -1469,8 +1469,8 @@ export function TenantDetail({ id }: { id: string }) {
 
 export function UserList() {
   const [search, setSearch] = useState("");
-  const admins = useApiResource<PlatformAdmin[]>(
-    "/admin/platform-admins",
+  const admins = useApiResource<PlatformAccess[]>(
+    "/admin/platform-access",
     previewPlatformAdmins,
   );
   const session = useApiResource<{
@@ -1484,16 +1484,13 @@ export function UserList() {
     }>;
     current_tenant_id: string | null;
   }>("/auth/me", previewPlatformAdminSession);
-  const [addOpen, setAddOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [nameError, setNameError] = useState("");
-  const [phoneError, setPhoneError] = useState("");
   const [mutationError, setMutationError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [pendingRevoke, setPendingRevoke] = useState<PlatformAdmin | null>(
-    null,
-  );
+  const [pendingAccess, setPendingAccess] = useState<{
+    admin: PlatformAccess;
+    role: "operator" | "researcher";
+    action: "grant" | "revoke";
+  } | null>(null);
   const [toast, setToast] = useState("");
   const rows = useMemo(
     () =>
@@ -1505,73 +1502,30 @@ export function UserList() {
     [admins.data, search],
   );
 
-  const closeAdd = () => {
-    if (busy) return;
-    setAddOpen(false);
-    setName("");
-    setPhone("");
-    setNameError("");
-    setPhoneError("");
-    setMutationError("");
-  };
-
-  const addAdmin = async () => {
-    const nextNameError = name.trim() ? "" : "Enter the administrator's name.";
-    const nextPhoneError = /^\+[1-9]\d{7,14}$/.test(phone.trim())
-      ? ""
-      : "Use E.164 format, for example +2348012345678.";
-    setNameError(nextNameError);
-    setPhoneError(nextPhoneError);
-    if (nextNameError || nextPhoneError) return;
+  const changeAccess = async () => {
+    if (!pendingAccess) return;
     setBusy(true);
     setMutationError("");
     try {
-      await apiRequest<PlatformAdmin>("/admin/platform-admins", {
-        method: "POST",
-        body: JSON.stringify({
-          name: name.trim(),
-          phone_e164: phone.trim(),
-          role: "operator",
-        }),
-      });
-      await admins.reload();
-      const addedName = name.trim();
-      setAddOpen(false);
-      setName("");
-      setPhone("");
-      setNameError("");
-      setPhoneError("");
-      setMutationError("");
-      setToast(`${addedName} can now administer tenant mappings.`);
-    } catch (reason) {
-      setMutationError(
-        reason instanceof Error
-          ? reason.message
-          : "The platform administrator could not be added.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const revokeAdmin = async () => {
-    if (!pendingRevoke) return;
-    setBusy(true);
-    setMutationError("");
-    try {
+      const { admin, role, action } = pendingAccess;
       await apiRequest<void>(
-        `/admin/platform-admins/${pendingRevoke.user_id}`,
-        { method: "DELETE" },
+        `/admin/platform-access/${admin.user_id}/${role}`,
+        { method: action === "grant" ? "PUT" : "DELETE" },
       );
-      const revokedName = pendingRevoke.name?.trim() || "The administrator";
+      const displayName = admin.name?.trim() || "The collaborator";
       await admins.reload();
-      setPendingRevoke(null);
-      setToast(`${revokedName}'s platform access was revoked.`);
+      setPendingAccess(null);
+      const accessLabel = role === "operator" ? "admin" : "research";
+      setToast(
+        action === "grant"
+          ? `${displayName} now has ${accessLabel} access.`
+          : `${displayName}'s ${accessLabel} access was revoked.`,
+      );
     } catch (reason) {
       setMutationError(
         reason instanceof Error
           ? reason.message
-          : "Platform access could not be revoked.",
+          : "Platform access could not be changed.",
       );
     } finally {
       setBusy(false);
@@ -1579,25 +1533,18 @@ export function UserList() {
   };
 
   return (
-    <AppShell surface="admin" title="Administrators">
+    <AppShell surface="admin" title="Platform access">
       <PageHeader
-        title="Platform administrators"
-        description="Grant trusted operators access to onboard businesses and manage tenant mappings."
+        title="Platform access"
+        description="Manage mapped collaborators and audit existing admin and research privileges."
         actions={
-          <button
-            className="button button-primary"
-            disabled={admins.source !== "live" || admins.status !== "ready"}
-            onClick={() => {
-              setMutationError("");
-              setAddOpen(true);
-            }}
-          >
-            ＋ Add administrator
-          </button>
+          <Link className="button button-secondary" href="/admin/tenants">
+            Manage tenant mappings
+          </Link>
         }
       />
       <LiveDataBanner
-        label="platform administrators"
+        label="platform access directory"
         source={admins.source}
         status={admins.status}
         count={admins.data?.length}
@@ -1607,8 +1554,10 @@ export function UserList() {
         <div>
           <strong>Platform access is separate from store access.</strong>
           <div>
-            Administrators can manage every tenant mapping. They may also hold a
-            normal owner or team membership in a specific workspace.
+            Admin access manages tenant operations. Research access opens
+            consented, de-identified research tools. Store memberships are not
+            changed here. To add someone, map their primary phone to an active
+            workspace first, then return here to grant access.
           </div>
         </div>
       </div>
@@ -1617,7 +1566,7 @@ export function UserList() {
       ) : admins.status === "error" ? (
         <StatePanel
           type="error"
-          title="Administrators could not be loaded"
+          title="Platform access could not be loaded"
           description={admins.error ?? undefined}
           action={
             <button
@@ -1631,31 +1580,25 @@ export function UserList() {
       ) : !admins.data?.length ? (
         <StatePanel
           type="empty"
-          title="No platform administrators returned"
-          description="Add a trusted administrator to begin managing tenant mappings."
+          title="No mapped collaborators returned"
+          description="Map a collaborator's primary phone before granting platform access."
           action={
-            <button
-              className="button button-primary"
-              onClick={() => setAddOpen(true)}
-            >
-              Add administrator
-            </button>
+            <Link className="button button-primary" href="/admin/tenants">
+              Map a collaborator
+            </Link>
           }
         />
       ) : (
         <>
           <Filters search={search} setSearch={setSearch} />
           {rows.length ? (
-            <ScrollableTable
-              className="card"
-              label="Platform administrator directory"
-            >
+            <ScrollableTable className="card" label="Platform access directory">
               <table className="data-table admin-directory-table">
                 <thead>
                   <tr>
-                    <th>Administrator</th>
+                    <th>Collaborator</th>
                     <th>Phone</th>
-                    <th>Access</th>
+                    <th>Current access</th>
                     <th>Status</th>
                     <th>
                       <span className="sr-only">Actions</span>
@@ -1687,7 +1630,9 @@ export function UserList() {
                               <span className="table-secondary">
                                 {isCurrent
                                   ? "Your account"
-                                  : "Platform account"}
+                                  : admin.has_active_mapping
+                                    ? "Mapped collaborator"
+                                    : "Mapping required"}
                               </span>
                             </span>
                           </div>
@@ -1701,9 +1646,19 @@ export function UserList() {
                         </td>
                         <td>
                           <div className="admin-role-list">
-                            {admin.platform_roles.map((role) => (
-                              <Badge key={role}>{titleCase(role)}</Badge>
-                            ))}
+                            {admin.platform_roles.length ? (
+                              admin.platform_roles.map((role) => (
+                                <Badge key={role}>
+                                  {role === "operator"
+                                    ? "Admin"
+                                    : titleCase(role)}
+                                </Badge>
+                              ))
+                            ) : (
+                              <span className="table-secondary">
+                                Store only
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td>
@@ -1714,10 +1669,6 @@ export function UserList() {
                             <span className="admin-protected-label">
                               Checking account…
                             </span>
-                          ) : isCurrent ? (
-                            <span className="admin-protected-label">
-                              Current administrator
-                            </span>
                           ) : isSuperadmin ? (
                             <span className="admin-protected-label">
                               Superadmin protected
@@ -1727,17 +1678,52 @@ export function UserList() {
                               Demo preview
                             </span>
                           ) : (
-                            <button
-                              className="button button-danger button-small"
-                              disabled={busy || admin.status !== "active"}
-                              onClick={() => {
-                                setMutationError("");
-                                setPendingRevoke(admin);
-                              }}
-                              aria-label={`Revoke ${displayName}'s platform access`}
-                            >
-                              Revoke access
-                            </button>
+                            <div className="admin-role-list">
+                              {(["operator", "researcher"] as const).map(
+                                (role) => {
+                                  const granted =
+                                    admin.platform_roles.includes(role);
+                                  const label =
+                                    role === "operator" ? "Admin" : "Research";
+                                  return (
+                                    <button
+                                      key={role}
+                                      className={`button button-small ${
+                                        granted
+                                          ? "button-danger"
+                                          : "button-secondary"
+                                      }`}
+                                      disabled={
+                                        busy ||
+                                        (!granted &&
+                                          (admin.status !== "active" ||
+                                            !admin.has_active_mapping))
+                                      }
+                                      title={
+                                        !admin.has_active_mapping && !granted
+                                          ? "Map this collaborator to an active workspace before granting access"
+                                          : undefined
+                                      }
+                                      onClick={() => {
+                                        setMutationError("");
+                                        setPendingAccess({
+                                          admin,
+                                          role,
+                                          action: granted ? "revoke" : "grant",
+                                        });
+                                      }}
+                                      aria-label={`${
+                                        granted ? "Revoke" : "Grant"
+                                      } ${displayName}'s ${label.toLowerCase()} access`}
+                                    >
+                                      {granted
+                                        ? `Remove ${label}`
+                                        : `Grant ${label}`}
+                                    </button>
+                                  );
+                                },
+                              )}
+                            </div>
                           )}
                         </td>
                       </tr>
@@ -1749,8 +1735,8 @@ export function UserList() {
           ) : (
             <StatePanel
               type="empty"
-              title="No matching administrators"
-              description="Clear or adjust your search to see other administrators."
+              title="No matching collaborators"
+              description="Clear or adjust your search to see other mapped collaborators."
               action={
                 <button
                   className="button button-secondary"
@@ -1763,109 +1749,14 @@ export function UserList() {
           )}
         </>
       )}
-      {addOpen && (
+      {pendingAccess && (
         <Modal
-          title="Add a platform administrator"
-          onClose={closeAdd}
-          actions={
-            <>
-              <button
-                className="button button-secondary"
-                disabled={busy}
-                onClick={closeAdd}
-              >
-                Cancel
-              </button>
-              <button
-                className="button button-primary"
-                disabled={busy}
-                aria-busy={busy}
-                onClick={() => void addAdmin()}
-              >
-                {busy ? "Granting access…" : "Grant administrator access"}
-              </button>
-            </>
-          }
-        >
-          <p className="modal-intro">
-            This grants cross-tenant operator access. Store memberships remain
-            separate and can be assigned to the same person when needed.
-          </p>
-          {mutationError && (
-            <div className="alert alert-danger" role="alert">
-              {mutationError}
-            </div>
-          )}
-          <div className="field">
-            <label htmlFor="platform-admin-name">Full name</label>
-            <input
-              id="platform-admin-name"
-              className={`input ${nameError ? "input-error" : ""}`}
-              value={name}
-              autoComplete="name"
-              aria-invalid={Boolean(nameError)}
-              aria-describedby={
-                nameError ? "platform-admin-name-error" : undefined
-              }
-              onChange={(event) => {
-                setName(event.target.value);
-                if (nameError) setNameError("");
-              }}
-            />
-            {nameError && (
-              <span className="field-error" id="platform-admin-name-error">
-                {nameError}
-              </span>
-            )}
-          </div>
-          <div className="field">
-            <label htmlFor="platform-admin-phone">WhatsApp phone number</label>
-            <input
-              id="platform-admin-phone"
-              type="tel"
-              inputMode="tel"
-              className={`input ${phoneError ? "input-error" : ""}`}
-              placeholder="+2348012345678"
-              value={phone}
-              autoComplete="tel"
-              aria-invalid={Boolean(phoneError)}
-              aria-describedby={
-                phoneError
-                  ? "platform-admin-phone-help platform-admin-phone-error"
-                  : "platform-admin-phone-help"
-              }
-              onChange={(event) => {
-                setPhone(event.target.value);
-                if (phoneError) setPhoneError("");
-              }}
-            />
-            <span className="field-help" id="platform-admin-phone-help">
-              Use the person&apos;s verified number in international E.164
-              format.
-            </span>
-            {phoneError && (
-              <span className="field-error" id="platform-admin-phone-error">
-                {phoneError}
-              </span>
-            )}
-          </div>
-          <div className="admin-grant-summary" aria-label="Access to grant">
-            <span className="admin-grant-icon" aria-hidden="true">
-              <AppIcon name="shield" size={20} />
-            </span>
-            <span>
-              <strong>Platform operator</strong>
-              <small>Tenant onboarding, mapping, and operations access</small>
-            </span>
-          </div>
-        </Modal>
-      )}
-      {pendingRevoke && (
-        <Modal
-          title="Revoke platform access?"
+          title={`${
+            pendingAccess.action === "grant" ? "Grant" : "Revoke"
+          } ${pendingAccess.role === "operator" ? "admin" : "research"} access?`}
           onClose={() => {
             if (!busy) {
-              setPendingRevoke(null);
+              setPendingAccess(null);
               setMutationError("");
             }
           }}
@@ -1875,19 +1766,27 @@ export function UserList() {
                 className="button button-secondary"
                 disabled={busy}
                 onClick={() => {
-                  setPendingRevoke(null);
+                  setPendingAccess(null);
                   setMutationError("");
                 }}
               >
-                Keep access
+                Cancel
               </button>
               <button
-                className="button button-danger"
+                className={`button ${
+                  pendingAccess.action === "grant"
+                    ? "button-primary"
+                    : "button-danger"
+                }`}
                 disabled={busy}
                 aria-busy={busy}
-                onClick={() => void revokeAdmin()}
+                onClick={() => void changeAccess()}
               >
-                {busy ? "Revoking…" : "Revoke platform access"}
+                {busy
+                  ? "Saving…"
+                  : `${pendingAccess.action === "grant" ? "Grant" : "Revoke"} ${
+                      pendingAccess.role === "operator" ? "admin" : "research"
+                    } access`}
               </button>
             </>
           }
@@ -1899,10 +1798,13 @@ export function UserList() {
           )}
           <p className="modal-intro">
             <strong>
-              {pendingRevoke.name?.trim() || "This administrator"}
+              {pendingAccess.admin.name?.trim() || "This collaborator"}
             </strong>{" "}
-            will no longer be able to onboard businesses or change tenant
-            mappings. Any store membership they hold remains unchanged.
+            {pendingAccess.action === "grant" ? " will gain " : " will lose "}
+            {pendingAccess.role === "operator"
+              ? "cross-tenant onboarding, mapping, and operations access"
+              : "access to consented, de-identified research tools"}
+            . Any store membership they hold remains unchanged.
           </p>
           <div className="alert alert-warning" style={{ marginBottom: 0 }}>
             This change takes effect immediately and is recorded in the audit

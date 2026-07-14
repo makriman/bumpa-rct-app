@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    text,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
@@ -105,11 +106,18 @@ class OtpSession(IdMixin, Base):
     __tablename__ = "otp_sessions"
     __table_args__ = (
         CheckConstraint(
-            "purpose IN ('login', 'invite', 'phone_verify')",
+            "purpose IN ('login', 'invite', 'phone_verify', 'temporary_web_pin')",
             name="ck_otp_sessions_purpose",
         ),
         CheckConstraint("attempts >= 0", name="ck_otp_sessions_attempts_nonnegative"),
         Index("ix_otp_sessions_phone_expires", "phone_e164", "expires_at"),
+        Index(
+            "uq_otp_sessions_active_temporary_web_pin",
+            "phone_e164",
+            unique=True,
+            postgresql_where=text("purpose = 'temporary_web_pin' AND consumed_at IS NULL"),
+            sqlite_where=text("purpose = 'temporary_web_pin' AND consumed_at IS NULL"),
+        ),
     )
 
     phone_e164: Mapped[str] = mapped_column(String(20), index=True)

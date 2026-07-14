@@ -17,6 +17,7 @@ caddy_config="bumpabestie-infra-caddy-config-$suffix"
 primary="bumpabestie-infra-primary-$suffix"
 restore="bumpabestie-infra-restore-$suffix"
 edge="bumpabestie-infra-edge-$suffix"
+header_sink="bumpabestie-infra-header-sink-$suffix"
 hermes_runtime="bumpabestie-infra-hermes-runtime-$suffix"
 hermes_secret_dir="$(mktemp -d)"
 
@@ -29,7 +30,7 @@ database_password="infra-test-postgres-only"
 
 cleanup() {
   result=$?
-  docker rm -f "$primary" "$restore" "$edge" "$hermes_runtime" >/dev/null 2>&1 || true
+  docker rm -f "$primary" "$restore" "$edge" "$header_sink" "$hermes_runtime" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   docker volume rm -f \
     "$primary_data" "$restore_data" "$backup_data" \
@@ -654,6 +655,18 @@ docker run --rm \
   --entrypoint caddy \
   "$caddy_image" validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
 docker run --detach \
+  --name "$header_sink" \
+  --network "$network" \
+  --network-alias web \
+  --read-only \
+  --tmpfs /tmp \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --entrypoint sh \
+  "$backup_image" -c \
+  'while true; do printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" | nc -l -p 3000; done' \
+  >/dev/null
+docker run --detach \
   --name "$edge" \
   --network "$network" \
   --read-only \
@@ -673,6 +686,28 @@ docker run --detach \
   "$caddy_image" >/dev/null
 test "$(docker exec "$edge" id -u)" = 10001
 edge_port="$(docker port "$edge" 80/tcp | sed -E 's/^.*:([0-9]+)$/\1/' | head -1)"
+spoofed_forwarded_for="198.51.100.77"
+spoofed_real_ip="203.0.113.77"
+spoofed_cloudflare_ip="192.0.2.77"
+test "$({
+  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+    --header 'Host: bumpabestie.localhost' \
+    --header "X-Forwarded-For: $spoofed_forwarded_for" \
+    --header "X-Real-IP: $spoofed_real_ip" \
+    --header "CF-Connecting-IP: $spoofed_cloudflare_ip" \
+    "http://127.0.0.1:$edge_port/ip-spoof-canary"
+})" = 200
+header_sink_logs="$(docker logs "$header_sink" 2>&1)"
+grep -Fq 'GET /ip-spoof-canary HTTP/1.1' <<<"$header_sink_logs"
+grep -Eiq '^X-Forwarded-For: [0-9a-f:.]+\r?$' <<<"$header_sink_logs"
+grep -Eiq '^X-Real-Ip: [0-9a-f:.]+\r?$' <<<"$header_sink_logs"
+grep -Eiq '^X-Bumpa-Client-Ip: [0-9a-f:.]+\r?$' <<<"$header_sink_logs"
+for spoofed_ip in "$spoofed_forwarded_for" "$spoofed_real_ip" "$spoofed_cloudflare_ip"; do
+  if grep -Fq "$spoofed_ip" <<<"$header_sink_logs"; then
+    echo "Caddy forwarded a client-controlled IP header to the web service" >&2
+    exit 1
+  fi
+done
 www_headers=""
 for _attempt in {1..30}; do
   www_headers="$(

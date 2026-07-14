@@ -12,8 +12,12 @@
 		exclude http.log.access
 	}
 	servers {
-		trusted_proxies static private_ranges
-		client_ip_headers X-Forwarded-For X-Real-IP
+		# Cloudflare publishes these origin ranges at the two URLs below. Keep the
+		# exact set covered by the production contract whenever Cloudflare changes it.
+		# https://www.cloudflare.com/ips-v4/ https://www.cloudflare.com/ips-v6/
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP
 	}
 }
 
@@ -34,6 +38,17 @@
 	header Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
 }
 
+(trusted_client_ip_headers) {
+	# Never append a browser-controlled forwarding chain. {client_ip} is parsed
+	# from CF-Connecting-IP only for an official Cloudflare peer and otherwise
+	# falls back to the direct socket peer. The private header is overwritten at
+	# this sole public ingress before the Next.js BFF is allowed to use it.
+	header_up X-Forwarded-For {client_ip}
+	header_up X-Real-IP {client_ip}
+	header_up X-Bumpa-Client-IP {client_ip}
+	header_up -CF-Connecting-IP
+}
+
 (web_proxy) {
 	import security_headers
 	# Next owns document CSP because only its renderer can apply the matching
@@ -42,6 +57,7 @@
 	header ?Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
 	encode zstd gzip
 	reverse_proxy web:3000 {
+		import trusted_client_ip_headers
 		# Do not allow a client-supplied policy or nonce to reach Next. Middleware
 		# creates and overwrites both again before rendering as defense in depth.
 		header_up -Content-Security-Policy
@@ -81,6 +97,7 @@
 		max_size 10MB
 	}
 	reverse_proxy api:8000 {
+		import trusted_client_ip_headers
 		# Keep durable PostgreSQL-backed webhook ingress routable while the
 		# asynchronous wake-up layer is degraded. Release gates still probe the
 		# stricter /health/ready endpoint directly.

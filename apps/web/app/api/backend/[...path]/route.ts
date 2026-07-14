@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isIP } from "node:net";
 import {
   correlationIdOrNew,
   isCanonicalCorrelationId,
@@ -32,6 +33,19 @@ const FORWARDED_APPLICATION_HEADERS = [
   "x-access-reason",
 ] as const;
 
+function caddyClientIp(request: NextRequest): string | null {
+  const value = request.headers.get("x-bumpa-client-ip");
+  if (
+    !value ||
+    value !== value.trim() ||
+    value.includes(",") ||
+    isIP(value) === 0
+  ) {
+    return null;
+  }
+  return value;
+}
+
 async function proxy(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> },
@@ -52,13 +66,11 @@ async function proxy(
   const headers = new Headers({ Accept: "application/json" });
   const cookie = request.headers.get("cookie");
   if (cookie) headers.set("cookie", cookie);
-  // Caddy is the only public listener and normalises these headers before the
-  // request reaches Next. Preserve them across the internal BFF hop so API-side
-  // abuse controls rate-limit the actual edge client, not the shared web pod.
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  if (forwardedFor) headers.set("x-forwarded-for", forwardedFor);
-  const realIp = request.headers.get("x-real-ip");
-  if (realIp) headers.set("x-real-ip", realIp);
+  // Browser-visible forwarding headers are untrusted. Caddy overwrites this
+  // private single-IP header at the sole public listener after validating the
+  // Cloudflare peer; direct development traffic safely omits it.
+  const clientIp = caddyClientIp(request);
+  if (clientIp) headers.set("x-forwarded-for", clientIp);
   // Preserve the browser's source metadata. Production cookie-authenticated
   // mutations are validated by the API, so the private BFF hop must not erase
   // an attacker-controlled Origin and accidentally turn it into trusted traffic.

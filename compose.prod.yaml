@@ -1,4 +1,21 @@
 services:
+  auth-secret-init:
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
+    build: !reset null
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/init-auth-secret"]
+    network_mode: none
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    volumes:
+      - runtime_auth_secret:/runtime-auth-secret
+    secrets:
+      - temporary_web_pin_verifier
+    restart: "no"
+
   app-secrets-init:
     image: ${API_IMAGE:?Set immutable API_IMAGE}
     build: !reset null
@@ -83,6 +100,10 @@ services:
       - "10000"
     environment:
       APP_ENV: production
+      AUTH_LOGIN_MODE: ${AUTH_LOGIN_MODE:?Set AUTH_LOGIN_MODE}
+      TEMPORARY_WEB_PIN_VERIFIER: ""
+      TEMPORARY_WEB_PIN_VERIFIER_FILE: /run/auth-secret/temporary_web_pin_verifier
+      TEMPORARY_WEB_PIN_EXPIRES_AT: ${TEMPORARY_WEB_PIN_EXPIRES_AT:?Set TEMPORARY_WEB_PIN_EXPIRES_AT}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
@@ -114,12 +135,15 @@ services:
       - no-new-privileges:true
     cap_drop: ["ALL"]
     depends_on:
+      auth-secret-init:
+        condition: service_completed_successfully
       app-secrets-init:
         condition: service_completed_successfully
       hermes-staging-init:
         condition: service_completed_successfully
     volumes:
       - runtime_app_secrets:/run/runtime-secrets:ro
+      - runtime_auth_secret:/run/auth-secret:ro
     deploy:
       resources:
         limits:
@@ -135,6 +159,10 @@ services:
     build: !reset null
     environment:
       APP_ENV: production
+      AUTH_LOGIN_MODE: disabled
+      TEMPORARY_WEB_PIN_VERIFIER: ""
+      TEMPORARY_WEB_PIN_VERIFIER_FILE: ""
+      TEMPORARY_WEB_PIN_EXPIRES_AT: ""
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
@@ -176,6 +204,10 @@ services:
     build: !reset null
     environment:
       APP_ENV: production
+      AUTH_LOGIN_MODE: disabled
+      TEMPORARY_WEB_PIN_VERIFIER: ""
+      TEMPORARY_WEB_PIN_VERIFIER_FILE: ""
+      TEMPORARY_WEB_PIN_EXPIRES_AT: ""
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
       OTP_SECRET: ${OTP_SECRET:?Set OTP_SECRET}
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
@@ -220,6 +252,7 @@ services:
     build: !reset null
     environment:
       APP_ENV: production
+      AUTH_LOGIN_MODE: disabled
       FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Set MIGRATION_DATABASE_URL}
@@ -436,6 +469,8 @@ services:
         max-file: "5"
 
 secrets:
+  temporary_web_pin_verifier:
+    file: ${SECRETS_DIR:-./.secrets}/temporary_web_pin_verifier
   meta_app_secret:
     file: ${SECRETS_DIR:-./.secrets}/meta_app_secret
   meta_system_user_access_token:
@@ -446,4 +481,5 @@ secrets:
     file: ${SECRETS_DIR:-./.secrets}/hermes_anthropic_api_key
 
 volumes:
+  runtime_auth_secret:
   runtime_app_secrets:

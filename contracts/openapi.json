@@ -1691,6 +1691,15 @@
       },
       "OtpRequested": {
         "properties": {
+          "delivery": {
+            "default": "whatsapp",
+            "enum": [
+              "whatsapp",
+              "web_pin"
+            ],
+            "title": "Delivery",
+            "type": "string"
+          },
           "dev_code": {
             "anyOf": [
               {
@@ -1707,8 +1716,11 @@
             "type": "integer"
           },
           "status": {
-            "const": "sent",
             "default": "sent",
+            "enum": [
+              "sent",
+              "accepted"
+            ],
             "title": "Status",
             "type": "string"
           }
@@ -1722,8 +1734,7 @@
       "OtpVerify": {
         "properties": {
           "code": {
-            "maxLength": 10,
-            "minLength": 6,
+            "pattern": "^\\d{6}$",
             "title": "Code",
             "type": "string"
           },
@@ -1767,6 +1778,65 @@
           "phone_e164"
         ],
         "title": "PhoneCreate",
+        "type": "object"
+      },
+      "PlatformAccessView": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "has_active_mapping": {
+            "title": "Has Active Mapping",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "phone_e164": {
+            "title": "Phone E164",
+            "type": "string"
+          },
+          "platform_roles": {
+            "items": {
+              "enum": [
+                "operator",
+                "researcher",
+                "superadmin"
+              ],
+              "type": "string"
+            },
+            "title": "Platform Roles",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "name",
+          "phone_e164",
+          "status",
+          "has_active_mapping",
+          "platform_roles",
+          "created_at"
+        ],
+        "title": "PlatformAccessView",
         "type": "object"
       },
       "PlatformAdminCreate": {
@@ -4464,6 +4534,291 @@
         "tags": [
           "admin",
           "onboarding"
+        ]
+      }
+    },
+    "/v1/admin/platform-access": {
+      "get": {
+        "description": "List mapped collaborators and current platform-role holders.",
+        "operationId": "list_platform_access_v1_admin_platform_access_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "bb_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bb Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PlatformAccessView"
+                  },
+                  "title": "Response List Platform Access V1 Admin Platform Access Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Platform Access",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/platform-access/{user_id}/{role}": {
+      "delete": {
+        "description": "Idempotently revoke operator or researcher access from an existing user.",
+        "operationId": "revoke_platform_access_role_v1_admin_platform_access__user_id___role__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "enum": [
+                "operator",
+                "researcher"
+              ],
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "bb_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bb Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Platform Access Role",
+        "tags": [
+          "admin"
+        ]
+      },
+      "put": {
+        "description": "Idempotently grant operator or researcher access to an existing user.",
+        "operationId": "grant_platform_access_v1_admin_platform_access__user_id___role__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "role",
+            "required": true,
+            "schema": {
+              "enum": [
+                "operator",
+                "researcher"
+              ],
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "bb_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bb Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformAccessView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Grant Platform Access",
+        "tags": [
+          "admin"
         ]
       }
     },

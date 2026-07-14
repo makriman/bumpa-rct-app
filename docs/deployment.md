@@ -152,12 +152,37 @@ EXPOSE_LOCAL_OTP=false
 SEED_DEMO_DATA=false
 CADDY_SITE_SCHEME=https
 CADDY_BIND_ADDRESS=0.0.0.0
+AUTH_LOGIN_MODE=whatsapp_otp
 WHATSAPP_BACKEND=meta
 BUMPA_BACKEND=bumpa
 AGENT_BACKEND=hermes
 ASYNC_RUNTIME_ENABLED=true
-SECRETS_DIR=/opt/bumpabestie/secrets
+SECRETS_DIR=/var/lib/bumpabestie-secrets
 ```
+
+`AUTH_LOGIN_MODE` is independent from the provider selectors: `disabled` is the
+authentication kill switch, `whatsapp_otp` uses the activated WhatsApp OTP lane,
+and `temporary_static_pin` enables the short-lived mapped-collaborator web pilot.
+For the temporary web-only containment release, set:
+
+```dotenv
+AUTH_LOGIN_MODE=temporary_static_pin
+TEMPORARY_WEB_PIN_EXPIRES_AT=<future-timezone-aware-timestamp>
+WHATSAPP_BACKEND=disabled
+META_TEST_SENDER_VERIFICATION_MODE=disabled
+PROACTIVE_INSIGHTS_ENABLED=false
+DAILY_INSIGHTS_ENABLED=false
+WEEKLY_INSIGHTS_ENABLED=false
+```
+
+Leave `TEMPORARY_WEB_PIN_VERIFIER` and `TEMPORARY_WEB_PIN_VERIFIER_FILE` blank in
+the host environment; production Compose owns the API-only secret-file path.
+Provision the HMAC verifier through `scripts/set_temporary_login_pin.sh`, validate
+the environment, and use the guarded promotion path. Meta secret files remain in
+their existing scoped boundary for later activation, but no login, test-sender or
+proactive delivery may use them while this mode is selected. The full threat model,
+rotation/rollback procedure, role boundary, client-IP chain and acceptance gates
+are in [`docs/temporary-web-login.md`](temporary-web-login.md).
 
 Do not include `DEV_FIXED_OTP` or `DEV_OTP_SINK`. Set the five production domains
 and HTTPS origins, independent high-entropy application/database secrets, internal
@@ -448,6 +473,13 @@ application writer; if backup or compatibility validation then fails, it restart
 the exact previously running containers. Forward/backward schema compatibility
 remains a release requirement. Never run a destructive down-migration during an
 outage without a separately reviewed recovery plan.
+
+Temporary web authentication has an additional fail-closed rollback: change
+`AUTH_LOGIN_MODE` to `disabled` and promote through the same coordinator. Its
+mandatory timestamp also disables request and verification after expiry. Rotating
+the shared pilot PIN requires rerunning `scripts/set_temporary_login_pin.sh` at its
+hidden prompt and recreating the secret initializer and API through the guarded
+path; it never requires placing a raw PIN in `.env.production`.
 
 Migration `0007_legacy_sync_writer` preserves the application-image rollback
 boundary introduced by `0006_sync_completion`. SQL that omits the new completion

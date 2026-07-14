@@ -20,7 +20,8 @@ const resource = vi.hoisted(() => ({
     name: string | null;
     phone_e164: string;
     status: string;
-    platform_roles: Array<"operator" | "superadmin">;
+    has_active_mapping: boolean;
+    platform_roles: Array<"operator" | "researcher" | "superadmin">;
     created_at: string;
   }> | null,
 }));
@@ -30,8 +31,9 @@ const currentAdmin = {
   name: "Maks Admin",
   phone_e164: "+441234567890",
   status: "active",
-  platform_roles: ["operator", "superadmin"] as Array<
-    "operator" | "superadmin"
+  has_active_mapping: true,
+  platform_roles: ["superadmin", "operator", "researcher"] as Array<
+    "operator" | "researcher" | "superadmin"
   >,
   created_at: "2026-07-12T12:00:00Z",
 };
@@ -41,8 +43,23 @@ const otherAdmin = {
   name: "Ada Operator",
   phone_e164: "+2348012345678",
   status: "active",
-  platform_roles: ["operator"] as Array<"operator" | "superadmin">,
+  has_active_mapping: true,
+  platform_roles: ["operator"] as Array<
+    "operator" | "researcher" | "superadmin"
+  >,
   created_at: "2026-07-13T09:00:00Z",
+};
+
+const unmappedRoleHolder = {
+  user_id: "researcher-unmapped",
+  name: "Dormant Researcher",
+  phone_e164: "+2348011112222",
+  status: "active",
+  has_active_mapping: false,
+  platform_roles: ["researcher"] as Array<
+    "operator" | "researcher" | "superadmin"
+  >,
+  created_at: "2026-07-13T10:00:00Z",
 };
 
 vi.mock("@/lib/api", () => ({
@@ -52,7 +69,7 @@ vi.mock("@/lib/api", () => ({
 
 vi.mock("@/lib/use-api-resource", () => ({
   useApiResource: (path: string) =>
-    path === "/admin/platform-admins"
+    path === "/admin/platform-access"
       ? {
           ...resource,
           reload: reloadAdmins,
@@ -103,12 +120,12 @@ describe("platform administrator management", () => {
 
     expect(screen.getByText("Maks Admin")).toBeInTheDocument();
     expect(screen.getByText("Your account")).toBeInTheDocument();
-    expect(screen.getByText("Current administrator")).toBeInTheDocument();
+    expect(screen.getByText("Superadmin protected")).toBeInTheDocument();
     expect(screen.queryByText(currentAdmin.phone_e164)).not.toBeInTheDocument();
     expect(screen.getByText("+44123 ••• 7890")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
-        name: "Revoke Maks Admin's platform access",
+        name: "Revoke Maks Admin's admin access",
       }),
     ).not.toBeInTheDocument();
   });
@@ -118,88 +135,88 @@ describe("platform administrator management", () => {
     render(<UserList />);
 
     expect(
-      screen.getByRole("button", { name: "＋ Add administrator" }),
-    ).toBeDisabled();
+      screen.getByRole("link", { name: "Manage tenant mappings" }),
+    ).toHaveAttribute("href", "/admin/tenants");
     expect(screen.getByText("Demo preview")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", {
-        name: "Revoke Ada Operator's platform access",
+        name: "Revoke Ada Operator's admin access",
       }),
     ).not.toBeInTheDocument();
   });
 
-  it("validates and grants operator access without exposing secrets", async () => {
-    apiRequest.mockResolvedValueOnce({
-      ...otherAdmin,
-      user_id: "admin-new",
-      name: "Nneka Admin",
-    });
+  it("grants access only from the mapped collaborator directory", () => {
     render(<UserList />);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "＋ Add administrator" }),
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Grant administrator access" }),
-    );
-    expect(screen.getByText("Enter the administrator's name.")).toBeVisible();
-    expect(screen.getByText(/Use E\.164 format/)).toBeVisible();
-
-    fireEvent.change(screen.getByLabelText("Full name"), {
-      target: { value: "  Nneka Admin  " },
-    });
-    fireEvent.change(screen.getByLabelText("WhatsApp phone number"), {
-      target: { value: "+2348098765432" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Grant administrator access" }),
-    );
-
-    await waitFor(() =>
-      expect(apiRequest).toHaveBeenCalledWith("/admin/platform-admins", {
-        method: "POST",
-        body: JSON.stringify({
-          name: "Nneka Admin",
-          phone_e164: "+2348098765432",
-          role: "operator",
-        }),
-      }),
-    );
-    expect(reloadAdmins).toHaveBeenCalledTimes(1);
     expect(
-      (
-        await screen.findByText(
-          "Nneka Admin can now administer tenant mappings.",
-        )
-      ).closest('[role="status"]'),
+      screen.getByText(/map their primary phone to an active workspace first/i),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "Add a platform administrator" }),
+      screen.getByRole("link", { name: "Manage tenant mappings" }),
+    ).toHaveAttribute("href", "/admin/tenants");
+    expect(
+      screen.queryByRole("button", { name: /add administrator/i }),
     ).not.toBeInTheDocument();
-  });
-
-  it("discards the administrator draft when Escape closes the dialog", () => {
-    render(<UserList />);
-    fireEvent.click(
-      screen.getByRole("button", { name: "＋ Add administrator" }),
-    );
-    fireEvent.change(screen.getByLabelText("Full name"), {
-      target: { value: "Discard this draft" },
-    });
-    fireEvent.change(screen.getByLabelText("WhatsApp phone number"), {
-      target: { value: "+2348098765433" },
-    });
-
-    fireEvent.keyDown(document, { key: "Escape" });
     expect(
       screen.queryByRole("heading", { name: "Add a platform administrator" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Grant Ada Operator's research access",
+      }),
+    ).toBeInTheDocument();
+    expect(apiRequest).not.toHaveBeenCalled();
+  });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "＋ Add administrator" }),
-    );
-    expect(screen.getByLabelText("Full name")).toHaveValue("");
-    expect(screen.getByLabelText("WhatsApp phone number")).toHaveValue("");
+  it("keeps unmapped role holders auditable without offering a new grant", () => {
+    resource.data = [currentAdmin, unmappedRoleHolder];
+    render(<UserList />);
+
+    expect(screen.getByText("Mapping required")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {
+        name: "Grant Dormant Researcher's admin access",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", {
+        name: "Revoke Dormant Researcher's research access",
+      }),
+    ).toBeEnabled();
+  });
+
+  it("allows deprivileging a suspended holder while blocking new grants", () => {
+    resource.data = [
+      currentAdmin,
+      { ...otherAdmin, status: "suspended", platform_roles: ["operator"] },
+    ];
+    render(<UserList />);
+
+    expect(
+      screen.getByRole("button", {
+        name: "Revoke Ada Operator's admin access",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", {
+        name: "Grant Ada Operator's research access",
+      }),
+    ).toBeDisabled();
+  });
+
+  it("links the empty directory to tenant mapping", () => {
+    resource.data = [];
+    render(<UserList />);
+
+    expect(
+      screen.getByRole("link", { name: "Map a collaborator" }),
+    ).toHaveAttribute("href", "/admin/tenants");
+    expect(
+      screen.getByText(/Map a collaborator's primary phone/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /add administrator/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("requires an explicit confirmation before revoking access", async () => {
@@ -208,29 +225,62 @@ describe("platform administrator management", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Revoke Ada Operator's platform access",
+        name: "Revoke Ada Operator's admin access",
       }),
     );
     expect(
-      screen.getByRole("heading", { name: "Revoke platform access?" }),
+      screen.getByRole("heading", { name: "Revoke admin access?" }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/Any store membership they hold remains unchanged/),
     ).toBeInTheDocument();
     fireEvent.click(
-      screen.getByRole("button", { name: "Revoke platform access" }),
+      screen.getByRole("button", { name: "Revoke admin access" }),
     );
 
     await waitFor(() =>
       expect(apiRequest).toHaveBeenCalledWith(
-        "/admin/platform-admins/admin-other",
+        "/admin/platform-access/admin-other/operator",
         { method: "DELETE" },
       ),
     );
     expect(reloadAdmins).toHaveBeenCalledTimes(1);
     expect(
       (
-        await screen.findByText("Ada Operator's platform access was revoked.")
+        await screen.findByText("Ada Operator's admin access was revoked.")
+      ).closest('[role="status"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("confirms and grants research access independently", async () => {
+    apiRequest.mockResolvedValueOnce(undefined);
+    render(<UserList />);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Grant Ada Operator's research access",
+      }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Grant research access?" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/consented, de-identified research tools/).length,
+    ).toBeGreaterThan(0);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Grant research access" }),
+    );
+
+    await waitFor(() =>
+      expect(apiRequest).toHaveBeenCalledWith(
+        "/admin/platform-access/admin-other/researcher",
+        { method: "PUT" },
+      ),
+    );
+    expect(reloadAdmins).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await screen.findByText("Ada Operator now has research access.")
       ).closest('[role="status"]'),
     ).toBeInTheDocument();
   });
@@ -243,18 +293,18 @@ describe("platform administrator management", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Revoke Ada Operator's platform access",
+        name: "Revoke Ada Operator's admin access",
       }),
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Revoke platform access" }),
+      screen.getByRole("button", { name: "Revoke admin access" }),
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The last active administrator cannot be revoked",
     );
     expect(
-      screen.getByRole("heading", { name: "Revoke platform access?" }),
+      screen.getByRole("heading", { name: "Revoke admin access?" }),
     ).toBeInTheDocument();
     expect(reloadAdmins).not.toHaveBeenCalled();
   });
@@ -270,7 +320,7 @@ describe("platform administrator management", () => {
     rerender(<UserList />);
     expect(
       screen.getByRole("heading", {
-        name: "Administrators could not be loaded",
+        name: "Platform access could not be loaded",
       }),
     ).toBeInTheDocument();
     expect(
@@ -283,7 +333,7 @@ describe("platform administrator management", () => {
     rerender(<UserList />);
     expect(
       screen.getByRole("heading", {
-        name: "No platform administrators returned",
+        name: "No mapped collaborators returned",
       }),
     ).toBeInTheDocument();
   });

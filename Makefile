@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e e2e-linux integration load-failure \
+.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e e2e-linux temporary-auth-e2e integration load-failure \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
 	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract \
 	api-contract api-contract-check clean
@@ -51,6 +51,10 @@ e2e-linux: ## Run production-build browser checks in the pinned Linux Playwright
 		-v bumpabestie-playwright-node-modules:/work/node_modules \
 		-w /work mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48 \
 		bash -lc 'npm ci && npm run test:e2e'
+
+temporary-auth-e2e: ## Exercise the real provider-free browser auth path in disposable Compose
+	@test -n "$(TEMPORARY_AUTH_E2E_PIN)" || (echo "Set TEMPORARY_AUTH_E2E_PIN" >&2; exit 2)
+	@TEMPORARY_AUTH_E2E_PIN="$(TEMPORARY_AUTH_E2E_PIN)" ./scripts/temporary_web_auth_e2e.sh
 
 integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report flows
 	./scripts/local_e2e.sh

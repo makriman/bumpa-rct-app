@@ -135,7 +135,7 @@ for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
   API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
-  WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
+  AUTH_LOGIN_MODE WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
   value="$(value_for "$key")"
   printf -v "$key" '%s' "$value"
   export "${key?}"
@@ -203,6 +203,7 @@ for secret_name in \
     exit 2
   fi
 done
+./scripts/validate_temporary_auth_secret.sh "$AUTH_LOGIN_MODE" "$SECRETS_DIR"
 
 if [[ -z "${DEPLOY_REF:-}" || -z "${IMAGE_TAG:-}" || -z "${INFRA_IMAGE_TAG:-}" ]]; then
   echo "DEPLOY_REF, IMAGE_TAG and INFRA_IMAGE_TAG are required" >&2
