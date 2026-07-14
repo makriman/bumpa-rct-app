@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { GET, POST } from "@/app/api/backend/[...path]/route";
+import { GET, POST, PUT } from "@/app/api/backend/[...path]/route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -125,6 +125,51 @@ describe("same-origin backend proxy", () => {
     expect(headers.has("authorization")).toBe(false);
     expect(headers.has("connection")).toBe(false);
     expect(headers.has("x-internal-secret")).toBe(false);
+  });
+
+  it("forwards audited platform access grants as PUT requests", async () => {
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          user_id: "target-user",
+          platform_roles: ["operator"],
+          has_active_mapping: true,
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    const request = new NextRequest(
+      "https://admin.bumpabestie.example/api/backend/admin/platform-access/target-user/operator",
+      {
+        method: "PUT",
+        headers: {
+          cookie: "bb_session=signed",
+          origin: "https://admin.bumpabestie.example",
+          "x-access-reason": "Approved pilot collaborator access",
+        },
+      },
+    );
+
+    const response = await PUT(
+      request,
+      context("admin", "platform-access", "target-user", "operator"),
+    );
+
+    expect(response.status).toBe(200);
+    const [url, init] = upstream.mock.calls[0];
+    expect(String(url)).toBe(
+      "http://127.0.0.1:8000/v1/admin/platform-access/target-user/operator",
+    );
+    expect(init?.method).toBe("PUT");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("cookie")).toBe("bb_session=signed");
+    expect(headers.get("origin")).toBe("https://admin.bumpabestie.example");
+    expect(headers.get("x-access-reason")).toBe(
+      "Approved pilot collaborator access",
+    );
   });
 
   it.each([

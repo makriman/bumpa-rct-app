@@ -141,6 +141,30 @@ def test_cors_preflight_allows_revision_preconditions(client: TestClient) -> Non
     assert {"authorization", "content-type", "if-match"} <= allowed_headers
 
 
+def test_cors_preflight_allows_audited_platform_access_put(client: TestClient) -> None:
+    origin = get_settings().effective_cors_origins[0]
+    response = client.options(
+        "/v1/admin/platform-access/test-user/operator",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": ("Authorization,Content-Type,X-Access-Reason"),
+        },
+    )
+
+    assert response.status_code == 200
+    allowed_methods = {
+        method.strip().lower()
+        for method in response.headers["access-control-allow-methods"].split(",")
+    }
+    allowed_headers = {
+        header.strip().lower()
+        for header in response.headers["access-control-allow-headers"].split(",")
+    }
+    assert "put" in allowed_methods
+    assert {"authorization", "content-type", "x-access-reason"} <= allowed_headers
+
+
 def test_cookie_auth_mutation_enforces_origin_but_bearer_is_not_csrf_scoped(
     client: TestClient,
 ) -> None:
