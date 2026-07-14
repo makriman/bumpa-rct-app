@@ -6,7 +6,14 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import LoginPage from "@/app/login/page";
+import LoginPageClient from "@/components/login-page";
+import { createPhoneCountries } from "@/lib/phone";
+
+const phoneCountries = createPhoneCountries((iso) => iso);
+
+function LoginPage() {
+  return <LoginPageClient phoneCountries={phoneCountries} />;
+}
 
 const accepted = (delivery: "web_pin" | "whatsapp") =>
   new Response(

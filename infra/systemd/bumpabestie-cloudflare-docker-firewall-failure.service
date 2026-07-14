@@ -1,0 +1,14 @@
+[Unit]
+Description=Stop Docker when the BumpaBestie origin firewall cannot fail closed
+DefaultDependencies=no
+Conflicts=docker.service
+Before=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/true
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict

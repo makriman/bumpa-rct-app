@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { GET, POST, PUT } from "@/app/api/backend/[...path]/route";
+import { DELETE, GET, POST, PUT } from "@/app/api/backend/[...path]/route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -171,6 +171,69 @@ describe("same-origin backend proxy", () => {
       "Approved pilot collaborator access",
     );
   });
+
+  it("passes a committed no-content access revocation through exactly once", async () => {
+    const correlationId = "4f182cc8-79dd-4ac2-bd62-3519a3c27ac8";
+    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, {
+        status: 204,
+        headers: {
+          "content-type": "application/json",
+          "x-correlation-id": correlationId,
+        },
+      }),
+    );
+    const request = new NextRequest(
+      "https://admin.bumpabestie.example/api/backend/admin/platform-access/target-user/operator",
+      {
+        method: "DELETE",
+        headers: {
+          cookie: "bb_session=signed",
+          origin: "https://admin.bumpabestie.example",
+          "x-access-reason": "Approved collaborator access revocation",
+        },
+      },
+    );
+
+    const response = await DELETE(
+      request,
+      context("admin", "platform-access", "target-user", "operator"),
+    );
+
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("x-correlation-id")).toBe(correlationId);
+    expect((await response.arrayBuffer()).byteLength).toBe(0);
+    const [url, init] = upstream.mock.calls[0];
+    expect(String(url)).toBe(
+      "http://127.0.0.1:8000/v1/admin/platform-access/target-user/operator",
+    );
+    expect(init?.method).toBe("DELETE");
+    expect(new Headers(init?.headers).get("x-access-reason")).toBe(
+      "Approved collaborator access revocation",
+    );
+  });
+
+  it.each([205, 304])(
+    "does not attach a response body to status %i",
+    async (status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(null, {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const request = new NextRequest(
+        "https://bumpabestie.example/api/backend/auth/me",
+      );
+
+      const response = await GET(request, context("auth", "me"));
+
+      expect(response.status).toBe(status);
+      expect((await response.arrayBuffer()).byteLength).toBe(0);
+    },
+  );
 
   it.each([
     ["a forwarding chain", "203.0.113.9, 198.51.100.4"],

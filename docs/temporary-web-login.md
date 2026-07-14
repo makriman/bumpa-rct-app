@@ -67,9 +67,12 @@ echo, reads the existing production `OTP_SECRET`, and writes only:
 HMAC-SHA256(OTP_SECRET, "web-login-pin:" + PIN)
 ```
 
-The raw PIN is never written by the script. The host verifier is a root-owned
-`0600` regular file in its own root-owned `0700` directory, separate from the
-deploy-user-owned Meta and Hermes `SECRETS_DIR`. Before deployment, the non-root
+The raw PIN is never written by the script. Each rotation is a new root-owned
+`0600` regular file under
+`/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/`; both parent
+directories are root-owned `0700`. The random 32-hex filename is a non-secret
+version identifier, never a verifier, hash or PIN. The files are separate from
+the deploy-user-owned Meta and Hermes `SECRETS_DIR`. Before deployment, the non-root
 coordinator asks Docker to validate the verifier through the already-pulled exact
 API image with no network, a read-only root filesystem, no capabilities and
 `no-new-privileges`; the validation command never emits the verifier. A separate
@@ -86,40 +89,77 @@ also controls the release and reads `OTP_SECRET`, so production access to the
 account and its SSH key must be treated as privileged root access.
 
 From the checked-out production repository, provision or rotate the verifier as
-root. The setter reads the dedicated absolute
-`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` from the environment file:
+root:
 
 ```bash
 sudo ./scripts/set_temporary_login_pin.sh
 sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
 ```
 
+The setter takes the maintenance lock and requires a private valid deployed-release
+record. For an active temporary boundary, the environment must still select the
+exact recorded host path; a different path means a rotation is already staged and
+is rejected before the prompt. The setter silently validates the retained deployed
+file's exact shape, owner and mode, prompts without echo, creates a distinct file
+with exclusive-create semantics, fsyncs the file and directories, then atomically
+rewrites only `TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` in `.env.production`. It never
+overwrites or removes an older verifier.
+
 The operator supplies the PIN only at the hidden prompt. Do not pass it as an
-argument, environment variable or stdin captured by automation. Set a new future
-`TEMPORARY_WEB_PIN_EXPIRES_AT`, validate the environment, and apply the change
-through the guarded promotion procedure in `docs/deployment.md` so the initializer
-and API are recreated together. A verifier rotation does not revoke already issued
-session cookies; contain suspected compromise by setting `AUTH_LOGIN_MODE=disabled`,
-using the normal session-revocation controls, and promoting the containment change.
+argument, environment variable or stdin captured by automation. For rotation,
+leave the current host path unchanged, set a new future
+`TEMPORARY_WEB_PIN_EXPIRES_AT`, run the setter, validate the environment, and apply
+the change through the guarded promotion procedure in `docs/deployment.md` so the
+initializer and API are recreated together. A verifier rotation does not revoke
+already issued session cookies; contain suspected compromise by setting
+`AUTH_LOGIN_MODE=disabled`, using the normal session-revocation controls, and
+promoting the containment change.
 
 The first rollout is intentionally two-phase. First set `AUTH_LOGIN_MODE=disabled`,
 leave every `TEMPORARY_WEB_PIN_*` field blank, park WhatsApp delivery and promote
 the compatible release. Verify that release and schema while login remains closed.
 Only then set the fixed runtime path
 `TEMPORARY_WEB_PIN_VERIFIER_FILE=/run/auth-secret/temporary_web_pin_verifier`, the
-dedicated host path and future expiry, run the setter, and promote the same
+temporary mode, a future expiry, and a blank
+`TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST`; run the setter so it creates and selects
+the first version, then promote the same
 immutable revision and six image digests again. This keeps the previous release a
 viable pre-boundary rollback and prevents half-activation of the temporary mode.
+The phase-one release record stores the disabled non-secret auth boundary. A failed
+phase-two promotion atomically restores that boundary even though its revision and
+image digests are unchanged, reruns `auth-secret-init` to remove the runtime verifier,
+and recreates the API only after the initializer succeeds. Legacy release records
+without an auth object default to this disabled boundary.
+The rollback path removes public Caddy ingress and the failed target API before it
+pulls or initializes anything. Any failed pull, initializer, recreation, or smoke
+attempt removes them again and sets the maintenance interlock, so a failed target
+login mode is never kept live merely to preserve availability.
 
-Rollback is fail-closed: set `AUTH_LOGIN_MODE=disabled`, blank all four temporary
+Manual containment is fail-closed: set `AUTH_LOGIN_MODE=disabled`, blank all four temporary
 PIN fields and use the guarded promotion path. The root-owned dormant verifier may
 remain on disk, but production Compose mounts `/dev/null` and the initializer
 removes the API runtime copy outside temporary mode. Expiry independently disables
 request and verification even if an operator forgets the kill switch. Do not
-switch to `whatsapp_otp` until the Meta activation gates are complete. To restore a
-prior temporary PIN during a controlled rollback, rerun the setter at its hidden
-prompt and repeat the initializer/API promotion; never keep a raw rollback copy on
-the host.
+switch to `whatsapp_otp` until the Meta activation gates are complete. A failed
+rotation restores the recorded prior host path, runs `auth-secret-init` against
+that still-immutable file, and recreates the prior API only afterward; it never
+asks an operator to reconstruct the old PIN. Legacy fixed-path records remain
+accepted solely for rollout compatibility, while every new setter run selects a
+versioned file.
+
+If the selected host verifier is missing or suspected compromised, do not claim
+that a promotion preflight provides immediate containment. Follow the root-only
+emergency procedure in the runbook to remove Caddy and API, prove both are absent
+through Docker labels and leave the maintenance interlock active. That deliberate
+outage remains in place until a reviewed recovery reconciles the recorded auth
+boundary; the ordinary disabled-mode promotion is for a healthy pre-boundary site.
+
+Retain older verifier files conservatively. They are tiny, private recovery
+material referenced by release history and rollback evidence. This release has no
+automated deletion command; do not remove one merely because a newer version is
+live. Retirement requires a later separately reviewed policy that proves the path
+is absent from the active environment, deployed release, in-flight journals,
+retained rollback window and protected recovery evidence.
 
 ## Roles, hosts and cookies
 

@@ -21,6 +21,11 @@ previous_revision=""
 previous_env_sha256=""
 previous_release_sha256=""
 previous_deployed_sha256=""
+previous_auth_login_mode=""
+previous_temporary_web_pin_verifier_file=""
+previous_temporary_web_pin_verifier_file_host=""
+previous_temporary_web_pin_expires_at=""
+previous_whatsapp_backend=""
 
 fail() {
   echo "bumpabestie-promote: $*" >&2
@@ -48,6 +53,11 @@ atomic_journal() {
     --arg previous_env_sha256 "${previous_env_sha256:-}" \
     --arg previous_release_sha256 "${previous_release_sha256:-}" \
     --arg previous_deployed_sha256 "${previous_deployed_sha256:-}" \
+    --arg previous_auth_login_mode "${previous_auth_login_mode:-}" \
+    --arg previous_verifier_file "${previous_temporary_web_pin_verifier_file:-}" \
+    --arg previous_verifier_host "${previous_temporary_web_pin_verifier_file_host:-}" \
+    --arg previous_expires_at "${previous_temporary_web_pin_expires_at:-}" \
+    --arg previous_whatsapp_backend "${previous_whatsapp_backend:-}" \
     --arg started_at "${started_at:-$(date -u +%FT%TZ)}" \
     --arg updated_at "$(date -u +%FT%TZ)" \
     '{schema_version: 1, operation_id: $operation_id, phase: $phase,
@@ -55,6 +65,13 @@ atomic_journal() {
       previous_env_sha256: $previous_env_sha256,
       previous_release_sha256: $previous_release_sha256,
       previous_deployed_sha256: $previous_deployed_sha256,
+      previous_auth: {
+        login_mode: $previous_auth_login_mode,
+        temporary_web_pin_verifier_file: $previous_verifier_file,
+        temporary_web_pin_verifier_file_host: $previous_verifier_host,
+        temporary_web_pin_expires_at: $previous_expires_at,
+        whatsapp_backend: $previous_whatsapp_backend
+      },
       started_at: $started_at, updated_at: $updated_at}' >"$tmp"
   sync -f "$tmp"
   mv -f "$tmp" "$journal"
@@ -73,7 +90,7 @@ mark_maintenance_required() {
 }
 
 # ShellCheck cannot see that this function is invoked by the installed trap.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 on_exit() {
   local result=$?
   local inner_journal_present=0 inner_journal
@@ -85,11 +102,18 @@ on_exit() {
         break
       fi
     done
-    if [[ -n "$previous_checkout" && "$inner_journal_present" == "0" \
-      && ! -e "$maintenance_required" && ! -L "$maintenance_required" ]] \
-      && validate_previous_restored; then
-      atomic_journal PREVIOUS_RESTORED
-      archive_terminal PREVIOUS_RESTORED
+    if [[ -n "$previous_checkout" && -n "$previous_env_sha256" \
+      && "$inner_journal_present" == "0" \
+      && ! -e "$maintenance_required" && ! -L "$maintenance_required" ]]; then
+      if ! validate_previous_restored; then
+        restore_previous_environment || true
+      fi
+      if validate_previous_restored; then
+        atomic_journal PREVIOUS_RESTORED
+        archive_terminal PREVIOUS_RESTORED
+      else
+        mark_maintenance_required "coordinator_operation=$operation_id phase=$(jq -r '.phase // \"UNKNOWN\"' "$journal" 2>/dev/null || printf UNKNOWN)" || true
+      fi
     else
       mark_maintenance_required "coordinator_operation=$operation_id phase=$(jq -r '.phase // \"UNKNOWN\"' "$journal" 2>/dev/null || printf UNKNOWN)" || true
     fi
@@ -114,6 +138,11 @@ validate_image_reference() {
   [[ "$1" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]
 }
 
+validate_temporary_verifier_host_path() {
+  [[ "$1" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]] \
+    || [[ "$1" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]
+}
+
 env_value() {
   local key="$1"
   local count value
@@ -123,8 +152,115 @@ env_value() {
   printf '%s\n' "$value"
 }
 
+validate_auth_boundary() {
+  local login_mode="$1" verifier_file="$2" verifier_host="$3"
+  local expires_at="$4" whatsapp_backend="$5" expiry_pattern
+  [[ "$login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]] || return 1
+  [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || return 1
+  if [[ "$login_mode" == "temporary_static_pin" ]]; then
+    [[ "$whatsapp_backend" == "disabled" ]] || return 1
+    [[ "$verifier_file" == "/run/auth-secret/temporary_web_pin_verifier" ]] || return 1
+    validate_temporary_verifier_host_path "$verifier_host" || return 1
+    expiry_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    [[ "$expires_at" =~ $expiry_pattern ]] || return 1
+  else
+    [[ -z "$verifier_file" && -z "$verifier_host" && -z "$expires_at" ]] || return 1
+  fi
+}
+
+render_previous_environment() {
+  local source="$1" destination="$2"
+  awk \
+    -v deploy_ref="$previous_revision" \
+    -v image_tag="$previous_image_tag" \
+    -v infra_image_tag="$previous_infra_image_tag" \
+    -v api_image="$previous_api_image" \
+    -v web_image="$previous_web_image" \
+    -v caddy_image="$previous_caddy_image" \
+    -v postgres_image="$previous_postgres_image" \
+    -v backup_image="$previous_backup_image" \
+    -v hermes_image="$previous_hermes_image" \
+    -v auth_login_mode="$previous_auth_login_mode" \
+    -v verifier_file="$previous_temporary_web_pin_verifier_file" \
+    -v verifier_host="$previous_temporary_web_pin_verifier_file_host" \
+    -v expires_at="$previous_temporary_web_pin_expires_at" \
+    -v whatsapp_backend="$previous_whatsapp_backend" '
+      BEGIN {
+        replacement["DEPLOY_REF"] = deploy_ref
+        replacement["IMAGE_TAG"] = image_tag
+        replacement["INFRA_IMAGE_TAG"] = infra_image_tag
+        replacement["API_IMAGE"] = api_image
+        replacement["WEB_IMAGE"] = web_image
+        replacement["CADDY_IMAGE"] = caddy_image
+        replacement["POSTGRES_IMAGE"] = postgres_image
+        replacement["BACKUP_IMAGE"] = backup_image
+        replacement["HERMES_IMAGE"] = hermes_image
+        replacement["AUTH_LOGIN_MODE"] = auth_login_mode
+        replacement["TEMPORARY_WEB_PIN_VERIFIER"] = ""
+        replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE"] = verifier_file
+        replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"] = verifier_host
+        replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
+        replacement["WHATSAPP_BACKEND"] = whatsapp_backend
+      }
+      {
+        separator = index($0, "=")
+        key = separator > 0 ? substr($0, 1, separator - 1) : ""
+        if (key in replacement) {
+          seen[key]++
+          if (seen[key] > 1) exit 42
+          print key "=" replacement[key]
+          next
+        }
+        print
+      }
+      END {
+        for (key in replacement) if (seen[key] != 1) exit 43
+      }
+    ' "$source" >"$destination"
+}
+
+canonical_previous_env_sha256() (
+  local candidate=""
+  trap 'if [[ -n "$candidate" ]]; then rm -f -- "$candidate"; fi' EXIT
+  candidate="$(mktemp "$state_dir/previous-env.XXXXXX")"
+  chmod 0600 "$candidate"
+  render_previous_environment "$repo/.env.production" "$candidate" || return 1
+  sha256sum "$candidate" | awk '{print $1}'
+)
+
+# Invoked by the installed EXIT/signal trap when no target child journal exists.
+# shellcheck disable=SC2329
+restore_previous_environment() (
+  local environment="$repo/.env.production"
+  local candidate="" environment_owner
+  trap 'if [[ -n "$candidate" ]]; then rm -f -- "$candidate"; fi' EXIT
+  [[ -f "$environment" && ! -L "$environment" ]] || return 1
+  [[ "$(file_mode "$environment")" == "600" ]] || return 1
+  environment_owner="$(file_owner "$environment")"
+  candidate="$(mktemp "$repo/.env.production.restore.XXXXXX")"
+  chmod 0600 "$candidate"
+  render_previous_environment "$environment" "$candidate" || return 1
+  if [[ "$(file_owner "$candidate")" != "$environment_owner" ]]; then
+    chown "$environment_owner" "$candidate" || return 1
+  fi
+  chmod 0600 "$candidate"
+  sync -f "$candidate"
+  mv -f "$candidate" "$environment"
+  candidate=""
+  sync -f "$repo"
+)
+
 record_matches_env() {
   local expected_revision="$1" expected_operations="$2"
+  local auth_login_mode verifier_inline verifier_file verifier_host expires_at
+  local whatsapp_backend
+  auth_login_mode="$(env_value AUTH_LOGIN_MODE)" || return 1
+  verifier_inline="$(env_value TEMPORARY_WEB_PIN_VERIFIER)" || return 1
+  verifier_file="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE)" || return 1
+  verifier_host="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST)" || return 1
+  expires_at="$(env_value TEMPORARY_WEB_PIN_EXPIRES_AT)" || return 1
+  whatsapp_backend="$(env_value WHATSAPP_BACKEND)" || return 1
+  [[ -z "$verifier_inline" ]] || return 1
   jq --exit-status \
     --arg revision "$expected_revision" --arg operations "$expected_operations" \
     --arg deploy_ref "$(env_value DEPLOY_REF)" \
@@ -133,13 +269,24 @@ record_matches_env() {
     --arg api "$(env_value API_IMAGE)" --arg web "$(env_value WEB_IMAGE)" \
     --arg caddy "$(env_value CADDY_IMAGE)" --arg postgres "$(env_value POSTGRES_IMAGE)" \
     --arg backup "$(env_value BACKUP_IMAGE)" --arg hermes "$(env_value HERMES_IMAGE)" \
+    --arg auth_login_mode "$auth_login_mode" \
+    --arg verifier_file "$verifier_file" \
+    --arg verifier_host "$verifier_host" \
+    --arg expires_at "$expires_at" \
+    --arg whatsapp_backend "$whatsapp_backend" \
     '.revision == $revision and (.operations_revision // .revision) == $operations and
      .revision == $deploy_ref and .image_tag == $image_tag and
      .infra_image_tag == $infra_tag and .images.api == $api and
      .images.worker == $api and .images.scheduler == $api and
      .images.web == $web and .images.caddy == $caddy and
      .images.postgres == $postgres and .images.backup == $backup and
-     .images.hermes == $hermes' "$repo/.deployed-release.json" >/dev/null
+     .images.hermes == $hermes and
+     .auth.login_mode == $auth_login_mode and
+     .auth.temporary_web_pin_verifier_file == $verifier_file and
+     .auth.temporary_web_pin_verifier_file_host == $verifier_host and
+     .auth.temporary_web_pin_expires_at == $expires_at and
+     .auth.whatsapp_backend == $whatsapp_backend' \
+    "$repo/.deployed-release.json" >/dev/null
 }
 
 validate_committed() {
@@ -219,7 +366,26 @@ previous_checkout="$(jq -er '.operations_revision // .revision' "$repo/.deployed
 [[ "$previous_checkout" =~ ^[a-f0-9]{40}$ ]] || fail "recorded operations revision is invalid"
 [[ "$(git -C "$repo" rev-parse HEAD)" == "$previous_checkout" ]] || fail "checkout does not match recorded operations revision"
 previous_revision="$(jq -er '.revision' "$repo/.deployed-release.json")"
-previous_env_sha256="$(sha256sum "$repo/.env.production" | awk '{print $1}')"
+previous_image_tag="$(jq -er '.image_tag' "$repo/.deployed-release.json")"
+previous_infra_image_tag="$(jq -er '.infra_image_tag' "$repo/.deployed-release.json")"
+previous_api_image="$(jq -er '.images.api' "$repo/.deployed-release.json")"
+previous_web_image="$(jq -er '.images.web' "$repo/.deployed-release.json")"
+previous_caddy_image="$(jq -er '.images.caddy' "$repo/.deployed-release.json")"
+previous_postgres_image="$(jq -er '.images.postgres' "$repo/.deployed-release.json")"
+previous_backup_image="$(jq -er '.images.backup' "$repo/.deployed-release.json")"
+previous_hermes_image="$(jq -er '.images.hermes' "$repo/.deployed-release.json")"
+previous_auth_login_mode="$(jq -r '.auth.login_mode // "disabled"' "$repo/.deployed-release.json")"
+previous_temporary_web_pin_verifier_file="$(jq -r '.auth.temporary_web_pin_verifier_file // ""' "$repo/.deployed-release.json")"
+previous_temporary_web_pin_verifier_file_host="$(jq -r '.auth.temporary_web_pin_verifier_file_host // ""' "$repo/.deployed-release.json")"
+previous_temporary_web_pin_expires_at="$(jq -r '.auth.temporary_web_pin_expires_at // ""' "$repo/.deployed-release.json")"
+previous_whatsapp_backend="$(jq -r '.auth.whatsapp_backend // "disabled"' "$repo/.deployed-release.json")"
+validate_auth_boundary \
+  "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
+  "$previous_temporary_web_pin_verifier_file_host" \
+  "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || \
+  fail "recorded auth boundary is invalid"
+previous_env_sha256="$(canonical_previous_env_sha256)" || \
+  fail "unable to canonicalize the previous environment boundary"
 previous_release_sha256="$(sha256sum "$repo/.deployed-release.json" | awk '{print $1}')"
 previous_deployed_sha256="$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')"
 atomic_journal SNAPSHOT_RECORDED

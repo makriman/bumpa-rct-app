@@ -1,0 +1,30 @@
+[Unit]
+Description=BumpaBestie Cloudflare boundary for Docker-published web ports
+Documentation=https://www.cloudflare.com/ips/
+Wants=network-online.target
+BindsTo=docker.service
+After=network-online.target docker.service
+PartOf=docker.service
+OnFailure=bumpabestie-cloudflare-docker-firewall-failure.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/local/sbin/bumpabestie-cloudflare-docker-firewall apply-state
+ExecReload=/usr/local/sbin/bumpabestie-cloudflare-docker-firewall apply-state
+RemainAfterExit=yes
+NoNewPrivileges=true
+PrivateTmp=true
+RuntimeDirectory=bumpabestie-cloudflare-docker-firewall
+RuntimeDirectoryMode=0700
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+[Install]
+WantedBy=docker.service

@@ -9,6 +9,19 @@ release_file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+temporary_verifier_host_path_is_legacy() {
+  [[ "$1" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]]
+}
+
+temporary_verifier_host_path_is_versioned() {
+  [[ "$1" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]
+}
+
+validate_temporary_verifier_host_path() {
+  temporary_verifier_host_path_is_legacy "$1" \
+    || temporary_verifier_host_path_is_versioned "$1"
+}
+
 validate_release_pointer_values() {
   local revision="$1"
   local image_tag="$2"
@@ -27,6 +40,27 @@ validate_release_pointer_values() {
       return 1
     fi
   done
+}
+
+validate_auth_boundary_values() {
+  local login_mode="$1"
+  local verifier_file="$2"
+  local verifier_host="$3"
+  local expires_at="$4"
+  local whatsapp_backend="$5"
+  local expiry_pattern
+
+  [[ "$login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]] || return 1
+  [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || return 1
+  if [[ "$login_mode" == "temporary_static_pin" ]]; then
+    [[ "$whatsapp_backend" == "disabled" ]] || return 1
+    [[ "$verifier_file" == "/run/auth-secret/temporary_web_pin_verifier" ]] || return 1
+    validate_temporary_verifier_host_path "$verifier_host" || return 1
+    expiry_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    [[ "$expires_at" =~ $expiry_pattern ]] || return 1
+  else
+    [[ -z "$verifier_file" && -z "$verifier_host" && -z "$expires_at" ]] || return 1
+  fi
 }
 
 load_release_boundary() {
@@ -52,7 +86,35 @@ load_release_boundary() {
     (.images.redis | type == "string" and
       test("^[a-z0-9][a-z0-9._/:-]*@sha256:[a-f0-9]{64}$")) and
     .images.worker == .images.api and
-    .images.scheduler == .images.api
+    .images.scheduler == .images.api and
+    ((has("auth") | not) or
+      (.auth |
+        type == "object" and
+        (keys | sort) == [
+          "login_mode", "temporary_web_pin_expires_at",
+          "temporary_web_pin_verifier_file", "temporary_web_pin_verifier_file_host",
+          "whatsapp_backend"
+        ] and
+        (.login_mode | type == "string" and
+          test("^(disabled|whatsapp_otp|temporary_static_pin)$")) and
+        (.whatsapp_backend | type == "string" and test("^(disabled|meta)$")) and
+        (.temporary_web_pin_verifier_file | type == "string") and
+        (.temporary_web_pin_verifier_file_host | type == "string") and
+        (.temporary_web_pin_expires_at | type == "string") and
+        (if .login_mode == "temporary_static_pin" then
+          .whatsapp_backend == "disabled" and
+          .temporary_web_pin_verifier_file ==
+            "/run/auth-secret/temporary_web_pin_verifier" and
+          (.temporary_web_pin_verifier_file_host |
+            test("^/var/lib/([A-Za-z0-9._-]+/temporary_web_pin_verifier|bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32})$")) and
+          (.temporary_web_pin_expires_at |
+            test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$"))
+        else
+          .temporary_web_pin_verifier_file == "" and
+          .temporary_web_pin_verifier_file_host == "" and
+          .temporary_web_pin_expires_at == ""
+        end)
+      ))
   ' "$release_file" >/dev/null; then
     return 1
   fi
@@ -85,14 +147,33 @@ load_release_boundary() {
   RELEASE_BACKUP_IMAGE="$(jq --raw-output '.images.backup' "$release_file")"
   # shellcheck disable=SC2034
   RELEASE_HERMES_IMAGE="$(jq --raw-output '.images.hermes' "$release_file")"
+  # Legacy records predate the explicit auth boundary. They deliberately load
+  # as the fail-closed disabled state so the compatibility rollout can only
+  # rollback to closed login until a new record has been committed.
+  # shellcheck disable=SC2034
+  RELEASE_AUTH_LOGIN_MODE="$(jq --raw-output '.auth.login_mode // "disabled"' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE="$(jq --raw-output '.auth.temporary_web_pin_verifier_file // ""' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST="$(jq --raw-output '.auth.temporary_web_pin_verifier_file_host // ""' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT="$(jq --raw-output '.auth.temporary_web_pin_expires_at // ""' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_WHATSAPP_BACKEND="$(jq --raw-output '.auth.whatsapp_backend // "disabled"' "$release_file")"
 
   validate_release_pointer_values \
     "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" \
     "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" \
-    "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE"
+    "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" \
+    && validate_auth_boundary_values \
+      "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" \
+      "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" \
+      "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"
 }
 
-rewrite_release_pointers() (
+_rewrite_release_environment() (
+  local include_auth="$1"
+  shift
   local env_file="$1"
   local revision="$2"
   local image_tag="$3"
@@ -103,6 +184,11 @@ rewrite_release_pointers() (
   local postgres_image="$8"
   local backup_image="$9"
   local hermes_image="${10}"
+  local auth_login_mode="${11:-}"
+  local verifier_file="${12:-}"
+  local verifier_host="${13:-}"
+  local expires_at="${14:-}"
+  local whatsapp_backend="${15:-}"
   local env_tmp env_uid env_gid
   env_tmp=""
   trap 'if [[ -n "$env_tmp" ]]; then rm -f -- "$env_tmp"; fi' EXIT
@@ -115,6 +201,11 @@ rewrite_release_pointers() (
     "$revision" "$image_tag" "$infra_image_tag" \
     "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
     "$backup_image" "$hermes_image" || return 1
+  if [[ "$include_auth" == "1" ]]; then
+    validate_auth_boundary_values \
+      "$auth_login_mode" "$verifier_file" "$verifier_host" "$expires_at" \
+      "$whatsapp_backend" || return 1
+  fi
 
   env_uid="$(stat -c '%u' "$env_file" 2>/dev/null || stat -f '%u' "$env_file")"
   env_gid="$(stat -c '%g' "$env_file" 2>/dev/null || stat -f '%g' "$env_file")"
@@ -132,7 +223,13 @@ rewrite_release_pointers() (
     -v caddy_image="$caddy_image" \
     -v postgres_image="$postgres_image" \
     -v backup_image="$backup_image" \
-    -v hermes_image="$hermes_image" '
+    -v hermes_image="$hermes_image" \
+    -v include_auth="$include_auth" \
+    -v auth_login_mode="$auth_login_mode" \
+    -v verifier_file="$verifier_file" \
+    -v verifier_host="$verifier_host" \
+    -v expires_at="$expires_at" \
+    -v whatsapp_backend="$whatsapp_backend" '
       BEGIN {
         replacement["DEPLOY_REF"] = deploy_ref
         replacement["IMAGE_TAG"] = image_tag
@@ -143,6 +240,14 @@ rewrite_release_pointers() (
         replacement["POSTGRES_IMAGE"] = postgres_image
         replacement["BACKUP_IMAGE"] = backup_image
         replacement["HERMES_IMAGE"] = hermes_image
+        if (include_auth == 1) {
+          replacement["AUTH_LOGIN_MODE"] = auth_login_mode
+          replacement["TEMPORARY_WEB_PIN_VERIFIER"] = ""
+          replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE"] = verifier_file
+          replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"] = verifier_host
+          replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
+          replacement["WHATSAPP_BACKEND"] = whatsapp_backend
+        }
       }
       {
         separator = index($0, "=")
@@ -176,3 +281,13 @@ rewrite_release_pointers() (
   fi
   env_tmp=""
 )
+
+rewrite_release_pointers() {
+  (($# == 10)) || return 1
+  _rewrite_release_environment 0 "$@"
+}
+
+rewrite_release_boundary() {
+  (($# == 15)) || return 1
+  _rewrite_release_environment 1 "$@"
+}

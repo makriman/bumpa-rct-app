@@ -62,17 +62,23 @@ original_checkout="$(git rev-parse HEAD)"
 
 prior_boundary_loaded=0
 promotion_state_file="${BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock}.promotion-state.$$"
+restore_prior_boundary() {
+  ((prior_boundary_loaded)) || return 1
+  rewrite_release_boundary .env.production \
+    "$prior_revision" "$prior_image_tag" "$prior_infra_image_tag" \
+    "$prior_api_image" "$prior_web_image" "$prior_caddy_image" \
+    "$prior_postgres_image" "$prior_backup_image" "$prior_hermes_image" \
+    "$prior_auth_login_mode" "$prior_temporary_web_pin_verifier_file" \
+    "$prior_temporary_web_pin_verifier_file_host" \
+    "$prior_temporary_web_pin_expires_at" "$prior_whatsapp_backend"
+}
 restore_promotion() {
   local result=$?
   local phase=""
   trap - EXIT
   phase="$(read_promotion_state "$promotion_state_file" 2>/dev/null || true)"
   if ((result != 0)) && [[ "$phase" == "PRE_BOUNDARY" ]]; then
-    if ((prior_boundary_loaded)) \
-      && rewrite_release_pointers .env.production \
-        "$prior_revision" "$prior_image_tag" "$prior_infra_image_tag" \
-        "$prior_api_image" "$prior_web_image" "$prior_caddy_image" \
-        "$prior_postgres_image" "$prior_backup_image" "$prior_hermes_image" \
+    if restore_prior_boundary \
       && git checkout --detach "$original_checkout" >/dev/null 2>&1; then
       if write_promotion_state "$promotion_state_file" PREVIOUS_RESTORED; then
         phase="PREVIOUS_RESTORED"
@@ -92,10 +98,7 @@ restore_promotion() {
     "")
       if ((result != 0 && prior_boundary_loaded)); then
         # No target deploy ran yet, so the launcher still owns restoration.
-        rewrite_release_pointers .env.production \
-          "$prior_revision" "$prior_image_tag" "$prior_infra_image_tag" \
-          "$prior_api_image" "$prior_web_image" "$prior_caddy_image" \
-          "$prior_postgres_image" "$prior_backup_image" "$prior_hermes_image" || true
+        restore_prior_boundary || true
         git checkout --detach "$original_checkout" >/dev/null 2>&1 || true
       elif ((result == 0)); then
         mark_maintenance_required "promotion_state=missing_after_success" || true
@@ -130,6 +133,11 @@ prior_caddy_image="$RELEASE_CADDY_IMAGE"
 prior_postgres_image="$RELEASE_POSTGRES_IMAGE"
 prior_backup_image="$RELEASE_BACKUP_IMAGE"
 prior_hermes_image="$RELEASE_HERMES_IMAGE"
+prior_auth_login_mode="$RELEASE_AUTH_LOGIN_MODE"
+prior_temporary_web_pin_verifier_file="$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE"
+prior_temporary_web_pin_verifier_file_host="$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"
+prior_temporary_web_pin_expires_at="$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT"
+prior_whatsapp_backend="$RELEASE_WHATSAPP_BACKEND"
 prior_operations_revision="$RELEASE_OPERATIONS_REVISION"
 prior_boundary_loaded=1
 if ! git rev-parse --verify "${prior_operations_revision}^{commit}" >/dev/null 2>&1; then

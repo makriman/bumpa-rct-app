@@ -24,6 +24,7 @@ if [[ "$(read_promotion_state "$promotion_state_file")" != "PRE_BOUNDARY" ]]; th
   exit 2
 fi
 source "$ROOT_DIR/scripts/release_boundary.sh"
+source "$ROOT_DIR/scripts/rollback_containment.sh"
 
 previous_boundary_valid=0
 automatic_rollback_available=0
@@ -39,6 +40,11 @@ previous_postgres_image=""
 previous_redis_image=""
 previous_backup_image=""
 previous_hermes_image=""
+previous_auth_login_mode=""
+previous_temporary_web_pin_verifier_file=""
+previous_temporary_web_pin_verifier_file_host=""
+previous_temporary_web_pin_expires_at=""
+previous_whatsapp_backend=""
 promotion_previous_checkout="${BUMPABESTIE_PREVIOUS_CHECKOUT:-}"
 
 restore_previous_checkout() {
@@ -53,18 +59,30 @@ restore_previous_checkout() {
   git checkout --detach "$promotion_previous_checkout" >/dev/null
 }
 
-restore_previous_release_pointers() {
+restore_previous_release_boundary() {
   if ((previous_boundary_valid == 0)); then
     return 1
   fi
-  rewrite_release_pointers .env.production \
+  rewrite_release_boundary .env.production \
     "$previous_revision" "$previous_image_tag" "$previous_infra_image_tag" \
     "$previous_api_image" "$previous_web_image" "$previous_caddy_image" \
-    "$previous_postgres_image" "$previous_backup_image" "$previous_hermes_image"
+    "$previous_postgres_image" "$previous_backup_image" "$previous_hermes_image" \
+    "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
+    "$previous_temporary_web_pin_verifier_file_host" \
+    "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || return 1
+  AUTH_LOGIN_MODE="$previous_auth_login_mode"
+  TEMPORARY_WEB_PIN_VERIFIER=""
+  TEMPORARY_WEB_PIN_VERIFIER_FILE="$previous_temporary_web_pin_verifier_file"
+  TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST="$previous_temporary_web_pin_verifier_file_host"
+  TEMPORARY_WEB_PIN_EXPIRES_AT="$previous_temporary_web_pin_expires_at"
+  WHATSAPP_BACKEND="$previous_whatsapp_backend"
+  export AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER \
+    TEMPORARY_WEB_PIN_VERIFIER_FILE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST \
+    TEMPORARY_WEB_PIN_EXPIRES_AT WHATSAPP_BACKEND
 }
 
 # Install a set -u-safe trap before target validation. Once a trusted release
-# record is loaded, every later preflight failure restores its complete pointer
+# record is loaded, every later preflight failure restores its complete release
 # boundary even when the operator selected the failed target before invoking us.
 early_failure_restore() {
   local result=$?
@@ -72,11 +90,11 @@ early_failure_restore() {
   trap - EXIT
   rm -f .env.production.release.* .deployed-revision.tmp.* .deployed-release.json.tmp.*
   if ((result != 0 && previous_boundary_valid)); then
-    if restore_previous_release_pointers; then
-      echo "Restored the previously verified release pointers after preflight failure." >&2
+    if restore_previous_release_boundary; then
+      echo "Restored the previously verified release boundary after preflight failure." >&2
     else
       restored=0
-      echo "Unable to restore the previously verified release pointers; operator intervention is required." >&2
+      echo "Unable to restore the previously verified release boundary; operator intervention is required." >&2
     fi
   fi
   if ((result != 0)); then
@@ -122,6 +140,11 @@ if [[ -e .deployed-release.json ]]; then
   previous_redis_image="$RELEASE_REDIS_IMAGE"
   previous_backup_image="$RELEASE_BACKUP_IMAGE"
   previous_hermes_image="$RELEASE_HERMES_IMAGE"
+  previous_auth_login_mode="$RELEASE_AUTH_LOGIN_MODE"
+  previous_temporary_web_pin_verifier_file="$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE"
+  previous_temporary_web_pin_verifier_file_host="$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"
+  previous_temporary_web_pin_expires_at="$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT"
+  previous_whatsapp_backend="$RELEASE_WHATSAPP_BACKEND"
   previous_boundary_valid=1
 fi
 
@@ -135,7 +158,8 @@ for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
   API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
-  AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST \
+  AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE \
+  TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST TEMPORARY_WEB_PIN_EXPIRES_AT \
   WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
   value="$(value_for "$key")"
   printf -v "$key" '%s' "$value"
@@ -376,6 +400,11 @@ persist_release_metadata() {
   local backup_image="${11}"
   local hermes_image="${12}"
   local operations_revision="${13}"
+  local auth_login_mode="${14}"
+  local verifier_file="${15}"
+  local verifier_host="${16}"
+  local expires_at="${17}"
+  local whatsapp_backend="${18}"
   local deployed_at revision_tmp release_tmp
 
   validate_release_pointer_values \
@@ -389,6 +418,9 @@ persist_release_metadata() {
     || [[ ! "$redis_image" =~ ^[a-z0-9][a-z0-9._/:-]*@sha256:[a-f0-9]{64}$ ]]; then
     return 1
   fi
+  validate_auth_boundary_values \
+    "$auth_login_mode" "$verifier_file" "$verifier_host" "$expires_at" \
+    "$whatsapp_backend" || return 1
 
   deployed_at="$(date -u +%FT%TZ)"
   revision_tmp=".deployed-revision.tmp.$$"
@@ -413,6 +445,11 @@ persist_release_metadata() {
     --arg redis "$redis_image" \
     --arg backup "$backup_image" \
     --arg hermes "$hermes_image" \
+    --arg auth_login_mode "$auth_login_mode" \
+    --arg verifier_file "$verifier_file" \
+    --arg verifier_host "$verifier_host" \
+    --arg expires_at "$expires_at" \
+    --arg whatsapp_backend "$whatsapp_backend" \
     '{
       deployed_at: $deployed_at,
       revision: $revision,
@@ -429,6 +466,13 @@ persist_release_metadata() {
         redis: $redis,
         backup: $backup,
         hermes: $hermes
+      },
+      auth: {
+        login_mode: $auth_login_mode,
+        temporary_web_pin_verifier_file: $verifier_file,
+        temporary_web_pin_verifier_file_host: $verifier_host,
+        temporary_web_pin_expires_at: $expires_at,
+        whatsapp_backend: $whatsapp_backend
       }
     }' > "$release_tmp"; then
     rm -f "$revision_tmp" "$release_tmp"
@@ -462,11 +506,11 @@ rollback() {
 
   if ((!deployment_started)); then
     if ((previous_boundary_valid)); then
-      if restore_previous_release_pointers; then
-        echo "Restored the complete previously verified release pointer boundary." >&2
+      if restore_previous_release_boundary; then
+        echo "Restored the complete previously verified release boundary." >&2
       else
         predeployment_restored=0
-        echo "Unable to restore the previous release pointers; operator intervention is required." >&2
+        echo "Unable to restore the previous release boundary; operator intervention is required." >&2
       fi
     fi
     if ! restore_previous_checkout; then
@@ -508,28 +552,59 @@ rollback() {
     && [[ -n "$previous_api_image" && -n "$previous_web_image" ]]; then
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
-    export API_IMAGE="$previous_api_image"
-    export WEB_IMAGE="$previous_web_image"
     rollback_services=(api web caddy)
     rollback_images=(api web)
     if ((previous_hermes_running)) && [[ -n "$previous_hermes_image" ]]; then
-      export HERMES_IMAGE="$previous_hermes_image"
       rollback_services+=(hermes)
       rollback_images+=(hermes)
-    else
-      "${compose[@]}" rm -f hermes 2>/dev/null || true
     fi
     if ((previous_worker_running && previous_scheduler_running)); then
       rollback_services+=(worker scheduler)
-    else
-      "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
     fi
-    if "${compose[@]}" pull "${rollback_images[@]}" \
+    # Invoked by the containment helper through its validated callback name.
+    # ShellCheck cannot resolve the validated indirect callback dispatch.
+    # shellcheck disable=SC2317,SC2329
+    attempt_application_rollback() {
+      # The containment wrapper removes Caddy and API before invoking this
+      # callback. Select the complete hybrid rollback boundary before recreating
+      # anything, then restore the runtime auth secret before the prior API.
+      rewrite_release_boundary .env.production \
+        "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
+        "$previous_api_image" "$previous_web_image" "$target_caddy_image" \
+        "$target_postgres_image" "$target_backup_image" "$previous_hermes_image" \
+        "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
+        "$previous_temporary_web_pin_verifier_file_host" \
+        "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || return 1
+      export API_IMAGE="$previous_api_image"
+      export WEB_IMAGE="$previous_web_image"
+      export HERMES_IMAGE="$previous_hermes_image"
+      AUTH_LOGIN_MODE="$previous_auth_login_mode"
+      TEMPORARY_WEB_PIN_VERIFIER=""
+      TEMPORARY_WEB_PIN_VERIFIER_FILE="$previous_temporary_web_pin_verifier_file"
+      TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST="$previous_temporary_web_pin_verifier_file_host"
+      TEMPORARY_WEB_PIN_EXPIRES_AT="$previous_temporary_web_pin_expires_at"
+      WHATSAPP_BACKEND="$previous_whatsapp_backend"
+      export AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER \
+        TEMPORARY_WEB_PIN_VERIFIER_FILE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST \
+        TEMPORARY_WEB_PIN_EXPIRES_AT WHATSAPP_BACKEND
+      if ((!previous_hermes_running)); then
+        "${compose[@]}" rm -f hermes 2>/dev/null || true
+      fi
+      if ((!previous_worker_running || !previous_scheduler_running)); then
+        "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
+      fi
+      "${compose[@]}" pull "${rollback_images[@]}" \
+        && API_IMAGE="$target_api_image" \
+          "${compose[@]}" up --no-deps --force-recreate \
+          --abort-on-container-exit --exit-code-from auth-secret-init auth-secret-init \
         && "${compose[@]}" up --no-deps --force-recreate \
           --abort-on-container-exit --exit-code-from caddy-init caddy-init \
         && "${compose[@]}" --profile async up -d --wait --wait-timeout 240 \
           --no-deps "${rollback_services[@]}" \
-        && run_production_smoke; then
+        && run_production_smoke
+    }
+    if run_contained_rollback_attempt \
+      attempt_application_rollback mark_maintenance_required; then
       rollback_result=0
     else
       rollback_result=1
@@ -563,15 +638,21 @@ rollback() {
       # Persist actual-safe Compose pointers before metadata. If metadata cannot
       # be recorded, backups still use the running boundary and the next deploy
       # will fail closed on the deliberate record/live mismatch.
-      if ((rollback_result == 0)) && rewrite_release_pointers .env.production \
+      if ((rollback_result == 0)) && rewrite_release_boundary .env.production \
           "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
           "$hybrid_api" "$hybrid_web" "$hybrid_caddy" "$hybrid_postgres" \
           "$hybrid_backup" "$hybrid_hermes" \
+          "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
+          "$previous_temporary_web_pin_verifier_file_host" \
+          "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" \
         && persist_release_metadata \
           "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
           "$hybrid_api" "$hybrid_worker" "$hybrid_scheduler" "$hybrid_web" \
           "$hybrid_caddy" "$hybrid_postgres" "$hybrid_redis" \
-          "$hybrid_backup" "$hybrid_hermes" "$target_revision"; then
+          "$hybrid_backup" "$hybrid_hermes" "$target_revision" \
+          "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
+          "$previous_temporary_web_pin_verifier_file_host" \
+          "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend"; then
         rollback_result=0
       else
         rollback_result=1
@@ -589,8 +670,7 @@ rollback() {
         echo "Application rollback passed smoke but its release boundary could not be persisted; operator intervention is required." >&2
       fi
     else
-      mark_maintenance_required "application_rollback_smoke_failed" || true
-      echo "Application rollback also failed; operator intervention is required." >&2
+      echo "Application rollback failed; public ingress and API were removed and operator intervention is required." >&2
     fi
   else
     if ((deployment_started)); then
@@ -742,7 +822,10 @@ persist_release_metadata \
   "$(running_image_ref scheduler)" "$(running_image_ref web)" \
   "$(running_image_ref caddy)" "$(running_image_ref postgres)" \
   "$(running_image_ref redis)" "$target_backup_image" \
-  "$(running_image_ref hermes)" "$target_revision"
+  "$(running_image_ref hermes)" "$target_revision" \
+  "$AUTH_LOGIN_MODE" "$TEMPORARY_WEB_PIN_VERIFIER_FILE" \
+  "$TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$TEMPORARY_WEB_PIN_EXPIRES_AT" \
+  "$WHATSAPP_BACKEND"
 rewrite_release_pointers .env.production \
   "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
   "$target_api_image" "$target_web_image" "$target_caddy_image" \

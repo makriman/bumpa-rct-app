@@ -11,6 +11,15 @@ report_contract_error() {
 }
 trap report_contract_error ERR
 
+require_single_line_number() {
+  local selector_name="$1"
+  local selector_value="$2"
+  if [[ ! "$selector_value" =~ ^[0-9]+$ ]]; then
+    echo "Production contract line selector is missing or ambiguous: $selector_name" >&2
+    exit 1
+  fi
+}
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -21,6 +30,7 @@ live_env="$(mktemp)"
 verification_env="$(mktemp)"
 disabled_auth_env="$(mktemp)"
 whatsapp_auth_env="$(mktemp)"
+versioned_auth_env="$(mktemp)"
 contract_secrets="$(mktemp -d)"
 hermes_health_probe="$(mktemp -d)"
 auth_secret_contract_name="bumpabestie-auth-secret-test-$$"
@@ -43,6 +53,7 @@ cleanup() {
     >/dev/null 2>&1 || true
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
+    "$versioned_auth_env" \
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$auth_secret_init_volume" >/dev/null 2>&1 || true
@@ -55,6 +66,9 @@ trap cleanup EXIT
 ./scripts/test_release_boundary.sh
 ./scripts/test_promotion_state.sh
 ./scripts/test_promotion_coordinator.sh
+./scripts/test_rollback_containment.sh
+./scripts/test_docker_build_context.sh
+./scripts/test_temporary_login_pin_rotation.sh
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$line" != *=* || "$line" == \#* ]]; then
@@ -224,6 +238,7 @@ for secret_name in meta_app_secret meta_system_user_access_token meta_webhook_ve
   chmod 0600 "$contract_secrets/$secret_name"
 done
 auth_secret_fixture_supported=0
+auth_secret_validator_prefix=()
 if docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
     --security-opt no-new-privileges:true \
@@ -239,11 +254,63 @@ if docker run --rm --network none --read-only \
   && [[ "$(stat -c '%u:%g' "$auth_secret_contract_dir" 2>/dev/null || true)" == "0:0" ]]; then
   auth_secret_fixture_supported=1
 fi
+if ((auth_secret_fixture_supported && EUID != 0)); then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    # The production validator is a root-only deployment preflight. Run the
+    # Linux host-bind fixture at the same privilege boundary so its deliberate
+    # 0700 directory and 0600 file remain inaccessible to the CI runner.
+    auth_secret_validator_prefix=(sudo -n)
+  else
+    auth_secret_fixture_supported=0
+  fi
+fi
 if ((auth_secret_fixture_supported)); then
-  ./scripts/validate_temporary_auth_secret.sh \
+  "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
     temporary_static_pin \
     "$auth_secret_contract_dir/temporary_web_pin_verifier" \
     "$auth_secret_runtime_image"
+
+  # Exercise the exact rollback transition: populate the runtime volume in
+  # temporary mode, rerun the initializer in disabled mode, and prove the
+  # API-readable verifier is removed rather than left dormant in the volume.
+  docker run --rm --pull never \
+    --network none --read-only --user 0:0 \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env AUTH_LOGIN_MODE=temporary_static_pin \
+    --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret" \
+    --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
+    --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint /usr/local/bin/init-auth-secret \
+    "$auth_secret_runtime_image"
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges:true \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret:ro" \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      verifier=/runtime-auth-secret/temporary_web_pin_verifier
+      test -f "$verifier"
+      test "$(stat -c %u:%g "$verifier")" = 100:101
+      test "$(stat -c %a "$verifier")" = 400
+    '
+  docker run --rm --pull never \
+    --network none --read-only --user 0:0 \
+    --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    --security-opt no-new-privileges:true \
+    --env AUTH_LOGIN_MODE=disabled \
+    --env TEMPORARY_WEB_PIN_VERIFIER_SOURCE=/run/host-auth-secret/temporary_web_pin_verifier \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret" \
+    --volume "$ROOT_DIR/scripts/init_auth_secret.sh:/usr/local/bin/init-auth-secret:ro" \
+    --mount type=bind,source=/dev/null,target=/run/host-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint /usr/local/bin/init-auth-secret \
+    "$auth_secret_runtime_image"
+  docker run --rm --network none --read-only \
+    --cap-drop ALL --cap-add DAC_READ_SEARCH \
+    --security-opt no-new-privileges:true \
+    --volume "$auth_secret_init_volume:/runtime-auth-secret:ro" \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c \
+    'test -z "$(find /runtime-auth-secret -mindepth 1 -maxdepth 1 -print -quit)"'
 
   docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add DAC_OVERRIDE \
@@ -251,13 +318,21 @@ if ((auth_secret_fixture_supported)); then
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint sh "$auth_secret_runtime_image" -eu -c \
     'printf unexpected > /fixture/unexpected-entry'
-  if ./scripts/validate_temporary_auth_secret.sh \
-      temporary_static_pin \
-      "$auth_secret_contract_dir/temporary_web_pin_verifier" \
-      "$auth_secret_runtime_image" >/dev/null 2>&1; then
-    echo "Temporary web PIN preflight accepted an extra secret-directory entry" >&2
-    exit 1
-  fi
+  # Immutable rotations deliberately retain sibling verifier files. Prove the
+  # validator selects and exposes only the exact file instead of mounting its
+  # containing directory into the isolated validation runtime.
+  "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
+    temporary_static_pin \
+    "$auth_secret_contract_dir/temporary_web_pin_verifier" \
+    "$auth_secret_runtime_image"
+  docker run --rm --pull never \
+    --network none --read-only --user 0:0 \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --mount type=bind,source="$auth_secret_contract_dir/temporary_web_pin_verifier",target=/run/temporary-auth-secret/temporary_web_pin_verifier,readonly \
+    --entrypoint sh "$auth_secret_runtime_image" -eu -c '
+      test -f /run/temporary-auth-secret/temporary_web_pin_verifier
+      test ! -e /run/temporary-auth-secret/unexpected-entry
+    '
   docker run --rm --network none --read-only \
     --cap-drop ALL --cap-add DAC_OVERRIDE \
     --security-opt no-new-privileges:true \
@@ -272,7 +347,7 @@ if ((auth_secret_fixture_supported)); then
       mv /fixture/temporary_web_pin_verifier /fixture/verifier-target
       ln -s verifier-target /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -294,7 +369,7 @@ if ((auth_secret_fixture_supported)); then
     --mount type=bind,source="$auth_secret_contract_dir",target=/fixture \
     --entrypoint chmod "$auth_secret_runtime_image" 0644 \
     /fixture/temporary_web_pin_verifier
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -310,7 +385,7 @@ if ((auth_secret_fixture_supported)); then
       chown 1:1 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -327,7 +402,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -344,7 +419,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -361,7 +436,7 @@ if ((auth_secret_fixture_supported)); then
       chown 0:0 /fixture/temporary_web_pin_verifier
       chmod 0600 /fixture/temporary_web_pin_verifier
     '
-  if ./scripts/validate_temporary_auth_secret.sh \
+  if "${auth_secret_validator_prefix[@]}" ./scripts/validate_temporary_auth_secret.sh \
       temporary_static_pin \
       "$auth_secret_contract_dir/temporary_web_pin_verifier" \
       "$auth_secret_runtime_image" >/dev/null 2>&1; then
@@ -397,7 +472,8 @@ else
   fi
   echo "Root-owned temporary auth-secret runtime contract skipped: host bind ownership is unavailable."
 fi
-grep -Fq 'AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST' scripts/deploy.sh
+grep -Fq 'AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE' scripts/deploy.sh
+grep -Fq 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST TEMPORARY_WEB_PIN_EXPIRES_AT' scripts/deploy.sh
 grep -Fq 'docker image inspect "$api_image"' scripts/validate_temporary_auth_secret.sh
 for isolated_flag in \
   '--pull never' '--network none' '--read-only' '--user 0:0' \
@@ -407,6 +483,8 @@ done
 grep -Fq 'test "$(stat -c %u:%g "$verifier")" = 0:0' \
   scripts/validate_temporary_auth_secret.sh
 grep -Fq 'test "$(stat -c %a "$verifier")" = 600' \
+  scripts/validate_temporary_auth_secret.sh
+grep -Fq -- '--mount "type=bind,source=$verifier_path,target=/run/temporary-auth-secret/temporary_web_pin_verifier,readonly"' \
   scripts/validate_temporary_auth_secret.sh
 grep -Fq 're.fullmatch(rb"[0-9a-f]{64}\x0a", verifier_bytes)' \
   scripts/validate_temporary_auth_secret.sh
@@ -543,6 +621,26 @@ docker run --rm --network none \
   '
 
 ./scripts/validate_env.sh "$contract_env" production
+awk '
+  /^TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=/ {
+    print "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/0123456789abcdef0123456789abcdef"; next
+  }
+  { print }
+' "$contract_env" >"$versioned_auth_env"
+chmod 0600 "$versioned_auth_env"
+./scripts/validate_env.sh "$versioned_auth_env" production
+versioned_rendered="$(docker compose --env-file "$versioned_auth_env" \
+  -f compose.yaml -f compose.prod.yaml config --format json)"
+jq --exit-status '
+  [.services["auth-secret-init"].volumes[] |
+    select(
+      .type == "bind" and
+      .source == "/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/0123456789abcdef0123456789abcdef" and
+      .target == "/run/host-auth-secret/temporary_web_pin_verifier" and
+      .read_only == true and
+      (.bind.create_host_path // false) == false
+    )] | length == 1
+' <<<"$versioned_rendered" >/dev/null
 compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile async --profile tools --profile restore)
 "${compose[@]}" config --quiet
 rendered="$("${compose[@]}" config --format json)"
@@ -806,7 +904,9 @@ docker run --rm --network none --read-only \
 
 stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
 image_pull_line="$(grep -n -F '"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes' scripts/deploy.sh | cut -d: -f1)"
-auth_secret_preflight_line="$(grep -n -F './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh | cut -d: -f1)"
+target_auth_secret_preflight_line="$(grep -n -F './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh | cut -d: -f1)"
+auth_secret_preflight_count="$(grep -Fc './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh)"
+rollback_enable_line="$(grep -n -F 'automatic_rollback_available=1' scripts/deploy.sh | cut -d: -f1)"
 backup_line="$(grep -n -E '^[[:space:]]+backup$' scripts/deploy.sh | cut -d: -f1)"
 backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/deploy.sh | cut -d: -f1)"
 quiesced_line="$(grep -n -F 'writers_quiesced=1' scripts/deploy.sh | cut -d: -f1)"
@@ -815,23 +915,44 @@ migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate"
 reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
 # The following patterns intentionally match literal shell source.
 # shellcheck disable=SC2016
-application_start_line="$(grep -n -F '"${compose[@]}" --profile async up -d --wait' scripts/deploy.sh | tail -1 | cut -d: -f1)"
-if [[ -z "$stop_line" || -z "$image_pull_line" || -z "$auth_secret_preflight_line" \
+application_start_line="$(grep -n -F -- '--profile async up -d --wait --wait-timeout 240 --remove-orphans' scripts/deploy.sh | cut -d: -f1)"
+require_single_line_number stop_line "$stop_line"
+require_single_line_number image_pull_line "$image_pull_line"
+require_single_line_number target_auth_secret_preflight_line "$target_auth_secret_preflight_line"
+require_single_line_number rollback_enable_line "$rollback_enable_line"
+require_single_line_number backup_line "$backup_line"
+require_single_line_number backup_init_line "$backup_init_line"
+require_single_line_number quiesced_line "$quiesced_line"
+require_single_line_number role_init_line "$role_init_line"
+require_single_line_number migrate_line "$migrate_line"
+require_single_line_number reconcile_line "$reconcile_line"
+require_single_line_number application_start_line "$application_start_line"
+if [[ -z "$stop_line" || -z "$image_pull_line" \
+  || -z "$target_auth_secret_preflight_line" \
+  || "$auth_secret_preflight_count" != 1 \
+  || -z "$rollback_enable_line" \
   || -z "$backup_init_line" || -z "$backup_line" || -z "$quiesced_line" \
-  || "$image_pull_line" -ge "$auth_secret_preflight_line" \
-  || "$auth_secret_preflight_line" -ge "$stop_line" \
+  || "$image_pull_line" -ge "$target_auth_secret_preflight_line" \
+  || "$target_auth_secret_preflight_line" -ge "$stop_line" \
   || "$quiesced_line" -ge "$stop_line" || "$stop_line" -ge "$backup_init_line" \
   || "$backup_init_line" -ge "$backup_line" ]]; then
   echo "Deployment does not quiesce application writers before the recovery-point backup" >&2
   exit 1
 fi
-deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | head -1 | cut -d: -f1)"
+deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | cut -d: -f1)"
 deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
 release_helper_line="$(grep -n -F 'source "$ROOT_DIR/scripts/release_boundary.sh"' scripts/deploy.sh | cut -d: -f1)"
 release_load_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/deploy.sh | cut -d: -f1)"
 target_validate_line="$(grep -n -F './scripts/validate_env.sh .env.production production' scripts/deploy.sh | cut -d: -f1)"
-scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | head -1 | cut -d: -f1)"
+scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | cut -d: -f1)"
 scheduled_env_line="$(grep -n -F "env_file=\"\${ENV_FILE:-.env.production}\"" scripts/scheduled_backup.sh | cut -d: -f1)"
+require_single_line_number deploy_lock_line "$deploy_lock_line"
+require_single_line_number deploy_env_line "$deploy_env_line"
+require_single_line_number release_helper_line "$release_helper_line"
+require_single_line_number release_load_line "$release_load_line"
+require_single_line_number target_validate_line "$target_validate_line"
+require_single_line_number scheduled_lock_line "$scheduled_lock_line"
+require_single_line_number scheduled_env_line "$scheduled_env_line"
 if [[ -z "$deploy_lock_line" || -z "$deploy_env_line" || "$deploy_lock_line" -ge "$deploy_env_line" \
   || -z "$scheduled_lock_line" || -z "$scheduled_env_line" \
   || "$scheduled_lock_line" -ge "$scheduled_env_line" ]]; then
@@ -845,7 +966,10 @@ if [[ -z "$release_helper_line" || -z "$release_load_line" || -z "$target_valida
   exit 1
 fi
 grep -Fq 'trap early_failure_restore EXIT' scripts/deploy.sh
-grep -Fq 'restore_previous_release_pointers' scripts/deploy.sh
+grep -Fq 'restore_previous_release_boundary' scripts/deploy.sh
+grep -Fq 'auth: {' scripts/deploy.sh
+grep -Fq 'previous_auth: {' infra/bin/bumpabestie-promote
+grep -Fq 'canonical_previous_env_sha256' infra/bin/bumpabestie-promote
 grep -Fq 'for service in api worker scheduler web hermes caddy postgres redis' scripts/deploy.sh
 grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
@@ -856,7 +980,8 @@ grep -Fq 'if ! SMOKE_SCHEME=https' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=' scripts/deploy.sh
 grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=60' scripts/deploy.sh
 test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
-test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 2
+test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 1
+test "$(grep -Fc '&& run_production_smoke' scripts/deploy.sh)" = 2
 grep -Fq 'if docker start "${previous_writer_containers[@]}" >/dev/null' scripts/deploy.sh
 grep -Fq '&& "${compose[@]}" --profile async up -d --wait --wait-timeout 240' scripts/deploy.sh
 grep -Fq 'COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type' infra/hermes/Dockerfile
@@ -870,11 +995,16 @@ grep -Fq '/usr/local/sbin/bumpabestie-promote' docs/deployment.md
 grep -Fq 'Never invoke `scripts/promote_release.sh` or' docs/runbook.md
 test -x infra/bin/bumpabestie-promote
 test -x scripts/promote_release.sh
-promotion_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/promote_release.sh | head -1 | cut -d: -f1)"
+promotion_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/promote_release.sh | cut -d: -f1)"
 promotion_record_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/promote_release.sh | cut -d: -f1)"
 promotion_checkout_line="$(grep -n -F 'git checkout --detach "$revision"' scripts/promote_release.sh | cut -d: -f1)"
-promotion_pointer_line="$(grep -n -F 'rewrite_release_pointers .env.production' scripts/promote_release.sh | tail -1 | cut -d: -f1)"
-promotion_exec_line="$(grep -n -F '"$ROOT_DIR/scripts/deploy.sh"' scripts/promote_release.sh | tail -1 | cut -d: -f1)"
+promotion_pointer_line="$(grep -n -F 'rewrite_release_pointers .env.production' scripts/promote_release.sh | cut -d: -f1)"
+promotion_exec_line="$(grep -n -F '"$ROOT_DIR/scripts/deploy.sh"' scripts/promote_release.sh | cut -d: -f1)"
+require_single_line_number promotion_lock_line "$promotion_lock_line"
+require_single_line_number promotion_record_line "$promotion_record_line"
+require_single_line_number promotion_checkout_line "$promotion_checkout_line"
+require_single_line_number promotion_pointer_line "$promotion_pointer_line"
+require_single_line_number promotion_exec_line "$promotion_exec_line"
 if [[ -z "$promotion_lock_line" || -z "$promotion_record_line" \
   || -z "$promotion_checkout_line" || -z "$promotion_pointer_line" \
   || -z "$promotion_exec_line" \
@@ -907,8 +1037,24 @@ fi
 grep -Fq 'write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY' scripts/deploy.sh
 grep -Fq 'write_promotion_state "$promotion_state_file" COMMITTED' scripts/deploy.sh
 grep -Fq 'assert_maintenance_clear' scripts/scheduled_backup.sh
-hybrid_pointer_line="$(grep -n -F 'if ((rollback_result == 0)) && rewrite_release_pointers .env.production' scripts/deploy.sh | cut -d: -f1)"
+rollback_boundary_line="$(grep -n -F 'complete hybrid rollback boundary before recreating' scripts/deploy.sh | cut -d: -f1)"
+rollback_auth_init_line="$(grep -n -F -- '--abort-on-container-exit --exit-code-from auth-secret-init auth-secret-init' scripts/deploy.sh | cut -d: -f1)"
+rollback_app_recreate_line="$(grep -n -F -- '--no-deps "${rollback_services[@]}"' scripts/deploy.sh | cut -d: -f1)"
+require_single_line_number rollback_boundary_line "$rollback_boundary_line"
+require_single_line_number rollback_auth_init_line "$rollback_auth_init_line"
+require_single_line_number rollback_app_recreate_line "$rollback_app_recreate_line"
+if [[ -z "$rollback_boundary_line" || -z "$rollback_auth_init_line" \
+  || -z "$rollback_app_recreate_line" \
+  || "$rollback_boundary_line" -ge "$rollback_auth_init_line" \
+  || "$rollback_auth_init_line" -ge "$rollback_app_recreate_line" ]]; then
+  echo "Rollback does not restore auth config and rerun its initializer before application recreation" >&2
+  exit 1
+fi
+grep -Fq '&& API_IMAGE="$target_api_image"' scripts/deploy.sh
+hybrid_pointer_line="$(grep -n -F 'if ((rollback_result == 0)) && rewrite_release_boundary .env.production' scripts/deploy.sh | cut -d: -f1)"
 hybrid_metadata_line="$(grep -n -F '&& persist_release_metadata' scripts/deploy.sh | cut -d: -f1)"
+require_single_line_number hybrid_pointer_line "$hybrid_pointer_line"
+require_single_line_number hybrid_metadata_line "$hybrid_metadata_line"
 if [[ -z "$hybrid_pointer_line" || -z "$hybrid_metadata_line" \
   || "$hybrid_pointer_line" -ge "$hybrid_metadata_line" ]]; then
   echo "Hybrid rollback does not persist actual-safe environment pointers before metadata" >&2
@@ -1017,7 +1163,9 @@ if grep -Eq 'writer_services=\([^)]*(caddy|web)' scripts/scheduled_backup.sh; th
 fi
 grep -Fq 'run --rm --no-deps backup' scripts/scheduled_backup.sh
 scheduled_backup_init_line="$(grep -n -F 'run --rm --no-deps backup-data-init' scripts/scheduled_backup.sh | cut -d: -f1)"
-scheduled_backup_line="$(grep -n -F 'run --rm --no-deps backup' scripts/scheduled_backup.sh | tail -1 | cut -d: -f1)"
+scheduled_backup_line="$(grep -n -E '^[[:space:]]*"\$\{compose\[@\]\}" run --rm --no-deps backup$' scripts/scheduled_backup.sh | cut -d: -f1)"
+require_single_line_number scheduled_backup_init_line "$scheduled_backup_init_line"
+require_single_line_number scheduled_backup_line "$scheduled_backup_line"
 if [[ -z "$scheduled_backup_init_line" || -z "$scheduled_backup_line" \
   || "$scheduled_backup_init_line" -ge "$scheduled_backup_line" ]]; then
   echo "Scheduled backup does not initialize its destination before backup execution" >&2
@@ -1064,6 +1212,75 @@ grep -Fq 'util-linux' scripts/bootstrap_server.sh
 grep -Eq 'apt-get install -y .*python3' scripts/bootstrap_server.sh
 grep -Fq 'bumpabestie-disk-usage.timer' scripts/bootstrap_server.sh
 grep -Fq 'install -d -m 0700 -o bumpabestie -g bumpabestie /var/lib/bumpabestie' scripts/bootstrap_server.sh
+grep -Fq 'install -m 0755 -o root -g root "$docker_firewall_source" "$docker_firewall_binary"' \
+  scripts/bootstrap_server.sh
+docker_firewall_state_gate_line="$(grep -n -F 'if [[ -n "$docker_firewall_source" && -e "$docker_firewall_state" ]]' scripts/bootstrap_server.sh | cut -d: -f1)"
+docker_firewall_verify_line="$(grep -n -F '"$docker_firewall_binary" verify-state' scripts/bootstrap_server.sh | cut -d: -f1)"
+docker_firewall_pregate_start_line="$(grep -n -F 'systemctl start "$docker_firewall_pregate_unit"' scripts/bootstrap_server.sh | cut -d: -f1)"
+docker_firewall_enable_line="$(grep -n -F 'systemctl enable --now "$docker_firewall_unit"' scripts/bootstrap_server.sh | cut -d: -f1)"
+require_single_line_number docker_firewall_state_gate_line "$docker_firewall_state_gate_line"
+require_single_line_number docker_firewall_verify_line "$docker_firewall_verify_line"
+require_single_line_number docker_firewall_pregate_start_line "$docker_firewall_pregate_start_line"
+require_single_line_number docker_firewall_enable_line "$docker_firewall_enable_line"
+if [[ -z "$docker_firewall_state_gate_line" || -z "$docker_firewall_verify_line" \
+  || -z "$docker_firewall_pregate_start_line" \
+  || -z "$docker_firewall_enable_line" \
+  || "$docker_firewall_state_gate_line" -ge "$docker_firewall_verify_line" \
+  || "$docker_firewall_verify_line" -ge "$docker_firewall_pregate_start_line" \
+  || "$docker_firewall_pregate_start_line" -ge "$docker_firewall_enable_line" ]]; then
+  echo "Bootstrap can enable the Docker firewall before validated persistent state" >&2
+  exit 1
+fi
+grep -Fq 'install -d -m 0755 -o root -g root /etc/systemd/system/docker.service.d' \
+  scripts/bootstrap_server.sh
+grep -Fq '"/etc/systemd/system/docker.service.d/$docker_firewall_dropin"' \
+  scripts/bootstrap_server.sh
+docker_firewall_pregate_unit=infra/systemd/bumpabestie-cloudflare-origin-pregate.service
+grep -Fxq 'Before=docker.service' "$docker_firewall_pregate_unit"
+grep -Fxq 'After=network-online.target' "$docker_firewall_pregate_unit"
+grep -Fxq 'OnFailure=bumpabestie-cloudflare-docker-firewall-failure.service' \
+  "$docker_firewall_pregate_unit"
+grep -Fxq 'ExecStart=/usr/local/sbin/bumpabestie-cloudflare-docker-firewall apply-pregate-state' \
+  "$docker_firewall_pregate_unit"
+grep -Fxq 'RuntimeDirectory=bumpabestie-cloudflare-docker-firewall' \
+  "$docker_firewall_pregate_unit"
+grep -Fxq 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW' \
+  "$docker_firewall_pregate_unit"
+if grep -Eq '^RemainAfterExit=' "$docker_firewall_pregate_unit"; then
+  echo "Pre-Docker gate must run again on every Docker activation" >&2
+  exit 1
+fi
+docker_firewall_dropin=infra/systemd/docker.service.d/10-bumpabestie-cloudflare-origin-pregate.conf
+grep -Fxq 'Requires=bumpabestie-cloudflare-origin-pregate.service' \
+  "$docker_firewall_dropin"
+grep -Fxq 'After=bumpabestie-cloudflare-origin-pregate.service' \
+  "$docker_firewall_dropin"
+docker_firewall_unit=infra/systemd/bumpabestie-cloudflare-docker-firewall.service
+grep -Fxq 'After=network-online.target docker.service' "$docker_firewall_unit"
+grep -Fxq 'BindsTo=docker.service' "$docker_firewall_unit"
+grep -Fxq 'PartOf=docker.service' "$docker_firewall_unit"
+grep -Fxq 'OnFailure=bumpabestie-cloudflare-docker-firewall-failure.service' \
+  "$docker_firewall_unit"
+grep -Fxq 'ExecStart=/usr/local/sbin/bumpabestie-cloudflare-docker-firewall apply-state' \
+  "$docker_firewall_unit"
+grep -Fxq 'RuntimeDirectory=bumpabestie-cloudflare-docker-firewall' \
+  "$docker_firewall_unit"
+grep -Fxq 'RuntimeDirectoryMode=0700' "$docker_firewall_unit"
+grep -Fxq 'ProtectSystem=strict' "$docker_firewall_unit"
+grep -Fxq 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW' "$docker_firewall_unit"
+grep -Fxq 'WantedBy=docker.service' "$docker_firewall_unit"
+if grep -Eq '^ExecStop=' "$docker_firewall_unit"; then
+  echo "Stopping the Docker firewall unit must not remove its managed rules" >&2
+  exit 1
+fi
+docker_firewall_failure_unit=infra/systemd/bumpabestie-cloudflare-docker-firewall-failure.service
+grep -Fxq 'Conflicts=docker.service' "$docker_firewall_failure_unit"
+grep -Fxq 'Before=docker.service' "$docker_firewall_failure_unit"
+grep -Fxq 'ExecStart=/usr/bin/true' "$docker_firewall_failure_unit"
+if grep -Eq '^ExecStart=.*/systemctl ' "$docker_firewall_failure_unit"; then
+  echo "Firewall failure handling must not launch a nested blocking systemctl" >&2
+  exit 1
+fi
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK:-/var/lib/bumpabestie/maintenance.lock' scripts/maintenance_lock.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_WAIT_SECONDS:-900' scripts/maintenance_lock.sh
 grep -Fq 'BUMPABESTIE_MAINTENANCE_LOCK_FD:-' scripts/maintenance_lock.sh

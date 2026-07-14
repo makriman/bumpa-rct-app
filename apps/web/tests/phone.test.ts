@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import {
   assembleE164,
   countryByIso,
+  createPhoneCountries,
   maskedPhone,
-  PHONE_COUNTRIES,
 } from "@/lib/phone";
+
+const PHONE_COUNTRIES = createPhoneCountries((iso) => iso);
 
 describe("country-aware phone normalization", () => {
   it("normalizes a UK national trunk prefix to E.164", () => {
-    expect(assembleE164(countryByIso("GB"), "07400 123456")).toEqual({
+    expect(
+      assembleE164(countryByIso(PHONE_COUNTRIES, "GB"), "07400 123456"),
+    ).toEqual({
       ok: true,
       e164: "+447400123456",
       nationalDigits: "7400123456",
@@ -16,38 +20,46 @@ describe("country-aware phone normalization", () => {
   });
 
   it("normalizes valid India and Nigeria mobile numbers", () => {
-    expect(assembleE164(countryByIso("IN"), "98765 43210")).toMatchObject({
+    expect(
+      assembleE164(countryByIso(PHONE_COUNTRIES, "IN"), "98765 43210"),
+    ).toMatchObject({
       ok: true,
       e164: "+919876543210",
     });
-    expect(assembleE164(countryByIso("NG"), "0801 234 5678")).toMatchObject({
+    expect(
+      assembleE164(countryByIso(PHONE_COUNTRIES, "NG"), "0801 234 5678"),
+    ).toMatchObject({
       ok: true,
       e164: "+2348012345678",
     });
   });
 
   it("rejects an international prefix or a number invalid for the selected plan", () => {
-    expect(assembleE164(countryByIso("GB"), "+44 7400 123456")).toEqual({
+    expect(
+      assembleE164(countryByIso(PHONE_COUNTRIES, "GB"), "+44 7400 123456"),
+    ).toEqual({
       ok: false,
       error: "Enter only the number after +44.",
     });
-    expect(assembleE164(countryByIso("IN"), "12345")).toMatchObject({
+    expect(
+      assembleE164(countryByIso(PHONE_COUNTRIES, "IN"), "12345"),
+    ).toMatchObject({
       ok: false,
     });
   });
 
   it("offers comprehensive country metadata and masks confirmed numbers", () => {
     expect(PHONE_COUNTRIES.length).toBeGreaterThan(200);
-    expect(countryByIso("GB")).toMatchObject({
+    expect(countryByIso(PHONE_COUNTRIES, "GB")).toMatchObject({
       dialCode: "44",
       priority: true,
     });
-    expect(countryByIso("IN")).toMatchObject({
+    expect(countryByIso(PHONE_COUNTRIES, "IN")).toMatchObject({
       dialCode: "91",
       priority: true,
     });
-    expect(maskedPhone("+919876543210", countryByIso("IN"))).toBe(
-      "+91 •••••• 3210",
-    );
+    expect(
+      maskedPhone("+919876543210", countryByIso(PHONE_COUNTRIES, "IN")),
+    ).toBe("+91 •••••• 3210");
   });
 });

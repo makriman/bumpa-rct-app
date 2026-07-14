@@ -239,20 +239,10 @@ for old_id, secret in old_keys.items():
     echo "AUTH_LOGIN_MODE is invalid" >&2
     failed=1
   }
-  if [[ "$auth_login_mode" == "temporary_static_pin" ]] && ! python3 - "$temporary_web_pin_verifier_file_host" <<'PY'
-import os
-import re
-import sys
-
-path = sys.argv[1]
-if (
-    not re.fullmatch(r"/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier", path)
-    or os.path.normpath(path) != path
-):
-    raise SystemExit(1)
-PY
-  then
-    echo "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST must be an absolute normalized dedicated verifier path" >&2
+  if [[ "$auth_login_mode" == "temporary_static_pin" ]] \
+    && [[ ! "$temporary_web_pin_verifier_file_host" =~ ^/var/lib/[A-Za-z0-9._-]+/temporary_web_pin_verifier$ ]] \
+    && [[ ! "$temporary_web_pin_verifier_file_host" =~ ^/var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers/[a-f0-9]{32}$ ]]; then
+    echo "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST must select a supported private verifier path" >&2
     failed=1
   fi
   if [[ "$auth_login_mode" == "temporary_static_pin" ]]; then

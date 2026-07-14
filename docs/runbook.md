@@ -41,19 +41,51 @@ For immediate login containment, set `AUTH_LOGIN_MODE=disabled`, blank
 `TEMPORARY_WEB_PIN_VERIFIER`, `TEMPORARY_WEB_PIN_VERIFIER_FILE`,
 `TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST` and `TEMPORARY_WEB_PIN_EXPIRES_AT`, then use
 the normal root-owned promotion coordinator. Outside temporary mode Compose mounts
-`/dev/null` into the initializer and removes the API runtime copy. For a planned
-credential rotation, run as root from the checked-out repository:
+`/dev/null` into the initializer and removes the API runtime copy. For first
+activation, stage temporary mode, the fixed runtime path, a future expiry and a
+blank host path. For a planned rotation, leave the currently deployed host path
+unchanged and update the expiry. Then run as root from the checked-out repository:
+
+If the current verifier is missing or suspected compromised, do not depend on a
+promotion preflight to make the live site safe. Immediately take both public auth
+surfaces offline under the maintenance lock, verify that Docker has no Caddy or
+API container left, and leave the maintenance interlock active:
+
+```bash
+sudo bash -ceu '
+  cd /opt/bumpabestie
+  source scripts/maintenance_lock.sh
+  source scripts/promotion_state.sh
+  acquire_maintenance_lock
+  mark_maintenance_required manual_emergency_auth_containment
+  compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
+  "${compose[@]}" stop --timeout 30 caddy api
+  "${compose[@]}" rm --force caddy api
+  for service in caddy api; do
+    test -z "$(docker ps --all --quiet \
+      --filter label=com.docker.compose.project=bumpabestie \
+      --filter label=com.docker.compose.service="$service")"
+  done
+'
+```
+
+This is an outage containment procedure, not a deployment. Do not clear the
+interlock, restart either surface or attempt a normal promotion until the release
+record, host verifier and recovery plan have been reconciled and reviewed.
 
 ```bash
 sudo ./scripts/set_temporary_login_pin.sh /opt/bumpabestie/.env.production
 ```
 
-Supply the six-digit value only at the hidden prompt, set a fresh future
-`TEMPORARY_WEB_PIN_EXPIRES_AT`, validate, promote, then run redacted mapped and
-unmapped canaries. Never pass the PIN in argv, environment, shell history, logs or
-chat. Rotation does not revoke an already issued cookie; use session revocation or
-wait for the bounded session TTL as appropriate. Expiry and the kill switch are
-independent containment controls.
+Supply the six-digit value only at the hidden prompt. The setter creates a unique
+root-only immutable verifier, atomically stages its generated host path and retains
+the prior file for rollback. Validate, promote, then run redacted mapped and
+unmapped canaries. A failed promotion restores the recorded prior path and copies
+that file before recreating the API. Never pass the PIN in argv, environment,
+shell history, logs or chat. Rotation does not revoke an already issued cookie;
+use session revocation or wait for the bounded session TTL as appropriate. Expiry
+and the kill switch are independent containment controls. Do not delete older
+verifier versions in this release; they remain conservative rollback material.
 
 Login is not a role grant. Mapped collaborators retain only their existing tenant,
 `operator` and/or `researcher` access. Superadmin may manage the two ordinary

@@ -23,6 +23,7 @@ const ALLOWED_ROOTS = new Set([
   "mcp",
 ]);
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const BODY_FORBIDDEN_STATUSES = new Set([204, 205, 304]);
 // These application-level headers are required by specific API contracts. Keep
 // this list deliberately narrow: arbitrary browser headers (including
 // Authorization and hop-by-hop transport headers) must never cross the BFF.
@@ -32,6 +33,10 @@ const FORWARDED_APPLICATION_HEADERS = [
   "x-tenant-id",
   "x-access-reason",
 ] as const;
+
+function responseAllowsBody(method: string, status: number): boolean {
+  return method !== "HEAD" && !BODY_FORBIDDEN_STATUSES.has(status);
+}
 
 function caddyClientIp(request: NextRequest): string | null {
   const value = request.headers.get("x-bumpa-client-ip");
@@ -139,15 +144,18 @@ async function proxy(
         forwardSetCookie = false;
       }
     }
-    const response = new NextResponse(responseBody, {
-      status: responseStatus,
-      headers: {
-        "content-type":
-          upstream.headers.get("content-type") ?? "application/json",
-        "cache-control": "no-store",
-        "x-correlation-id": responseCorrelationId,
+    const response = new NextResponse(
+      responseAllowsBody(request.method, responseStatus) ? responseBody : null,
+      {
+        status: responseStatus,
+        headers: {
+          "content-type":
+            upstream.headers.get("content-type") ?? "application/json",
+          "cache-control": "no-store",
+          "x-correlation-id": responseCorrelationId,
+        },
       },
-    });
+    );
     const setCookie = upstream.headers.get("set-cookie");
     if (setCookie && forwardSetCookie)
       response.headers.set("set-cookie", setCookie);
