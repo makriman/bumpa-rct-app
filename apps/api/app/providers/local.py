@@ -7,7 +7,9 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
+from app.core.store_context import validate_store_currency, validate_store_timezone
 from app.providers.contracts import (
     ArtifactStore,
     BumpaSnapshot,
@@ -30,8 +32,10 @@ DATASETS: dict[str, tuple[str, ...]] = {
 class LocalCommerceProvider:
     """Predictable commerce fixture with all required datasets and paginated-like orders."""
 
-    def __init__(self, tenant_seed: str) -> None:
+    def __init__(self, tenant_seed: str, *, store_timezone: str, store_currency: str) -> None:
         self._seed = int(hashlib.sha256(tenant_seed.encode()).hexdigest()[:6], 16)
+        self._store_zone = ZoneInfo(validate_store_timezone(store_timezone))
+        self._store_currency = validate_store_currency(store_currency)
 
     def sync(self, date_from: date, date_to: date) -> BumpaSnapshot:
         days = Decimal((date_to - date_from).days + 1)
@@ -60,15 +64,23 @@ class LocalCommerceProvider:
                         availability="available",
                         value=value,
                         title=key.replace("_", " ").title(),
-                        payload={"dataset": name, "value": str(value), "currency": "NGN"},
+                        payload={
+                            "dataset": name,
+                            "value": str(value),
+                            "currency": self._store_currency,
+                        },
                         canonical_payload={
                             "schema_version": 1,
                             "kind": "scalar",
                             "value": str(value),
                         },
-                        currency_code="NGN" if resource == "sales" else None,
-                        response_from=datetime.combine(date_from, datetime.min.time(), tzinfo=UTC),
-                        response_to=datetime.combine(date_to, datetime.min.time(), tzinfo=UTC),
+                        currency_code=self._store_currency if resource == "sales" else None,
+                        response_from=datetime.combine(
+                            date_from, datetime.min.time(), tzinfo=self._store_zone
+                        ).astimezone(UTC),
+                        response_to=datetime.combine(
+                            date_to, datetime.max.time(), tzinfo=self._store_zone
+                        ).astimezone(UTC),
                     )
                 )
         orders = [
@@ -77,9 +89,11 @@ class LocalCommerceProvider:
                 order_number=f"BB-{1000 + index}",
                 status="completed" if index < 4 else "pending",
                 payment_status="paid" if index < 4 else "unpaid",
-                currency_code="NGN",
+                currency_code=self._store_currency,
                 total_amount=Decimal(15_000 + index * 3_250),
-                order_date=datetime.combine(date_to, datetime.min.time(), tzinfo=UTC)
+                order_date=datetime.combine(
+                    date_to, datetime.min.time(), tzinfo=self._store_zone
+                ).astimezone(UTC)
                 - timedelta(hours=index * 4),
                 payload={
                     "id": f"local-{self._seed}-{index}",

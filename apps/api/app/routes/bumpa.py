@@ -1,6 +1,7 @@
 import secrets
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from sqlalchemy import select
@@ -34,11 +35,29 @@ def sync(
             detail="Bumpa integration is disabled",
         )
     assert principal.tenant is not None
-    connection = db.scalar(
-        select(BumpaConnection).where(BumpaConnection.tenant_id == principal.tenant.id)
+    connection = _active_connection(db, principal.tenant.id)
+    return _request_sync(
+        payload,
+        response,
+        principal=principal,
+        db=db,
+        settings=settings,
+        idempotency_key=idempotency_key,
+        connection=connection,
     )
-    if not connection:
-        raise HTTPException(status_code=409, detail="Bumpa is not connected")
+
+
+def _request_sync(
+    payload: SyncRequest,
+    response: Response,
+    *,
+    principal: Principal,
+    db: Session,
+    settings: Settings,
+    idempotency_key: str | None,
+    connection: BumpaConnection,
+) -> dict[str, Any]:
+    assert principal.tenant is not None
     enforce_operation_rate_limit(
         settings,
         operation="bumpa-sync",
@@ -51,6 +70,7 @@ def sync(
         job_payload = {
             "tenant_id": principal.tenant.id,
             "connection_id": connection.id,
+            "boundary_revision": connection.boundary_revision,
             "date_from": payload.date_from.isoformat(),
             "date_to": payload.date_to.isoformat(),
         }
@@ -97,14 +117,22 @@ def sync_latest(
     settings: Settings = Depends(get_settings),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
-    today = date.today()
-    return sync(
-        SyncRequest(date_from=today - timedelta(days=29), date_to=today),
+    if settings.bumpa_backend == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Bumpa integration is disabled",
+        )
+    assert principal.tenant is not None
+    connection = _active_connection(db, principal.tenant.id)
+    store_today = _today_for_store(connection.store_timezone)
+    return _request_sync(
+        SyncRequest(date_from=store_today - timedelta(days=29), date_to=store_today),
         response,
-        principal,
-        db,
-        settings,
-        idempotency_key,
+        principal=principal,
+        db=db,
+        settings=settings,
+        idempotency_key=idempotency_key,
+        connection=connection,
     )
 
 
@@ -115,7 +143,13 @@ def sync_runs(
     assert principal.tenant is not None
     rows = db.scalars(
         select(BumpaSyncRun)
-        .where(BumpaSyncRun.tenant_id == principal.tenant.id)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
+        .where(
+            BumpaSyncRun.tenant_id == principal.tenant.id,
+            BumpaConnection.tenant_id == principal.tenant.id,
+            BumpaConnection.status == "active",
+            BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
+        )
         .order_by(BumpaSyncRun.started_at.desc())
         .limit(50)
     ).all()
@@ -167,6 +201,24 @@ def _run_view(row: BumpaSyncRun) -> dict:
         "finished_at": row.finished_at,
         "error": row.error,
     }
+
+
+def _active_connection(db: Session, tenant_id: str) -> BumpaConnection:
+    connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant_id))
+    if connection is None:
+        raise HTTPException(status_code=409, detail="Bumpa is not connected")
+    if connection.status != "active":
+        raise HTTPException(status_code=409, detail="Bumpa connection is not active")
+    return connection
+
+
+def _today_for_store(store_timezone: str, *, instant: datetime | None = None) -> date:
+    zone = ZoneInfo(store_timezone)
+    if instant is None:
+        return datetime.now(zone).date()
+    if instant.tzinfo is None:
+        raise ValueError("Store date instant must include a timezone")
+    return instant.astimezone(zone).date()
 
 
 def _request_idempotency_key(value: str | None) -> str:

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 
+from app.core.store_context import validate_store_currency, validate_store_timezone
 from app.providers.contracts import ProviderDataset, ProviderOrder
 from app.providers.diagnostics import provider_request_id_hash
 from app.providers.redaction import parse_money
@@ -36,8 +39,6 @@ KNOWN_UNAVAILABLE_MESSAGES = frozenset(
         "Net profit cannot be calculated for this store",
     }
 )
-
-
 BumpaFailureKind = Literal[
     "timeout",
     "transport",
@@ -107,6 +108,8 @@ class BumpaClient:
         scope_type: str,
         scope_id: str,
         *,
+        store_timezone: str,
+        store_currency: str,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
         max_attempts: int = 3,
@@ -115,9 +118,13 @@ class BumpaClient:
             raise ValueError("Invalid Bumpa scope_type")
         if not api_key.strip() or not scope_id.strip():
             raise ValueError("Bumpa credentials and scope are required")
+        timezone_name = validate_store_timezone(store_timezone)
         self._api_key = api_key
         self.scope_type = scope_type
         self.scope_id = scope_id
+        self.store_timezone = timezone_name
+        self._store_zone = ZoneInfo(timezone_name)
+        self.store_currency = validate_store_currency(store_currency)
         self._client = client or httpx.Client(
             base_url=BUMPA_BASE_URL,
             timeout=httpx.Timeout(30.0, connect=5.0),
@@ -327,16 +334,25 @@ class BumpaClient:
         seen_orders: dict[str, ProviderOrder] = {}
         availability = "unavailable"
         error: str | None = "Orders were not requested"
-        last_http_status: int | None = None
+        offending_status: int | None = None
+        offending_payload: dict[str, Any] = {}
+        offending_headers: dict[str, str] = {}
         try:
             while page <= MAX_ORDER_PAGES:
+                # Reset the evidence boundary before I/O so a transport failure on
+                # a later page can never be attributed to the previous response.
+                offending_status = None
+                offending_payload = {}
+                offending_headers = {}
                 status, payload, headers = self.get_orders_page(
                     date_from,
                     date_to,
                     page,
                     max_attempts=max_attempts,
                 )
-                last_http_status = status
+                offending_status = status
+                offending_payload = payload
+                offending_headers = headers
                 availability, error = classify_availability(status, payload)
                 current_limit, current_remaining = _merge_rate_limits(
                     headers, current_limit, current_remaining
@@ -375,7 +391,7 @@ class BumpaClient:
                         failure_kind="invalid_response",
                     )
                 for row in raw_orders:
-                    order = _normalise_order(row)
+                    order = _normalise_order(row, store_currency=self.store_currency)
                     existing_order = seen_orders.get(order.order_id)
                     if existing_order is not None and existing_order != order:
                         raise BumpaProviderError(
@@ -387,6 +403,12 @@ class BumpaClient:
                         continue
                     seen_orders[order.order_id] = order
                     orders.append(order)
+                if current < last and not raw_orders:
+                    raise BumpaProviderError(
+                        "Bumpa orders pagination did not advance",
+                        status_code=status,
+                        failure_kind="invalid_response",
+                    )
                 responses.append(
                     BumpaResponse(
                         "orders",
@@ -403,14 +425,14 @@ class BumpaClient:
                     )
                 )
                 if current >= last:
+                    offending_status = None
+                    offending_payload = {}
+                    offending_headers = {}
                     break
-                if current != page or not raw_orders:
-                    raise BumpaProviderError(
-                        "Bumpa orders pagination did not advance",
-                        status_code=status,
-                        failure_kind="invalid_response",
-                    )
                 page = current + 1
+                offending_status = None
+                offending_payload = {}
+                offending_headers = {}
             else:
                 raise BumpaProviderError(
                     "Bumpa orders exceeded the pagination limit",
@@ -439,15 +461,17 @@ class BumpaClient:
                 BumpaResponse(
                     "orders",
                     None,
-                    exc.status_code if exc.status_code is not None else last_http_status,
-                    {},
-                    {},
+                    exc.status_code if exc.status_code is not None else offending_status,
+                    offending_payload,
+                    offending_headers,
                     availability,
                     error,
                     evidence_kind,
                     exc.retryable,
-                    exc.request_id_hash,
-                    exc.retry_after_seconds,
+                    exc.request_id_hash or offending_headers.get("x-request-id-sha256"),
+                    exc.retry_after_seconds
+                    if exc.retry_after_seconds is not None
+                    else _bounded_retry_after(offending_headers.get("retry-after")),
                 )
             )
         return (
@@ -464,13 +488,20 @@ class BumpaClient:
         # Require two independent schema-valid, populated analytics contracts so
         # an ambiguous 200-empty response can never activate a connection. Zero
         # values are valid; missing metric rows are not.
-        today = datetime.now(UTC).date()
+        today = datetime.now(self._store_zone).date()
         date_from = date(today.year - 1, today.month, min(today.day, 28))
         verified: list[ProviderDataset] = []
         scope_identified = False
         for area, dataset in (("sales", "overview"), ("customers", "overview")):
             status, payload, headers = self.get_analytics(area, dataset, date_from, today)
-            decoded = decode_analytics_dataset(area, dataset, status, payload)
+            decoded = decode_analytics_dataset(
+                area,
+                dataset,
+                status,
+                payload,
+                store_timezone=self.store_timezone,
+                store_currency=self.store_currency,
+            )
             if decoded.availability != "available":
                 raise BumpaProviderError(
                     decoded.error or "Bumpa scope could not be verified",
@@ -479,6 +510,20 @@ class BumpaClient:
                     failure_kind=("provider" if status >= 500 else "invalid_response"),
                     request_id_hash=headers.get("x-request-id-sha256"),
                     retry_after_seconds=_bounded_retry_after(headers.get("retry-after")),
+                )
+            if not _response_range_matches_request(
+                payload,
+                decoded.response_from,
+                decoded.response_to,
+                date_from,
+                today,
+                store_timezone=self._store_zone,
+            ):
+                raise BumpaProviderError(
+                    "Bumpa analytics response range did not match the request",
+                    status_code=status,
+                    failure_kind="invalid_response",
+                    request_id_hash=headers.get("x-request-id-sha256"),
                 )
             verified.append(decoded)
             scope_identified = scope_identified or _payload_identifies_scope(
@@ -508,6 +553,9 @@ class BumpaClient:
 
         for area, names in DATASETS.items():
             for name in names:
+                status: int | None = None
+                payload: dict[str, Any] = {}
+                headers: dict[str, str] = {}
                 try:
                     status, payload, headers = self.get_analytics(
                         area,
@@ -519,12 +567,21 @@ class BumpaClient:
                         # independent dataset and orders endpoint.
                         max_attempts=1 if exhausted_degradable_failures else None,
                     )
-                    decoded = decode_analytics_dataset(area, name, status, payload)
-                    if decoded.availability == "available" and (
-                        decoded.response_from is None
-                        or decoded.response_to is None
-                        or decoded.response_from.date() != date_from
-                        or decoded.response_to.date() != date_to
+                    decoded = decode_analytics_dataset(
+                        area,
+                        name,
+                        status,
+                        payload,
+                        store_timezone=self.store_timezone,
+                        store_currency=self.store_currency,
+                    )
+                    if decoded.availability == "available" and not _response_range_matches_request(
+                        payload,
+                        decoded.response_from,
+                        decoded.response_to,
+                        date_from,
+                        date_to,
+                        store_timezone=self._store_zone,
                     ):
                         raise BumpaProviderError(
                             "Bumpa analytics response range did not match the request",
@@ -545,15 +602,17 @@ class BumpaClient:
                         BumpaResponse(
                             area,
                             name,
-                            exc.status_code,
-                            {},
-                            {},
+                            exc.status_code if exc.status_code is not None else status,
+                            payload,
+                            headers,
                             "error",
                             str(exc),
                             failure_kind,
                             exc.retryable,
-                            exc.request_id_hash,
-                            exc.retry_after_seconds,
+                            exc.request_id_hash or headers.get("x-request-id-sha256"),
+                            exc.retry_after_seconds
+                            if exc.retry_after_seconds is not None
+                            else _bounded_retry_after(headers.get("retry-after")),
                         )
                     )
                     datasets.append(
@@ -561,7 +620,7 @@ class BumpaClient:
                             resource=area,
                             dataset=name,
                             availability="error",
-                            payload={},
+                            payload=payload,
                             value=None,
                             title=f"{area}.{name}".replace("_", " ").title(),
                             error=str(exc),
@@ -647,12 +706,25 @@ def classify_availability(status_code: int, payload: dict[str, Any]) -> tuple[st
 
 
 def decode_analytics_dataset(
-    area: str, dataset: str, status_code: int, payload: dict[str, Any]
+    area: str,
+    dataset: str,
+    status_code: int,
+    payload: dict[str, Any],
+    *,
+    store_timezone: str,
+    store_currency: str,
 ) -> ProviderDataset:
     """Validate and canonicalize one documented Bumpa analytics contract."""
 
     try:
-        return _decode_analytics_dataset(area, dataset, status_code, payload)
+        return _decode_analytics_dataset(
+            area,
+            dataset,
+            status_code,
+            payload,
+            store_timezone=ZoneInfo(validate_store_timezone(store_timezone)),
+            store_currency=validate_store_currency(store_currency),
+        )
     except BumpaProviderError:
         raise
     except (AssertionError, KeyError, TypeError, ValueError) as exc:
@@ -660,7 +732,13 @@ def decode_analytics_dataset(
 
 
 def _decode_analytics_dataset(
-    area: str, dataset: str, status_code: int, payload: dict[str, Any]
+    area: str,
+    dataset: str,
+    status_code: int,
+    payload: dict[str, Any],
+    *,
+    store_timezone: ZoneInfo,
+    store_currency: str,
 ) -> ProviderDataset:
 
     availability, error = classify_availability(status_code, payload)
@@ -682,13 +760,17 @@ def _decode_analytics_dataset(
             payload,
             primary_title="total sales",
             monetary_titles={"total sales", "offline sales", "total settled", "total owed"},
+            store_timezone=store_timezone,
+            store_currency=store_currency,
         )
-        currency = _infer_currency(payload)
+        currency = _resolve_currency(payload, store_currency)
     elif key == ("customers", "overview"):
         canonical, value = _decode_overview(
             payload,
             primary_title="total customers",
             monetary_titles={"avg spend / customer"},
+            store_timezone=store_timezone,
+            store_currency=store_currency,
         )
         currency = None
     elif key in {
@@ -696,27 +778,51 @@ def _decode_analytics_dataset(
         ("sales", "gross_profit"),
         ("sales", "net_profit"),
     }:
-        canonical, value = _decode_summary_chart(payload)
-        currency = _infer_currency(payload)
+        canonical, value = _decode_summary_chart(
+            payload,
+            store_timezone=store_timezone,
+            store_currency=store_currency,
+            count_metric=False,
+        )
+        currency = _resolve_currency(payload, store_currency)
     elif key == ("products", "products_sold"):
-        canonical, value = _decode_summary_chart(payload)
+        canonical, value = _decode_summary_chart(
+            payload,
+            store_timezone=store_timezone,
+            store_currency=store_currency,
+            count_metric=True,
+        )
         currency = None
     elif key == ("products", "overview"):
-        canonical, value = _decode_products_overview(payload)
+        canonical, value = _decode_products_overview(
+            payload,
+            store_timezone=store_timezone,
+            store_currency=store_currency,
+        )
         currency = None
     elif key in {
         ("products", "top_selling_products"),
         ("products", "least_selling_products"),
     }:
-        canonical = _decode_rankings(payload, customer_rows=False)
+        canonical = _decode_rankings(
+            payload,
+            customer_rows=False,
+            store_timezone=store_timezone,
+            store_currency=store_currency,
+        )
         value, currency = None, None
     elif key == ("customers", "top_customers_order"):
-        canonical = _decode_rankings(payload, customer_rows=True)
+        canonical = _decode_rankings(
+            payload,
+            customer_rows=True,
+            store_timezone=store_timezone,
+            store_currency=store_currency,
+        )
         value, currency = None, None
     else:  # pragma: no cover - guarded by get_analytics
         raise ValueError("Unsupported Bumpa analytics dataset")
 
-    response_from, response_to = _canonical_response_range(canonical)
+    response_from, response_to = _response_range(payload)
     return ProviderDataset(
         resource=area,
         dataset=dataset,
@@ -733,23 +839,30 @@ def _decode_analytics_dataset(
 
 
 def _decode_overview(
-    payload: dict[str, Any], *, primary_title: str, monetary_titles: set[str]
+    payload: dict[str, Any],
+    *,
+    primary_title: str,
+    monetary_titles: set[str],
+    store_timezone: ZoneInfo,
+    store_currency: str,
 ) -> tuple[dict[str, Any], Decimal | None]:
     raw_data = payload.get("data")
     if not isinstance(raw_data, list):
         raise _invalid_analytics_shape()
     items: list[dict[str, Any]] = []
     primary: Decimal | None = None
-    currency = _infer_currency(payload)
+    currency = _resolve_currency(payload, store_currency)
     for raw in raw_data:
         if not isinstance(raw, dict):
             raise _invalid_analytics_shape()
         title = raw.get("title")
-        value = parse_money(raw.get("value"))
+        value = parse_money(raw.get("value"), currency_code=store_currency)
         if not isinstance(title, str) or not title.strip() or value is None:
             raise _invalid_analytics_shape()
         clean_title = title.strip()[:160]
         normalized_title = _normalise_label(clean_title)
+        if normalized_title not in monetary_titles and not _is_nonnegative_integral(value):
+            raise _invalid_analytics_shape()
         item: dict[str, Any] = {"title": clean_title, "value": _decimal_text(value)}
         if normalized_title in monetary_titles:
             item["unit"] = "currency"
@@ -764,12 +877,18 @@ def _decode_overview(
     return {
         "schema_version": 1,
         "kind": "overview",
-        "range": _decode_range(payload),
+        "range": _decode_range(payload, store_timezone=store_timezone),
         "items": items,
     }, primary
 
 
-def _decode_summary_chart(payload: dict[str, Any]) -> tuple[dict[str, Any], Decimal]:
+def _decode_summary_chart(
+    payload: dict[str, Any],
+    *,
+    store_timezone: ZoneInfo,
+    store_currency: str,
+    count_metric: bool,
+) -> tuple[dict[str, Any], Decimal]:
     raw_data = payload.get("data")
     if not isinstance(raw_data, dict):
         raise _invalid_analytics_shape()
@@ -778,15 +897,20 @@ def _decode_summary_chart(payload: dict[str, Any]) -> tuple[dict[str, Any], Deci
     if not isinstance(summary, dict) or not isinstance(chart, dict):
         raise _invalid_analytics_shape()
     title = summary.get("title")
-    value = parse_money(summary.get("value"))
-    if not isinstance(title, str) or not title.strip() or value is None:
+    value = parse_money(summary.get("value"), currency_code=store_currency)
+    if (
+        not isinstance(title, str)
+        or not title.strip()
+        or value is None
+        or (count_metric and not _is_nonnegative_integral(value))
+    ):
         raise _invalid_analytics_shape()
     canonical_summary: dict[str, Any] = {
         "title": title.strip()[:160],
         "value": _decimal_text(value),
     }
     if "progress" in summary:
-        progress = parse_money(summary.get("progress"))
+        progress = parse_money(summary.get("progress"), currency_code=store_currency)
         if progress is None:
             raise _invalid_analytics_shape()
         canonical_summary["progress"] = _decimal_text(progress)
@@ -795,35 +919,67 @@ def _decode_summary_chart(payload: dict[str, Any]) -> tuple[dict[str, Any], Deci
         if not isinstance(progress_text, str):
             raise _invalid_analytics_shape()
         canonical_summary["progress_text"] = progress_text[:160]
+    response_range = _response_range(payload)
+    current_dates = _range_local_dates(payload.get("range"), store_timezone=store_timezone)
+    previous_period = chart.get("previous_period")
+    previous_dates = _period_local_dates(
+        previous_period,
+        store_timezone=store_timezone,
+    )
+    if not _valid_previous_local_range(current_dates, previous_dates):
+        raise _invalid_analytics_shape()
     return (
         {
             "schema_version": 1,
             "kind": "summary_chart",
-            "range": _decode_range(payload),
+            "range": _decode_range(payload, store_timezone=store_timezone),
             "summary": canonical_summary,
             "series": {
-                "current_period": _decode_period(chart.get("current_period")),
-                "previous_period": _decode_period(chart.get("previous_period")),
+                "current_period": _decode_period(
+                    chart.get("current_period"),
+                    store_timezone=store_timezone,
+                    store_currency=store_currency,
+                    count_values=count_metric,
+                    expected_ranges=(response_range,),
+                    expected_local_date_ranges=(current_dates,),
+                ),
+                "previous_period": _decode_period(
+                    previous_period,
+                    store_timezone=store_timezone,
+                    store_currency=store_currency,
+                    count_values=count_metric,
+                    expected_ranges=(
+                        _inclusive_local_day_bounds(previous_dates, store_timezone=store_timezone),
+                    ),
+                    expected_local_date_ranges=(previous_dates,),
+                ),
             },
         },
         value,
     )
 
 
-def _decode_products_overview(payload: dict[str, Any]) -> tuple[dict[str, Any], Decimal]:
+def _decode_products_overview(
+    payload: dict[str, Any], *, store_timezone: ZoneInfo, store_currency: str
+) -> tuple[dict[str, Any], Decimal]:
     raw_data = payload.get("data")
     if not isinstance(raw_data, dict):
         raise _invalid_analytics_shape()
     summary: dict[str, dict[str, Any]] = {}
     total_products: Decimal | None = None
-    currency = _infer_currency(payload)
+    currency = _resolve_currency(payload, store_currency)
     for name in ("total_products", "total_stock", "inventory_value"):
         raw_metric = raw_data.get(name)
         if not isinstance(raw_metric, dict):
             raise _invalid_analytics_shape()
         title = raw_metric.get("title")
-        value = parse_money(raw_metric.get("value"))
-        if not isinstance(title, str) or not title.strip() or value is None:
+        value = parse_money(raw_metric.get("value"), currency_code=store_currency)
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or value is None
+            or (name != "inventory_value" and not _is_nonnegative_integral(value))
+        ):
             raise _invalid_analytics_shape()
         summary[name] = {
             "title": title.strip()[:160],
@@ -835,22 +991,44 @@ def _decode_products_overview(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         if name == "total_products":
             total_products = value
     assert total_products is not None
+    response_range = _response_range(payload)
+    current_dates = _range_local_dates(payload.get("range"), store_timezone=store_timezone)
     return (
         {
             "schema_version": 1,
             "kind": "products_overview",
-            "range": _decode_range(payload),
+            "range": _decode_range(payload, store_timezone=store_timezone),
             "summary": summary,
             "series": {
-                "total_products": _decode_period(raw_data.get("total_products_chart")),
-                "total_products_sold": _decode_period(raw_data.get("total_products_sold_chart")),
+                "total_products": _decode_period(
+                    raw_data.get("total_products_chart"),
+                    store_timezone=store_timezone,
+                    store_currency=store_currency,
+                    count_values=True,
+                    expected_ranges=(response_range,),
+                    expected_local_date_ranges=(current_dates,),
+                ),
+                "total_products_sold": _decode_period(
+                    raw_data.get("total_products_sold_chart"),
+                    store_timezone=store_timezone,
+                    store_currency=store_currency,
+                    count_values=True,
+                    expected_ranges=(response_range,),
+                    expected_local_date_ranges=(current_dates,),
+                ),
             },
         },
         total_products,
     )
 
 
-def _decode_rankings(payload: dict[str, Any], *, customer_rows: bool) -> dict[str, Any]:
+def _decode_rankings(
+    payload: dict[str, Any],
+    *,
+    customer_rows: bool,
+    store_timezone: ZoneInfo,
+    store_currency: str,
+) -> dict[str, Any]:
     raw_data = payload.get("data")
     if customer_rows:
         if not isinstance(raw_data, dict) or not isinstance(raw_data.get("summary"), dict):
@@ -873,29 +1051,40 @@ def _decode_rankings(payload: dict[str, Any], *, customer_rows: bool) -> dict[st
         for rank, raw_row in enumerate(rows, start=1):
             if not isinstance(raw_row, dict):
                 raise _invalid_analytics_shape()
+            value_keys = (
+                ("value", "order_count", "orders", "count")
+                if customer_rows
+                else ("value", "count", "quantity", "sales")
+            )
             value = _first_decimal(
                 raw_row,
-                "value",
-                "order_count",
-                "orders",
-                "count",
-                "quantity",
-                "sales",
+                *value_keys,
+                currency_code=store_currency,
             )
-            label = _first_text(
-                raw_row,
-                "label",
-                "name",
-                "title",
-                "product_name",
-                "customer_name",
-                "customer",
-            )
-            if value is None or label is None:
+            # Customer labels are PII and are deliberately replaced with stable
+            # positional labels. Bumpa also returns anonymous/deleted customers
+            # with an empty label and ID; their aggregate order count is still a
+            # valid fact. Product rankings, however, require a display label.
+            label = None
+            if not customer_rows:
+                label = _first_text(
+                    raw_row,
+                    "label",
+                    "name",
+                    "title",
+                    "product_name",
+                )
+            if (
+                value is None
+                or not _is_nonnegative_integral(value)
+                or (not customer_rows and label is None)
+            ):
                 raise _invalid_analytics_shape()
+            display_label = f"Customer {rank}" if customer_rows else label
+            assert display_label is not None
             row: dict[str, str] = {
                 "rank": str(rank),
-                "label": f"Customer {rank}" if customer_rows else label[:200],
+                "label": display_label[:200],
                 "value": _decimal_text(value),
             }
             if not customer_rows and (identifier := _first_text(raw_row, "id", "product_id")):
@@ -915,12 +1104,20 @@ def _decode_rankings(payload: dict[str, Any], *, customer_rows: bool) -> dict[st
     return {
         "schema_version": 1,
         "kind": "ranking",
-        "range": _decode_range(payload),
+        "range": _decode_range(payload, store_timezone=store_timezone),
         "groups": groups,
     }
 
 
-def _decode_period(value: Any) -> dict[str, Any]:
+def _decode_period(
+    value: Any,
+    *,
+    store_timezone: ZoneInfo,
+    store_currency: str,
+    count_values: bool,
+    expected_ranges: tuple[tuple[datetime, datetime], ...] = (),
+    expected_local_date_ranges: tuple[tuple[date, date], ...] = (),
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _invalid_analytics_shape()
     raw_range = value.get("range")
@@ -932,25 +1129,52 @@ def _decode_period(value: Any) -> dict[str, Any]:
         or len(raw_points) > MAX_ANALYTICS_POINTS
     ):
         raise _invalid_analytics_shape()
+    parsed_from = _parse_range_datetime(raw_range[0]) if len(raw_range) == 2 else None
+    parsed_to = _parse_range_datetime(raw_range[1]) if len(raw_range) == 2 else None
+    local_dates = (
+        _range_local_dates(raw_range, store_timezone=store_timezone)
+        if len(raw_range) == 2
+        else None
+    )
+    date_only_range = _range_uses_date_only(raw_range) if len(raw_range) == 2 else False
+    if (
+        parsed_from is None
+        or parsed_to is None
+        or parsed_from > parsed_to
+        or (
+            expected_ranges
+            and not date_only_range
+            and (parsed_from, parsed_to) not in expected_ranges
+        )
+        or (expected_local_date_ranges and local_dates not in expected_local_date_ranges)
+    ):
+        raise _invalid_analytics_shape()
     points: list[dict[str, Any]] = []
     for raw in raw_points:
         if not isinstance(raw, dict):
             raise _invalid_analytics_shape()
         index = raw.get("index")
         label = raw.get("dateLabel")
-        metric = parse_money(raw.get("value"))
+        metric = parse_money(raw.get("value"), currency_code=store_currency)
         if (
             isinstance(index, bool)
             or not isinstance(index, int)
             or not isinstance(label, str)
             or metric is None
+            or (count_values and not _is_nonnegative_integral(metric))
         ):
             raise _invalid_analytics_shape()
         points.append({"index": index, "label": label[:80], "value": _decimal_text(metric)})
-    return {"range": [item[:40] for item in raw_range], "points": points}
+    return {
+        "range": [
+            _canonical_range_value(raw_range[0], parsed_from, store_timezone),
+            _canonical_range_value(raw_range[1], parsed_to, store_timezone),
+        ],
+        "points": points,
+    }
 
 
-def _decode_range(payload: dict[str, Any]) -> dict[str, str]:
+def _decode_range(payload: dict[str, Any], *, store_timezone: ZoneInfo) -> dict[str, str]:
     raw_range = payload.get("range")
     if not isinstance(raw_range, dict):
         raise _invalid_analytics_shape()
@@ -961,31 +1185,161 @@ def _decode_range(payload: dict[str, Any]) -> dict[str, str]:
     parsed_to = _parse_range_datetime(date_to)
     if parsed_from is None or parsed_to is None or parsed_from > parsed_to:
         raise _invalid_analytics_shape()
-    return {"from": parsed_from.date().isoformat(), "to": parsed_to.date().isoformat()}
+    return {
+        "from": _canonical_range_value(date_from, parsed_from, store_timezone),
+        "to": _canonical_range_value(date_to, parsed_to, store_timezone),
+    }
 
 
-def _canonical_response_range(canonical: dict[str, Any]) -> tuple[datetime, datetime]:
-    value = canonical.get("range")
-    if not isinstance(value, dict):  # pragma: no cover - all decoders require it
+def _response_range(payload: dict[str, Any]) -> tuple[datetime, datetime]:
+    value = payload.get("range")
+    if not isinstance(value, dict):
         raise _invalid_analytics_shape()
     parsed_from = _parse_range_datetime(value.get("from"))
     parsed_to = _parse_range_datetime(value.get("to"))
-    if parsed_from is None or parsed_to is None:
+    if parsed_from is None or parsed_to is None or parsed_from > parsed_to:
         raise _invalid_analytics_shape()
     return parsed_from, parsed_to
+
+
+def _canonical_range_value(raw: str, parsed: datetime, store_timezone: ZoneInfo) -> str:
+    # Canonical schema v1 always stores provider-local calendar dates. Preserve
+    # the exact UTC evidence separately in ``response_from``/``response_to``.
+    if _is_date_only(raw):
+        return parsed.date().isoformat()
+    return parsed.astimezone(store_timezone).date().isoformat()
+
+
+def _response_range_matches_request(
+    payload: dict[str, Any],
+    response_from: datetime | None,
+    response_to: datetime | None,
+    requested_from: date,
+    requested_to: date,
+    *,
+    store_timezone: ZoneInfo,
+) -> bool:
+    """Validate Bumpa's inclusive local-day window without losing timezone evidence.
+
+    Bumpa accepts date-only query parameters but its live analytics responses
+    normalize the store-local day boundaries to UTC. A UTC+01:00 store therefore
+    returns 23:00 on the previous UTC date through 22:59:59.999999 on the requested
+    final date. Comparing UTC calendar dates rejects that valid response. Instead,
+    require the exact configured store-local day window. This is an explicit
+    connection contract, not the tenant's editable display/scheduling timezone.
+    """
+
+    raw_range = payload.get("range")
+    if (
+        response_from is None
+        or response_to is None
+        or not isinstance(raw_range, dict)
+        or requested_from > requested_to
+    ):
+        return False
+    raw_from, raw_to = raw_range.get("from"), raw_range.get("to")
+    if not isinstance(raw_from, str) or not isinstance(raw_to, str):
+        return False
+    expected_from = datetime.combine(
+        requested_from, datetime.min.time(), store_timezone
+    ).astimezone(UTC)
+    expected_to = datetime.combine(requested_to, datetime.max.time(), store_timezone).astimezone(
+        UTC
+    )
+    return response_from == expected_from and response_to == expected_to
+
+
+def _range_local_dates(value: Any, *, store_timezone: ZoneInfo) -> tuple[date, date]:
+    if isinstance(value, dict):
+        raw_from, raw_to = value.get("from"), value.get("to")
+    elif isinstance(value, list) and len(value) == 2:
+        raw_from, raw_to = value
+    else:
+        raise _invalid_analytics_shape()
+    if not isinstance(raw_from, str) or not isinstance(raw_to, str):
+        raise _invalid_analytics_shape()
+    parsed_from = _parse_range_datetime(raw_from)
+    parsed_to = _parse_range_datetime(raw_to)
+    if parsed_from is None or parsed_to is None or parsed_from > parsed_to:
+        raise _invalid_analytics_shape()
+    local_from = (
+        parsed_from.date()
+        if _is_date_only(raw_from)
+        else parsed_from.astimezone(store_timezone).date()
+    )
+    local_to = (
+        parsed_to.date() if _is_date_only(raw_to) else parsed_to.astimezone(store_timezone).date()
+    )
+    if local_from > local_to:
+        raise _invalid_analytics_shape()
+    return local_from, local_to
+
+
+def _period_local_dates(value: Any, *, store_timezone: ZoneInfo) -> tuple[date, date]:
+    if not isinstance(value, dict):
+        raise _invalid_analytics_shape()
+    return _range_local_dates(value.get("range"), store_timezone=store_timezone)
+
+
+def _valid_previous_local_range(current: tuple[date, date], previous: tuple[date, date]) -> bool:
+    """Accept Bumpa's bounded adjacent comparison range.
+
+    Calendar-month boundaries can make the provider's previous period up to
+    three days longer or shorter than the requested current period. Require
+    immediate adjacency and that tight calendar bound; gaps, overlaps, clipped
+    timestamps, and unbounded historical ranges remain invalid.
+    """
+
+    current_days = (current[1] - current[0]).days + 1
+    previous_days = (previous[1] - previous[0]).days + 1
+    return previous[1] == current[0] - timedelta(days=1) and abs(previous_days - current_days) <= 3
+
+
+def _inclusive_local_day_bounds(
+    value: tuple[date, date], *, store_timezone: ZoneInfo
+) -> tuple[datetime, datetime]:
+    return (
+        datetime.combine(value[0], datetime.min.time(), store_timezone).astimezone(UTC),
+        datetime.combine(value[1], datetime.max.time(), store_timezone).astimezone(UTC),
+    )
+
+
+def _range_uses_date_only(value: Any) -> bool:
+    if isinstance(value, dict):
+        values = (value.get("from"), value.get("to"))
+    elif isinstance(value, list) and len(value) == 2:
+        values = (value[0], value[1])
+    else:
+        raise _invalid_analytics_shape()
+    return all(_is_date_only(item) for item in values)
+
+
+def _is_date_only(value: Any) -> bool:
+    if not isinstance(value, str) or len(value.strip()) != 10:
+        return False
+    try:
+        date.fromisoformat(value.strip())
+    except ValueError:
+        return False
+    return True
 
 
 def _parse_range_datetime(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
+    raw = value.strip()
+    if _is_date_only(raw):
+        return datetime.combine(date.fromisoformat(raw), datetime.min.time(), UTC)
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
-        try:
-            parsed = datetime.combine(date.fromisoformat(value), datetime.min.time())
-        except ValueError:
-            return None
-    return parsed.replace(tzinfo=parsed.tzinfo or UTC).astimezone(UTC)
+        return None
+    # A time-bearing provider range without an offset is ambiguous. Never
+    # silently interpret it as UTC; Bumpa must provide ``Z`` or an explicit
+    # numeric offset. Date-only nested comparison ranges are handled above.
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
 
 
 def _invalid_analytics_shape() -> BumpaProviderError:
@@ -1004,9 +1358,16 @@ def _decimal_text(value: Decimal) -> str:
     return format(value, "f")
 
 
-def _first_decimal(payload: dict[str, Any], *keys: str) -> Decimal | None:
+def _is_nonnegative_integral(value: Decimal) -> bool:
+    return value >= 0 and value == value.to_integral_value()
+
+
+def _first_decimal(payload: dict[str, Any], *keys: str, currency_code: str) -> Decimal | None:
     for key in keys:
-        if key in payload and (value := parse_money(payload[key])) is not None:
+        if (
+            key in payload
+            and (value := parse_money(payload[key], currency_code=currency_code)) is not None
+        ):
             return value
     return None
 
@@ -1019,25 +1380,40 @@ def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _infer_currency(payload: dict[str, Any]) -> str | None:
+def _resolve_currency(payload: dict[str, Any], store_currency: str) -> str:
     currencies: set[str] = set()
 
     def visit(value: Any) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
-                if key in {"currency", "currency_code"} and isinstance(item, str):
+                if key in {"currency", "currency_code"}:
+                    if not isinstance(item, str):
+                        raise _invalid_analytics_shape()
                     code = item.strip().upper()
-                    if len(code) == 3 and code.isalpha():
-                        currencies.add(code)
+                    if len(code) != 3 or not code.isascii() or not code.isalpha():
+                        raise _invalid_analytics_shape()
+                    currencies.add(code)
                 visit(item)
         elif isinstance(value, list):
             for item in value:
                 visit(item)
-        elif isinstance(value, str) and "₦" in value:
-            currencies.add("NGN")
+        elif isinstance(value, str):
+            for symbol, code in {
+                "₦": "NGN",
+                "£": "GBP",
+                "€": "EUR",
+                "₹": "INR",
+                "₵": "GHS",
+            }.items():
+                if symbol in value:
+                    currencies.add(code)
+            if re.search(r"(?i)(?:^|\s)KSh\s*[-+]?\d", value):
+                currencies.add("KES")
 
     visit(payload)
-    return next(iter(currencies)) if len(currencies) == 1 else None
+    if len(currencies) > 1 or (currencies and currencies != {store_currency}):
+        raise _invalid_analytics_shape()
+    return store_currency
 
 
 def _payload_identifies_scope(payload: dict[str, Any], scope_type: str, scope_id: str) -> bool:
@@ -1158,34 +1534,173 @@ def _decode_orders_page(
     return typed_orders, current, last, total
 
 
-def _normalise_order(payload: dict[str, Any]) -> ProviderOrder:
+def _normalise_order(payload: dict[str, Any], *, store_currency: str) -> ProviderOrder:
     identifier = payload.get("id") or payload.get("order_id") or payload.get("uuid")
     if identifier is None:
         raise BumpaProviderError("Bumpa order is missing an identifier")
     order_id = _bounded_provider_identifier(str(identifier), limit=120)
-    raw_currency = payload.get("currency") or payload.get("currency_code")
-    currency = str(raw_currency).strip().upper() if raw_currency is not None else None
-    if currency is not None and (len(currency) != 3 or not currency.isalpha()):
-        currency = None
+    # Resolve every explicit order and line-item currency before parsing any
+    # commercial value. That prevents a mixed-currency order from being partly
+    # interpreted using whichever claim happened to appear first.
+    currency = _resolve_order_currency(payload, store_currency=store_currency)
     order_date = _parse_datetime(
         payload.get("order_date") or payload.get("created_at") or payload.get("date")
     )
+    total_amount = _preferred_order_total(
+        payload,
+        currency_code=currency,
+    )
+    _validate_order_commercial_facts(payload, currency_code=currency)
     return ProviderOrder(
         order_id=order_id,
         order_number=str(payload.get("order_number") or payload.get("number") or identifier)[:120],
         status=str(payload.get("status") or "unknown")[:80],
         payment_status=str(payload.get("payment_status") or "unknown")[:80],
         currency_code=currency,
-        # Missing or malformed money stays unavailable. Treating it as zero would
-        # silently turn an incomplete provider record into a real commercial fact.
-        total_amount=parse_money(
-            payload["total_amount"]
-            if "total_amount" in payload
-            else payload.get("total", payload.get("grand_total"))
-        ),
+        # A genuinely absent amount stays unavailable. A present malformed amount
+        # fails the page closed instead of silently becoming a missing commercial fact.
+        total_amount=total_amount,
         order_date=order_date,
         payload=payload,
     )
+
+
+def _resolve_order_currency(payload: dict[str, Any], *, store_currency: str) -> str:
+    currency_claims: set[str] = set()
+
+    def collect_claims(value: dict[str, Any]) -> None:
+        for key in ("currency", "currency_code"):
+            if key not in value or value[key] is None:
+                continue
+            raw_currency = value[key]
+            if not isinstance(raw_currency, str):
+                currency_claims.add("")
+                continue
+            currency_claims.add(raw_currency.strip().upper())
+
+    def visit_item(value: dict[str, Any]) -> None:
+        collect_claims(value)
+        for nested in value.values():
+            if isinstance(nested, dict):
+                visit_item(nested)
+            elif isinstance(nested, list):
+                for row in nested:
+                    if isinstance(row, dict):
+                        visit_item(row)
+
+    collect_claims(payload)
+    for container_key in ("items", "order_items", "products"):
+        if container_key not in payload or payload[container_key] is None:
+            continue
+        raw_items = payload[container_key]
+        if not isinstance(raw_items, list) or any(not isinstance(item, dict) for item in raw_items):
+            raise BumpaProviderError(
+                "Bumpa order contained invalid line items",
+                failure_kind="invalid_response",
+            )
+        for item in raw_items:
+            assert isinstance(item, dict)
+            visit_item(item)
+
+    fallback = store_currency.strip().upper()
+    currency = next(iter(currency_claims)) if len(currency_claims) == 1 else fallback
+    if (
+        len(currency_claims) > 1
+        or len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+    ):
+        raise BumpaProviderError(
+            "Bumpa order contained an invalid or conflicting currency",
+            failure_kind="invalid_response",
+        )
+    return currency
+
+
+def _validated_money_aliases(
+    payload: dict[str, Any],
+    *keys: str,
+    currency_code: str,
+    nonnegative: bool = False,
+) -> Decimal | None:
+    parsed_values: list[Decimal] = []
+    for key in keys:
+        if key not in payload:
+            continue
+        value = parse_money(payload[key], currency_code=currency_code)
+        if value is None or (nonnegative and value < 0):
+            raise BumpaProviderError(
+                "Bumpa order contained an invalid monetary value",
+                failure_kind="invalid_response",
+            )
+        parsed_values.append(value)
+    if len(set(parsed_values)) > 1:
+        raise BumpaProviderError(
+            "Bumpa order contained conflicting monetary values",
+            failure_kind="invalid_response",
+        )
+    return parsed_values[0] if parsed_values else None
+
+
+def _preferred_order_total(payload: dict[str, Any], *, currency_code: str) -> Decimal | None:
+    # The live orders contract exposes ``total`` as the final order amount and
+    # may also include a semantically different legacy ``grand_total``. Treat
+    # total_amount/total as canonical aliases, with grand_total only as a
+    # backwards-compatible fallback. A present fallback is still syntax-checked
+    # but is not required to equal the canonical total.
+    canonical = _validated_money_aliases(
+        payload,
+        "total_amount",
+        "total",
+        currency_code=currency_code,
+    )
+    legacy = _validated_money_aliases(
+        payload,
+        "grand_total",
+        currency_code=currency_code,
+    )
+    return canonical if canonical is not None else legacy
+
+
+def _validate_order_commercial_facts(payload: dict[str, Any], *, currency_code: str) -> None:
+    for aliases in (
+        ("subtotal_amount", "subtotal", "sub_total"),
+        ("tax_amount", "tax"),
+        ("shipping_amount", "shipping_fee", "shipping_price"),
+        ("amount_paid", "paid_amount"),
+        ("amount_due", "due_amount"),
+        ("discount_amount", "discount"),
+        ("total_discount",),
+    ):
+        _validated_money_aliases(payload, *aliases, currency_code=currency_code)
+
+    raw_items = payload.get("items") or payload.get("order_items") or payload.get("products") or []
+    if not isinstance(raw_items, list) or any(not isinstance(item, dict) for item in raw_items):
+        raise BumpaProviderError(
+            "Bumpa order contained invalid line items",
+            failure_kind="invalid_response",
+        )
+    for item in raw_items:
+        assert isinstance(item, dict)
+        _validated_money_aliases(
+            item,
+            "quantity",
+            "qty",
+            currency_code="UNSPECIFIED",
+            nonnegative=True,
+        )
+        _validated_money_aliases(
+            item,
+            "unit_price",
+            "price",
+            currency_code=currency_code,
+        )
+        _validated_money_aliases(
+            item,
+            "total_amount",
+            "total",
+            currency_code=currency_code,
+        )
 
 
 def _parse_datetime(value: Any) -> datetime | None:

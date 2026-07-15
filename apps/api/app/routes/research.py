@@ -20,6 +20,7 @@ from app.db.models import (
     AgentMessage,
     Artifact,
     BumpaConnection,
+    BumpaSyncRun,
     HermesProfile,
     ResearchEvent,
     ResearchReport,
@@ -37,6 +38,7 @@ from app.schemas import (
     ResearchConversationSummaryView,
 )
 from app.services.audit import audit
+from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
 from app.services.reports import (
     RAW_REPORT_TYPE,
     cleanup_expired_report_artifacts,
@@ -290,17 +292,37 @@ def overview(
             if value is not None
         ]
 
-    connections = list(
-        db.scalars(
-            select(BumpaConnection)
+    connection_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(BumpaConnection)
             .join(Tenant, BumpaConnection.tenant_id == Tenant.id)
-            .where(Tenant.research_consent_status == "granted")
-        ).all()
+            .where(
+                Tenant.research_consent_status == "granted",
+                BumpaConnection.status == "active",
+            )
+        )
+        or 0
     )
     sync_times = [
-        _as_utc(connection.last_successful_sync_at)
-        for connection in connections
-        if connection.last_successful_sync_at
+        _as_utc(timestamp)
+        for timestamp in db.scalars(
+            select(func.max(BumpaSyncRun.finished_at))
+            .join(
+                BumpaConnection,
+                BumpaConnection.id == BumpaSyncRun.bumpa_connection_id,
+            )
+            .join(Tenant, Tenant.id == BumpaConnection.tenant_id)
+            .where(
+                Tenant.research_consent_status == "granted",
+                BumpaConnection.status == "active",
+                BumpaSyncRun.tenant_id == BumpaConnection.tenant_id,
+                BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
+                usable_bumpa_sync_run_predicate(),
+            )
+            .group_by(BumpaConnection.id, BumpaConnection.boundary_revision)
+        ).all()
+        if timestamp is not None
     ]
     fresh_24h = sum(timestamp >= now - timedelta(hours=24) for timestamp in sync_times)
     stale_24_to_72h = sum(
@@ -376,11 +398,11 @@ def overview(
             "p95_ms": _percentile(latency_values, 95),
         },
         "bumpa_sync_freshness": {
-            "connected_smes": len(connections),
+            "connected_smes": connection_count,
             "fresh_24h": fresh_24h,
             "stale_24_to_72h": stale_24_to_72h,
             "overdue_72h": overdue_72h,
-            "never_synced": len(connections) - len(sync_times),
+            "never_synced": connection_count - len(sync_times),
             "latest_sync_at": max(sync_times).isoformat() if sync_times else None,
             "oldest_sync_at": min(sync_times).isoformat() if sync_times else None,
         },

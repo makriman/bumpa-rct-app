@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.crypto import FieldCipher
+from app.core.store_context import validate_store_currency, validate_store_timezone
 from app.db.models import (
     BumpaConnection,
     PhoneIdentity,
@@ -24,6 +25,7 @@ from app.db.models import (
 from app.db.session import SessionLocal, set_security_context
 from app.providers.bumpa import BumpaClient, BumpaProviderError
 from app.services.audit import audit
+from app.services.bumpa_connections import BumpaBoundaryInput, replace_bumpa_connection
 
 MAX_STDIN_BYTES = 65_536
 E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
@@ -77,6 +79,8 @@ class OperatorInput(StrictInput):
 class BumpaInput(StrictInput):
     api_key: str = Field(min_length=8, max_length=500)
     business_id: str = Field(min_length=1, max_length=160)
+    store_timezone: str = Field(min_length=1, max_length=64)
+    store_currency: str = Field(min_length=3, max_length=3)
 
     @field_validator("business_id")
     @classmethod
@@ -84,6 +88,16 @@ class BumpaInput(StrictInput):
         if not BUSINESS_ID_RE.fullmatch(value):
             raise ValueError("Bumpa business ID contains unsupported characters")
         return value
+
+    @field_validator("store_timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_store_timezone(value)
+
+    @field_validator("store_currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return validate_store_currency(value)
 
 
 class OnboardingBundle(StrictInput):
@@ -234,7 +248,13 @@ def _mark(result: OnboardingResult, state: str) -> None:
 
 def _verify_bumpa(data: BumpaInput) -> None:
     try:
-        with BumpaClient(data.api_key, "business_id", data.business_id) as provider:
+        with BumpaClient(
+            data.api_key,
+            "business_id",
+            data.business_id,
+            store_timezone=data.store_timezone,
+            store_currency=data.store_currency,
+        ) as provider:
             provider.verify()
     except (BumpaProviderError, ValueError) as exc:
         raise OnboardingError("bumpa_connection_verification_failed") from exc
@@ -477,13 +497,17 @@ def _upsert_bumpa(
     cipher: FieldCipher,
     result: OnboardingResult,
 ) -> BumpaConnection:
-    connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
+    connection = db.scalar(
+        select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id).with_for_update()
+    )
     if not connection:
         connection = BumpaConnection(
             tenant_id=tenant.id,
             encrypted_api_key=cipher.encrypt(data.api_key),
             scope_type="business_id",
             scope_id=data.business_id,
+            store_timezone=data.store_timezone,
+            store_currency=data.store_currency,
             provider="bumpa",
             status="active",
         )
@@ -502,14 +526,24 @@ def _upsert_bumpa(
             same_key
             and connection.scope_type == "business_id"
             and connection.scope_id == data.business_id
+            and connection.store_timezone == data.store_timezone
+            and connection.store_currency == data.store_currency
             and connection.provider == "bumpa"
         ):
             _mark(result, "unchanged")
             return connection
-        connection.encrypted_api_key = cipher.encrypt(data.api_key)
-        connection.scope_type = "business_id"
-        connection.scope_id = data.business_id
-        connection.provider = "bumpa"
+        replace_bumpa_connection(
+            db,
+            connection,
+            encrypted_api_key=cipher.encrypt(data.api_key),
+            boundary=BumpaBoundaryInput(
+                scope_type="business_id",
+                scope_id=data.business_id,
+                store_timezone=data.store_timezone,
+                store_currency=data.store_currency,
+                provider="bumpa",
+            ),
+        )
         _mark(result, "updated")
         action = "tenant.bumpa_connection.updated"
     _record_audit(
@@ -520,7 +554,13 @@ def _upsert_bumpa(
         action=action,
         resource_type="bumpa_connection",
         resource_id=connection.id,
-        after={"provider": "bumpa", "scope_type": "business_id", "status": "active"},
+        after={
+            "provider": "bumpa",
+            "scope_type": "business_id",
+            "store_timezone": data.store_timezone,
+            "store_currency": data.store_currency,
+            "status": "active",
+        },
     )
     return connection
 

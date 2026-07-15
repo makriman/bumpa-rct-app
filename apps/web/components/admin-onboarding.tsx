@@ -36,6 +36,9 @@ type TenantDraft = {
   slug: string;
   business_category: string;
   city: string;
+  country: "NG" | "KE";
+  timezone: string;
+  currency_code: string;
 };
 
 type OwnerDraft = {
@@ -48,6 +51,8 @@ type BumpaDraft = {
   api_key: string;
   scope_type: "business_id" | "location_id";
   scope_id: string;
+  store_timezone: string;
+  store_currency: string;
 };
 
 type SyncWindow = {
@@ -58,6 +63,45 @@ type SyncWindow = {
 type OnboardingListResponse =
   | TenantOnboarding[]
   | { items: TenantOnboarding[] };
+
+const supportedBusinessMarkets = [
+  {
+    country: "NG" as const,
+    label: "Nigeria",
+    timezone: "Africa/Lagos",
+    currencyCode: "NGN",
+  },
+  {
+    country: "KE" as const,
+    label: "Kenya",
+    timezone: "Africa/Nairobi",
+    currencyCode: "KES",
+  },
+] as const;
+
+const currencyCodePattern = /^[A-Z]{3}$/;
+
+function isIanaTimezone(value: string): boolean {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function onboardingStartBody(draft: TenantDraft): string {
+  return JSON.stringify({
+    slug: draft.slug,
+    name: draft.name,
+    business_category: draft.business_category || null,
+    country: draft.country,
+    city: draft.city || null,
+    timezone: draft.timezone,
+    currency_code: draft.currency_code,
+  });
+}
 
 function randomKey(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -145,6 +189,7 @@ function StepSummary({
         <span>
           {titleCase(onboarding.bumpa.scope_type)} · ••••
           {onboarding.bumpa.scope_id_last4}
+          {` · ${onboarding.bumpa.store_timezone} · ${onboarding.bumpa.store_currency}`}
         </span>
         <Badge>{titleCase(onboarding.bumpa.status)}</Badge>
       </>
@@ -219,6 +264,9 @@ export function ResumableOnboardingStart() {
     slug: "",
     business_category: "",
     city: "",
+    country: "NG",
+    timezone: "Africa/Lagos",
+    currency_code: "NGN",
   });
   const [existing, setExisting] = useState<TenantOnboarding[]>([]);
   const [loading, setLoading] = useState(true);
@@ -246,6 +294,7 @@ export function ResumableOnboardingStart() {
     event.preventDefault();
     const storageKey = "bumpa-bestie:onboarding:start";
     const idempotencyKey = sessionCommandKey(storageKey);
+    const body = onboardingStartBody(draft);
     setBusy(true);
     setError("");
     try {
@@ -254,15 +303,7 @@ export function ResumableOnboardingStart() {
         {
           method: "POST",
           headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify({
-            slug: draft.slug,
-            name: draft.name,
-            business_category: draft.business_category || null,
-            country: "NG",
-            city: draft.city || null,
-            timezone: "Africa/Lagos",
-            currency_code: "NGN",
-          }),
+          body,
         },
       );
       clearSessionCommandKey(storageKey);
@@ -282,15 +323,7 @@ export function ResumableOnboardingStart() {
           {
             method: "POST",
             headers: { "Idempotency-Key": idempotencyKey },
-            body: JSON.stringify({
-              slug: draft.slug,
-              name: draft.name,
-              business_category: draft.business_category || null,
-              country: "NG",
-              city: draft.city || null,
-              timezone: "Africa/Lagos",
-              currency_code: "NGN",
-            }),
+            body,
           },
         );
         clearSessionCommandKey(storageKey);
@@ -392,11 +425,97 @@ export function ResumableOnboardingStart() {
                     }
                   />
                 </div>
+                <div className="field">
+                  <label htmlFor="business-country">Country</label>
+                  <select
+                    id="business-country"
+                    className="input"
+                    required
+                    value={draft.country}
+                    onChange={(event) => {
+                      const market = supportedBusinessMarkets.find(
+                        (candidate) => candidate.country === event.target.value,
+                      );
+                      if (!market) return;
+                      setDraft((value) => ({
+                        ...value,
+                        country: market.country,
+                        timezone: market.timezone,
+                        currency_code: market.currencyCode,
+                      }));
+                    }}
+                    aria-describedby="business-country-help"
+                  >
+                    {supportedBusinessMarkets.map((market) => (
+                      <option value={market.country} key={market.country}>
+                        {market.label} ({market.country})
+                      </option>
+                    ))}
+                  </select>
+                  <span className="field-help" id="business-country-help">
+                    Sets the reporting defaults; review them below before
+                    provisioning.
+                  </span>
+                </div>
+                <div className="field">
+                  <label htmlFor="business-timezone">Business timezone</label>
+                  <input
+                    id="business-timezone"
+                    className="input"
+                    required
+                    autoComplete="off"
+                    value={draft.timezone}
+                    onChange={(event) =>
+                      setDraft((value) => ({
+                        ...value,
+                        timezone: event.target.value,
+                      }))
+                    }
+                    aria-invalid={
+                      draft.timezone.length > 0 &&
+                      !isIanaTimezone(draft.timezone)
+                    }
+                    aria-describedby="business-timezone-help"
+                  />
+                  <span className="field-help" id="business-timezone-help">
+                    IANA timezone for reporting days and scheduled insights.
+                  </span>
+                </div>
+                <div className="field">
+                  <label htmlFor="business-currency">Business currency</label>
+                  <input
+                    id="business-currency"
+                    className="input"
+                    required
+                    maxLength={3}
+                    pattern="[A-Z]{3}"
+                    title="Enter a three-letter currency code such as NGN or KES"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={draft.currency_code}
+                    onChange={(event) =>
+                      setDraft((value) => ({
+                        ...value,
+                        currency_code: event.target.value.toUpperCase(),
+                      }))
+                    }
+                    aria-describedby="business-currency-help"
+                  />
+                  <span className="field-help" id="business-currency-help">
+                    Three-letter ISO code, for example NGN or KES.
+                  </span>
+                </div>
               </div>
               <button
                 className="button button-primary"
                 type="submit"
-                disabled={!draft.name || !draft.slug || busy}
+                disabled={
+                  !draft.name ||
+                  !draft.slug ||
+                  !isIanaTimezone(draft.timezone) ||
+                  !currencyCodePattern.test(draft.currency_code) ||
+                  busy
+                }
                 aria-busy={busy}
               >
                 {busy ? "Starting…" : "Start onboarding →"}
@@ -458,9 +577,12 @@ export function ResumableOnboarding({
     api_key: "",
     scope_type: "business_id",
     scope_id: "",
+    store_timezone: "",
+    store_currency: "",
   });
   const [syncWindow, setSyncWindow] = useState<SyncWindow>(defaultSyncWindow);
   const bumpaCommandKey = useRef<string | null>(null);
+  const bumpaContextSeededFor = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -470,6 +592,16 @@ export function ResumableOnboarding({
       `/admin/onboardings/${onboardingId}`,
     );
     setOnboarding(value);
+    if (bumpaContextSeededFor.current !== onboardingId) {
+      bumpaContextSeededFor.current = onboardingId;
+      setBumpa({
+        api_key: "",
+        scope_type: "business_id",
+        scope_id: "",
+        store_timezone: value.tenant.timezone,
+        store_currency: value.tenant.currency_code,
+      });
+    }
     return value;
   }, [onboardingId]);
 
@@ -536,7 +668,13 @@ export function ResumableOnboarding({
         setOwner({ name: "", phone_e164: "", email: "" });
       }
       if (step === "bumpa") {
-        setBumpa({ api_key: "", scope_type: "business_id", scope_id: "" });
+        setBumpa({
+          api_key: "",
+          scope_type: "business_id",
+          scope_id: "",
+          store_timezone: onboarding.tenant.timezone,
+          store_currency: onboarding.tenant.currency_code,
+        });
       }
       if (options?.ephemeralKey) bumpaCommandKey.current = null;
       else clearSessionCommandKey(storageKey);
@@ -548,7 +686,13 @@ export function ResumableOnboarding({
             setOwner({ name: "", phone_e164: "", email: "" });
           }
           if (step === "bumpa") {
-            setBumpa({ api_key: "", scope_type: "business_id", scope_id: "" });
+            setBumpa({
+              api_key: "",
+              scope_type: "business_id",
+              scope_id: "",
+              store_timezone: authoritative.tenant.timezone,
+              store_currency: authoritative.tenant.currency_code,
+            });
           }
           if (options?.ephemeralKey) bumpaCommandKey.current = null;
           else clearSessionCommandKey(storageKey);
@@ -830,6 +974,8 @@ export function ResumableOnboarding({
                     api_key: bumpa.api_key,
                     scope_type: bumpa.scope_type,
                     scope_id: bumpa.scope_id,
+                    store_timezone: bumpa.store_timezone,
+                    store_currency: bumpa.store_currency,
                   },
                   { ephemeralKey: true },
                 );
@@ -899,11 +1045,67 @@ export function ResumableOnboarding({
                       }
                     />
                   </div>
+                  <div className="field">
+                    <label htmlFor="bumpa-store-timezone">Store timezone</label>
+                    <input
+                      id="bumpa-store-timezone"
+                      className="input"
+                      required
+                      autoComplete="off"
+                      value={bumpa.store_timezone}
+                      onChange={(event) =>
+                        setBumpa((value) => ({
+                          ...value,
+                          store_timezone: event.target.value,
+                        }))
+                      }
+                      aria-invalid={
+                        bumpa.store_timezone.length > 0 &&
+                        !isIanaTimezone(bumpa.store_timezone)
+                      }
+                      aria-describedby="bumpa-timezone-help"
+                    />
+                    <span className="field-help" id="bumpa-timezone-help">
+                      IANA name used to validate Bumpa’s local-day reporting
+                      window, for example Africa/Lagos.
+                    </span>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="bumpa-store-currency">Store currency</label>
+                    <input
+                      id="bumpa-store-currency"
+                      className="input"
+                      required
+                      maxLength={3}
+                      pattern="[A-Z]{3}"
+                      title="Enter a three-letter currency code such as NGN or KES"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={bumpa.store_currency}
+                      onChange={(event) =>
+                        setBumpa((value) => ({
+                          ...value,
+                          store_currency: event.target.value.toUpperCase(),
+                        }))
+                      }
+                      aria-describedby="bumpa-currency-help"
+                    />
+                    <span className="field-help" id="bumpa-currency-help">
+                      Three-letter code used to reject ambiguous money, for
+                      example NGN or KES.
+                    </span>
+                  </div>
                 </div>
                 <button
                   className="button button-primary"
                   type="submit"
-                  disabled={busy || !bumpa.api_key || !bumpa.scope_id}
+                  disabled={
+                    busy ||
+                    !bumpa.api_key ||
+                    !bumpa.scope_id ||
+                    !isIanaTimezone(bumpa.store_timezone) ||
+                    !currencyCodePattern.test(bumpa.store_currency)
+                  }
                   aria-busy={busy}
                 >
                   {busy ? "Verifying…" : "Connect and verify Bumpa →"}

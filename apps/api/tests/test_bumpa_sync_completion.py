@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, select, update
@@ -29,7 +32,12 @@ from app.db.models import (
     Tenant,
     User,
 )
-from app.providers.bumpa import BumpaProviderError, BumpaResponse, BumpaSyncResult
+from app.providers.bumpa import (
+    BumpaClient,
+    BumpaProviderError,
+    BumpaResponse,
+    BumpaSyncResult,
+)
 from app.providers.contracts import ProviderDataset, ProviderOrder
 from app.providers.hermes import HermesEndpoint, HermesResult
 from app.services import bumpa as bumpa_service
@@ -40,6 +48,9 @@ from app.services.bumpa import (
     SyncCompletion,
     classify_sync_completion,
 )
+
+FIXTURES = Path(__file__).parents[3] / "tests" / "contract" / "fixtures" / "bumpa"
+ANALYTICS = json.loads((FIXTURES / "analytics_responses.json").read_text())
 
 
 class JsonCapture(logging.Handler):
@@ -287,6 +298,8 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
     field_key = "canonical-persistence-field-key"
     private_phone = "+2348000000999"
     private_customer = "Private Customer Name"
+    analytics_secret = "analytics-credential-must-not-persist"
+    order_secret = "order-credential-must-not-persist"
     datasets = _datasets()
     datasets = [
         replace(
@@ -317,7 +330,14 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
         payload={
             "id": "structured-order",
             "shipping_price": "4.50",
+            "tax": "₦1.00",
             "customer_details": {"name": private_customer, "phone": private_phone},
+            "provider_debug": {
+                "X-API-Key": order_secret,
+                "PRIVATE-key": order_secret,
+                "Refresh.Token": order_secret,
+                "Set-Cookie": f"provider_session={order_secret}",
+            },
             "items": [
                 {
                     "id": "line-1",
@@ -368,6 +388,29 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
         else response
         for response in result.responses
     ]
+    result.responses[:] = [
+        BumpaResponse(
+            "sales",
+            "overview",
+            200,
+            {
+                "value": "0",
+                "provider_debug": {
+                    "API-Key": analytics_secret,
+                    "Authorization": f"Bearer {analytics_secret}",
+                    "Access.Token": analytics_secret,
+                    "clientSecret": analytics_secret,
+                    "Proxy.Authorization": f"Bearer {analytics_secret}",
+                },
+            },
+            {},
+            "available",
+            None,
+        )
+        if response.resource == "sales" and response.dataset == "overview"
+        else response
+        for response in result.responses
+    ]
 
     with Session(engine) as db:
         tenant = Tenant(slug="canonical-persistence", name="Canonical Persistence")
@@ -403,11 +446,26 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
                 BumpaRawResponse.dataset == "top_customers_order",
             )
         )
+        analytics_evidence = db.scalar(
+            select(BumpaRawResponse).where(
+                BumpaRawResponse.sync_run_id == run.id,
+                BumpaRawResponse.resource == "sales",
+                BumpaRawResponse.dataset == "overview",
+            )
+        )
+        order_evidence = db.scalar(
+            select(BumpaRawResponse).where(
+                BumpaRawResponse.sync_run_id == run.id,
+                BumpaRawResponse.resource == "orders",
+                BumpaRawResponse.dataset.is_(None),
+            )
+        )
 
         assert metric is not None
         assert metric.canonical_payload["groups"][0]["rows"][0]["label"] == "Useful Product"
         assert stored_order.currency_code is None
         assert stored_order.shipping_amount == Decimal("4.5")
+        assert stored_order.tax_amount is None
         assert stored_order.raw_payload["customer_details"] == "[REDACTED]"
         assert item is not None
         assert item.product_id == "nested-product-7"
@@ -416,6 +474,268 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
         assert private_customer not in serialized
         assert private_phone not in serialized
         assert "[REDACTED]" in serialized
+        assert analytics_evidence is not None
+        assert order_evidence is not None
+        durable_payloads = json.dumps(
+            {
+                "analytics": analytics_evidence.payload,
+                "orders_evidence": order_evidence.payload,
+                "canonical_order": stored_order.raw_payload,
+            }
+        )
+        assert analytics_secret not in durable_payloads
+        assert order_secret not in durable_payloads
+        assert durable_payloads.count("[REDACTED]") >= 9
+
+
+@pytest.mark.parametrize(
+    ("currency_code", "currency_token", "store_timezone"),
+    [
+        ("GBP", "£", "Europe/London"),
+        ("KES", "KSh ", "Africa/Nairobi"),
+    ],
+)
+def test_sync_persists_order_shipping_and_item_money_in_the_order_currency(
+    monkeypatch: pytest.MonkeyPatch,
+    currency_code: str,
+    currency_token: str,
+    store_timezone: str,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    field_key = f"{currency_code.lower()}-order-persistence-field-key"
+    datasets = [
+        replace(
+            dataset,
+            currency_code=currency_code if dataset.resource == "sales" else None,
+        )
+        for dataset in _datasets()
+    ]
+    order = ProviderOrder(
+        order_id=f"{currency_code.lower()}-structured-order",
+        order_number=f"{currency_code}-1",
+        status="paid",
+        payment_status="paid",
+        currency_code=currency_code,
+        total_amount=Decimal("124.80"),
+        order_date=datetime(2026, 7, 10, tzinfo=UTC),
+        payload={
+            "id": f"{currency_code.lower()}-structured-order",
+            "currency_code": currency_code,
+            "subtotal": f"{currency_token}100.25",
+            "tax": f"{currency_token}20.05",
+            "shipping_price": f"{currency_token}4.50",
+            "paid_amount": f"{currency_token}120.00",
+            "due_amount": f"{currency_token}4.80",
+            "items": [
+                {
+                    "id": f"{currency_code.lower()}-line-1",
+                    "name": f"{currency_code} product",
+                    "quantity": "2",
+                    "price": f"{currency_token}50.125",
+                    "total": f"{currency_token}100.25",
+                }
+            ],
+        },
+    )
+
+    with Session(engine) as db:
+        tenant = Tenant(
+            slug=f"{currency_code.lower()}-order-persistence",
+            name=f"{currency_code} Order Persistence",
+            timezone=store_timezone,
+            currency_code=currency_code,
+        )
+        db.add(tenant)
+        db.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key=FieldCipher(field_key).encrypt("private-key"),
+            scope_type="business_id",
+            scope_id=f"{currency_code.lower()}-business",
+            store_timezone=store_timezone,
+            store_currency=currency_code,
+            provider="bumpa",
+            status="active",
+        )
+        db.add(connection)
+        db.commit()
+
+        _run_with_result(
+            monkeypatch,
+            db,
+            connection,
+            _sync_result(datasets, [order]),
+            field_key,
+        )
+
+        stored_order = db.scalar(
+            select(BumpaOrder).where(BumpaOrder.bumpa_order_id == order.order_id)
+        )
+        assert stored_order is not None
+        item = db.scalar(select(BumpaOrderItem).where(BumpaOrderItem.order_id == stored_order.id))
+
+        assert stored_order.currency_code == currency_code
+        assert stored_order.total_amount == Decimal("124.80")
+        assert stored_order.subtotal_amount == Decimal("100.25")
+        assert stored_order.tax_amount == Decimal("20.05")
+        assert stored_order.shipping_amount == Decimal("4.50")
+        assert stored_order.amount_paid == Decimal("120.00")
+        assert stored_order.amount_due == Decimal("4.80")
+        assert item is not None
+        assert item.quantity == Decimal("2")
+        assert item.unit_price == Decimal("50.125")
+        assert item.total_amount == Decimal("100.25")
+
+
+def test_literal_live_adapter_result_persists_exact_store_local_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    field_key = "literal-live-adapter-persistence-key"
+    requested_from = date(2026, 4, 2)
+    requested_to = date(2026, 4, 15)
+    literal_range = [
+        "2026-04-01T23:00:00.000000Z",
+        "2026-04-15T22:59:59.999999Z",
+    ]
+    literal_previous = [
+        "2026-03-18T23:00:00.000000Z",
+        "2026-04-01T22:59:59.999999Z",
+    ]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "orders": {
+                        "data": [],
+                        "current_page": 1,
+                        "last_page": 1,
+                        "per_page": 100,
+                        "total": 0,
+                    },
+                },
+            )
+        area = request.url.path.rsplit("/", 1)[-1]
+        dataset = request.url.params["dataset"]
+        payload = deepcopy(ANALYTICS[f"{area}.{dataset}"])
+        if "range" in payload:
+            payload["range"] = {"from": literal_range[0], "to": literal_range[1]}
+            raw_data = payload.get("data")
+            if isinstance(raw_data, dict):
+                chart = raw_data.get("chart")
+                if isinstance(chart, dict):
+                    current = chart.get("current_period")
+                    previous = chart.get("previous_period")
+                    if isinstance(current, dict):
+                        current["range"] = literal_range
+                    if isinstance(previous, dict):
+                        previous["range"] = literal_previous
+                for key in ("total_products_chart", "total_products_sold_chart"):
+                    period = raw_data.get(key)
+                    if isinstance(period, dict):
+                        period["range"] = literal_range
+        return httpx.Response(200, json=payload)
+
+    class LiteralBumpaClient(BumpaClient):
+        def __init__(
+            self,
+            api_key: str,
+            scope_type: str,
+            scope_id: str,
+            *,
+            store_timezone: str,
+            store_currency: str,
+        ) -> None:
+            assert store_timezone == "Africa/Lagos"
+            assert store_currency == "NGN"
+            super().__init__(
+                api_key,
+                scope_type,
+                scope_id,
+                store_timezone=store_timezone,
+                store_currency=store_currency,
+                client=httpx.Client(
+                    transport=httpx.MockTransport(respond),
+                    base_url="https://api.getbumpa.com/api",
+                ),
+                sleep=lambda _seconds: None,
+            )
+
+    monkeypatch.setattr(bumpa_service, "BumpaClient", LiteralBumpaClient)
+    with Session(engine) as db:
+        tenant = Tenant(
+            slug="literal-live-adapter",
+            name="Literal Live Adapter",
+            timezone="UTC",
+            currency_code="USD",
+        )
+        db.add(tenant)
+        db.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key=FieldCipher(field_key).encrypt("private-key"),
+            scope_type="business_id",
+            scope_id="business-test",
+            store_timezone="Africa/Lagos",
+            store_currency="NGN",
+            provider="bumpa",
+            status="active",
+        )
+        db.add(connection)
+        db.commit()
+
+        run = bumpa_service.run_sync(
+            db,
+            tenant_id=tenant.id,
+            connection=connection,
+            date_from=requested_from,
+            date_to=requested_to,
+            field_encryption_key=field_key,
+            runtime_backend="bumpa",
+        )
+        metric = db.scalar(
+            select(BumpaMetricSnapshot).where(
+                BumpaMetricSnapshot.sync_run_id == run.id,
+                BumpaMetricSnapshot.metric_key == "sales.total_sales",
+            )
+        )
+        raw_customer = db.scalar(
+            select(BumpaRawResponse).where(
+                BumpaRawResponse.sync_run_id == run.id,
+                BumpaRawResponse.resource == "customers",
+                BumpaRawResponse.dataset == "top_customers_order",
+            )
+        )
+
+        assert run.status == "partial"
+        assert run.completion_quality == "accepted_partial"
+        assert metric is not None
+        assert metric.requested_from == requested_from
+        assert metric.requested_to == requested_to
+        assert metric.response_from.replace(tzinfo=UTC) == datetime(2026, 4, 1, 23, tzinfo=UTC)
+        assert metric.response_to.replace(tzinfo=UTC) == datetime(
+            2026, 4, 15, 22, 59, 59, 999999, tzinfo=UTC
+        )
+        assert metric.currency_code == "NGN"
+        assert metric.canonical_payload["range"] == {
+            "from": "2026-04-02",
+            "to": "2026-04-15",
+        }
+        assert metric.canonical_payload["series"]["current_period"]["range"] == [
+            "2026-04-02",
+            "2026-04-15",
+        ]
+        assert metric.canonical_payload["series"]["previous_period"]["range"] == [
+            "2026-03-19",
+            "2026-04-01",
+        ]
+        assert raw_customer is not None
+        assert "Synthetic Customer" not in json.dumps(raw_customer.payload)
 
 
 def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_state(
@@ -543,8 +863,8 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert "exception" not in warning
 
         assert degraded.status == "partial"
-        assert degraded.completion_quality == "accepted_partial"
-        assert degraded.partial_reason == "optional_dataset_unavailable"
+        assert degraded.completion_quality == "degraded"
+        assert degraded.partial_reason == "dataset_error"
         sync_events = list(
             db.scalars(
                 select(ResearchEvent)
@@ -555,14 +875,18 @@ def test_isolated_timeout_persists_degraded_evidence_without_promoting_current_s
         assert [event.event_type for event in sync_events] == [
             "bumpa_sync_completed",
             "bumpa_sync_completed",
+            "bumpa_sync_degraded",
         ]
-        assert sync_events[-1].quality_flags == ["optional_dataset_unavailable"]
-        assert sync_events[-1].business_outcome["completion_quality"] == "accepted_partial"
+        assert sync_events[-1].quality_flags == ["dataset_error"]
+        assert sync_events[-1].business_outcome["completion_quality"] == "degraded"
         assert connection.last_successful_sync_at is not None
-        assert connection.last_successful_sync_at.replace(tzinfo=None) == (
+        assert connection.last_successful_sync_at.replace(tzinfo=None) != (
             degraded.finished_at.replace(tzinfo=None)
         )
-        assert connection.last_failed_sync_at is None
+        assert connection.last_failed_sync_at is not None
+        assert connection.last_failed_sync_at.replace(tzinfo=None) == (
+            degraded.finished_at.replace(tzinfo=None)
+        )
         failed_raw = db.scalar(
             select(BumpaRawResponse).where(
                 BumpaRawResponse.sync_run_id == degraded.id,
@@ -818,8 +1142,16 @@ def test_raw_response_rejects_statusless_untyped_failure_evidence() -> None:
             db.commit()
 
 
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("scope_id", "rotated-scope"),
+        ("store_timezone", "Africa/Nairobi"),
+        ("store_currency", "KES"),
+    ],
+)
 def test_sync_fails_closed_if_connection_boundary_changes_while_waiting_for_lock(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, field: str, replacement: str
 ) -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -833,6 +1165,8 @@ def test_sync_fails_closed_if_connection_boundary_changes_while_waiting_for_lock
             encrypted_api_key=FieldCipher(field_key).encrypt("private-bumpa-key"),
             scope_type="business_id",
             scope_id="original-scope",
+            store_timezone="Africa/Lagos",
+            store_currency="NGN",
             provider="bumpa",
             status="active",
         )
@@ -847,7 +1181,7 @@ def test_sync_fails_closed_if_connection_boundary_changes_while_waiting_for_lock
                 concurrent.execute(
                     update(BumpaConnection)
                     .where(BumpaConnection.id == connection.id)
-                    .values(scope_id="rotated-scope")
+                    .values(**{field: replacement})
                 )
             return bumpa_service.ExtractedSync(snapshot=extracted, live_result=extracted)
 

@@ -233,10 +233,12 @@ jobs:
 
   images:
     name: Build linux/amd64 images
-    needs: [backend, frontend, repository, bootstrap, infrastructure, resilience]
+    needs:
+      [backend, frontend, repository, bootstrap, infrastructure, resilience]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: api
@@ -273,6 +275,11 @@ jobs:
           load: true
           provenance: false
           sbom: false
+          # Hermes derives from an immutable third-party image and applies a
+          # live Debian security overlay. Never reuse that overlay layer: a
+          # cached apt upgrade can pass the build while retaining newly-fixed
+          # packages from an earlier repository snapshot.
+          no-cache: ${{ matrix.name == 'hermes' }}
           tags: bumpabestie-${{ matrix.name }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

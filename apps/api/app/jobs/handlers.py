@@ -84,12 +84,17 @@ def bumpa_sync_handler(session: Session, job: AsyncJob) -> JobResult:
     date_to = _required_date(job.payload, "date_to")
     if date_to < date_from or (date_to - date_from).days > 366:
         raise PermanentJobError("Bumpa sync job contains an invalid date range")
+    boundary_revision = _required_positive_int(job.payload, "boundary_revision")
+    if job.tenant_id != tenant_id:
+        raise PermanentJobError("Bumpa sync job tenant boundary is invalid")
 
     connection = session.get(BumpaConnection, connection_id)
     if not connection or connection.tenant_id != tenant_id:
         raise PermanentJobError("Bumpa connection is unavailable")
     if connection.status != "active":
         raise PermanentJobError("Bumpa connection is inactive")
+    if connection.boundary_revision != boundary_revision:
+        raise PermanentJobError("Bumpa connection was replaced after this sync was queued")
 
     settings = get_settings()
     try:
@@ -190,6 +195,13 @@ def _required_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value or len(value) > 200:
         raise PermanentJobError(f"Job payload field {key} is invalid")
+    return value
+
+
+def _required_positive_int(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise PermanentJobError(f"Job payload field {key} must be a positive integer")
     return value
 
 

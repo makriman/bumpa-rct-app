@@ -69,6 +69,7 @@ dependencies = [
     { name = "redis" },
     { name = "reportlab" },
     { name = "sqlalchemy" },
+    { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -101,6 +102,7 @@ requires-dist = [
     { name = "reportlab", specifier = ">=4.2,<5" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.7,<1" },
     { name = "sqlalchemy", specifier = ">=2.0.35,<3" },
+    { name = "tzdata", specifier = "==2026.3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
 ]
 provides-extras = ["dev"]

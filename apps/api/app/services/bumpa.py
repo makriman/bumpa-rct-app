@@ -50,13 +50,6 @@ ACCEPTED_UNAVAILABLE_PROFIT_ERRORS = {
     "sales.gross_profit": "Gross profit cannot be calculated for this store",
     "sales.net_profit": "Net profit cannot be calculated for this store",
 }
-ACCEPTED_OPTIONAL_DATASET_ERRORS = {
-    "products.overview": {
-        "Bumpa is temporarily unreachable",
-        "Bumpa is temporarily unavailable",
-    }
-}
-
 SyncCompletionQuality = Literal["complete", "accepted_partial", "degraded"]
 SyncPartialReason = Literal[
     "profit_not_calculable",
@@ -95,6 +88,9 @@ class ConnectionBoundary:
     encrypted_api_key: str
     scope_type: str
     scope_id: str
+    store_timezone: str
+    store_currency: str
+    boundary_revision: int
 
 
 @dataclass(frozen=True)
@@ -126,6 +122,7 @@ def run_sync(
         tenant_id=tenant_id,
         bumpa_connection_id=boundary.id,
         status="running",
+        boundary_revision=boundary.boundary_revision,
         sync_generation=sync_generation,
         requested_from=date_from,
         requested_to=date_to,
@@ -264,6 +261,9 @@ def _capture_connection_boundary(connection: BumpaConnection) -> ConnectionBound
         encrypted_api_key=connection.encrypted_api_key,
         scope_type=connection.scope_type,
         scope_id=connection.scope_id,
+        store_timezone=connection.store_timezone,
+        store_currency=connection.store_currency,
+        boundary_revision=connection.boundary_revision,
     )
 
 
@@ -294,6 +294,9 @@ def _claim_sync_generation(db: Session, boundary: ConnectionBoundary) -> int:
             BumpaConnection.encrypted_api_key == boundary.encrypted_api_key,
             BumpaConnection.scope_type == boundary.scope_type,
             BumpaConnection.scope_id == boundary.scope_id,
+            BumpaConnection.store_timezone == boundary.store_timezone,
+            BumpaConnection.store_currency == boundary.store_currency,
+            BumpaConnection.boundary_revision == boundary.boundary_revision,
             BumpaConnection.sync_generation < 9_223_372_036_854_775_807,
         )
         .values(sync_generation=BumpaConnection.sync_generation + 1)
@@ -329,6 +332,9 @@ def _claim_publication_generation(
             BumpaConnection.encrypted_api_key == boundary.encrypted_api_key,
             BumpaConnection.scope_type == boundary.scope_type,
             BumpaConnection.scope_id == boundary.scope_id,
+            BumpaConnection.store_timezone == boundary.store_timezone,
+            BumpaConnection.store_currency == boundary.store_currency,
+            BumpaConnection.boundary_revision == boundary.boundary_revision,
             BumpaConnection.sync_generation >= generation,
             BumpaConnection.published_sync_generation < generation,
         )
@@ -361,7 +367,11 @@ def _extract_sync(
     runtime_backend: str | None,
 ) -> ExtractedSync:
     if boundary.provider == "local":
-        snapshot = LocalCommerceProvider(tenant_id).sync(date_from, date_to)
+        snapshot = LocalCommerceProvider(
+            tenant_id,
+            store_timezone=boundary.store_timezone,
+            store_currency=boundary.store_currency,
+        ).sync(date_from, date_to)
         return ExtractedSync(snapshot=snapshot, live_result=None)
     if boundary.provider != "bumpa":
         raise HTTPException(status_code=503, detail="Bumpa provider is not configured")
@@ -371,7 +381,13 @@ def _extract_sync(
         raise HTTPException(status_code=503, detail="Bumpa credential decryption is unavailable")
     cipher = field_cipher or FieldCipher(field_encryption_key or "")
     api_key = cipher.decrypt(boundary.encrypted_api_key)
-    with BumpaClient(api_key, boundary.scope_type, boundary.scope_id) as provider:
+    with BumpaClient(
+        api_key,
+        boundary.scope_type,
+        boundary.scope_id,
+        store_timezone=boundary.store_timezone,
+        store_currency=boundary.store_currency,
+    ) as provider:
         live_result = provider.sync(date_from, date_to)
     return ExtractedSync(snapshot=live_result, live_result=live_result)
 
@@ -656,33 +672,22 @@ def classify_sync_completion(
         for key, dataset in keyed_datasets.items()
         if dataset.availability == "unavailable" and key in ACCEPTED_UNAVAILABLE_PROFIT_ERRORS
     }
-    optional_dataset_errors = {
-        key
-        for key, dataset in keyed_datasets.items()
-        if key in ACCEPTED_OPTIONAL_DATASET_ERRORS
-        and dataset.availability == "error"
-        and dataset.error in ACCEPTED_OPTIONAL_DATASET_ERRORS[key]
-    }
     accepted_optional_partial = (
         exact_dataset_set
         and orders_availability == "available"
         and orders_error is None
-        and bool(optional_unavailable or optional_dataset_errors)
+        and bool(optional_unavailable)
         and all(
             _dataset_has_typed_content(dataset)
             or (
                 key in optional_unavailable
                 and dataset.error == ACCEPTED_UNAVAILABLE_PROFIT_ERRORS[key]
             )
-            or key in optional_dataset_errors
             for key, dataset in keyed_datasets.items()
         )
     )
     if accepted_optional_partial:
-        reason: SyncPartialReason = (
-            "optional_dataset_unavailable" if optional_dataset_errors else "profit_not_calculable"
-        )
-        return SyncCompletion("partial", "accepted_partial", reason, True)
+        return SyncCompletion("partial", "accepted_partial", "profit_not_calculable", True)
 
     if orders_availability != "available" or orders_error is not None:
         partial_reason: SyncPartialReason = "orders_unavailable"
@@ -741,13 +746,35 @@ def _promote_orders(
             "shipping_status": _bounded_text(_text(order.payload, "shipping_status"), 80),
             "channel": _bounded_text(_text(order.payload, "channel", "sales_channel"), 80),
             "origin": _bounded_text(_text(order.payload, "origin"), 120),
-            "subtotal_amount": _money(order.payload, "subtotal_amount", "subtotal", "sub_total"),
-            "tax_amount": _money(order.payload, "tax_amount", "tax"),
-            "shipping_amount": _money(
-                order.payload, "shipping_amount", "shipping_fee", "shipping_price"
+            "subtotal_amount": _money(
+                order.payload,
+                "subtotal_amount",
+                "subtotal",
+                "sub_total",
+                currency_code=order.currency_code,
             ),
-            "amount_paid": _money(order.payload, "amount_paid", "paid_amount"),
-            "amount_due": _money(order.payload, "amount_due", "due_amount"),
+            "tax_amount": _money(
+                order.payload, "tax_amount", "tax", currency_code=order.currency_code
+            ),
+            "shipping_amount": _money(
+                order.payload,
+                "shipping_amount",
+                "shipping_fee",
+                "shipping_price",
+                currency_code=order.currency_code,
+            ),
+            "amount_paid": _money(
+                order.payload,
+                "amount_paid",
+                "paid_amount",
+                currency_code=order.currency_code,
+            ),
+            "amount_due": _money(
+                order.payload,
+                "amount_due",
+                "due_amount",
+                currency_code=order.currency_code,
+            ),
             "created_at_source": _source_datetime(order.payload, "created_at"),
             "updated_at_source": _source_datetime(order.payload, "updated_at"),
         }
@@ -762,7 +789,13 @@ def _promote_orders(
             )
             db.add(existing)
         db.flush()
-        _replace_order_items(db, tenant_id, existing, order.payload)
+        _replace_order_items(
+            db,
+            tenant_id,
+            existing,
+            order.payload,
+            currency_code=order.currency_code,
+        )
         if record_raw_responses:
             db.add(
                 BumpaRawResponse(
@@ -778,7 +811,12 @@ def _promote_orders(
 
 
 def _replace_order_items(
-    db: Session, tenant_id: str, order: BumpaOrder, payload: dict[str, Any]
+    db: Session,
+    tenant_id: str,
+    order: BumpaOrder,
+    payload: dict[str, Any],
+    *,
+    currency_code: str | None,
 ) -> None:
     db.execute(delete(BumpaOrderItem).where(BumpaOrderItem.order_id == order.id))
     raw_items = payload.get("items") or payload.get("order_items") or payload.get("products") or []
@@ -795,9 +833,9 @@ def _replace_order_items(
                 product_id=_item_product_id(raw),
                 name=_bounded_text(_text(raw, "name", "product_name"), 300),
                 unit=_bounded_text(_text(raw, "unit"), 80),
-                quantity=_money(raw, "quantity", "qty"),
-                unit_price=_money(raw, "unit_price", "price"),
-                total_amount=_money(raw, "total_amount", "total"),
+                quantity=_money(raw, "quantity", "qty", currency_code=None),
+                unit_price=_money(raw, "unit_price", "price", currency_code=currency_code),
+                total_amount=_money(raw, "total_amount", "total", currency_code=currency_code),
                 raw_payload=redact_order_payload(raw),
             )
         )
@@ -811,12 +849,20 @@ def _text(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _money(payload: dict[str, Any], *keys: str) -> Any:
+def _money(payload: dict[str, Any], *keys: str, currency_code: str | None) -> Any:
     from app.providers.redaction import parse_money
 
     for key in keys:
         if key in payload:
-            return parse_money(payload[key])
+            # ``parse_money`` keeps a legacy NGN fallback for callers that have
+            # no currency context. The persistence boundary always has the
+            # normalized ProviderOrder currency, so pass it explicitly. An
+            # unknown currency uses an empty token set rather than silently
+            # interpreting a naira-prefixed value.
+            return parse_money(
+                payload[key],
+                currency_code=(currency_code if currency_code is not None else "UNSPECIFIED"),
+            )
     return None
 
 

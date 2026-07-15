@@ -118,6 +118,8 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
 
     bumpa = client.get("/v1/settings/bumpa", headers=owner)
     assert bumpa.status_code == 200 and bumpa.json()["provider"] == "local"
+    assert bumpa.json()["store_timezone"] == "Africa/Lagos"
+    assert bumpa.json()["store_currency"] == "NGN"
     assert client.get("/v1/hermes/profile", headers=owner).json()["provider"] == "local"
     assert len(client.get("/v1/mcp/registry", headers=owner).json()) == 5
     connection = client.post(
@@ -183,6 +185,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
         "settings-typed",
         "settings-accepted-partial",
         "settings-legacy",
+        "settings-old-boundary",
         "settings-other",
     }
 
@@ -196,6 +199,9 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
         )
         assert connection is not None and other_connection is not None
         original_connection_freshness = connection.last_successful_sync_at
+        original_boundary_revision = connection.boundary_revision
+        connection.boundary_revision += 1
+        current_boundary_revision = connection.boundary_revision
         connection.last_successful_sync_at = datetime(2029, 1, 1, tzinfo=UTC)
         db.add_all(
             [
@@ -203,6 +209,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     id="settings-typed",
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
+                    boundary_revision=current_boundary_revision,
                     status="success",
                     completion_quality="complete",
                     requested_from=date(2028, 1, 1),
@@ -216,6 +223,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     id="settings-accepted-partial",
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
+                    boundary_revision=current_boundary_revision,
                     status="partial",
                     completion_quality="accepted_partial",
                     partial_reason="profit_not_calculable",
@@ -230,12 +238,27 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     id="settings-legacy",
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
+                    boundary_revision=current_boundary_revision,
                     status="success",
                     completion_quality="legacy",
                     requested_from=date(2029, 1, 1),
                     requested_to=date(2029, 1, 1),
                     started_at=datetime(2029, 1, 1, tzinfo=UTC),
                     finished_at=datetime(2029, 1, 1, 0, 0, 5, tzinfo=UTC),
+                ),
+                BumpaSyncRun(
+                    id="settings-old-boundary",
+                    tenant_id=tenant_id,
+                    bumpa_connection_id=connection.id,
+                    boundary_revision=original_boundary_revision,
+                    status="success",
+                    completion_quality="complete",
+                    requested_from=date(2031, 1, 1),
+                    requested_to=date(2031, 1, 1),
+                    started_at=datetime(2031, 1, 1, tzinfo=UTC),
+                    finished_at=datetime(2031, 1, 1, 0, 0, 5, tzinfo=UTC),
+                    orders_availability="available",
+                    orders_count=1,
                 ),
                 BumpaSyncRun(
                     id="settings-other",
@@ -275,6 +298,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
             )
             assert connection is not None
             connection.last_successful_sync_at = original_connection_freshness
+            connection.boundary_revision = original_boundary_revision
             db.commit()
 
 

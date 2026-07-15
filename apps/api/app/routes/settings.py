@@ -332,6 +332,8 @@ def bumpa_status(
         select(BumpaSyncRun.finished_at)
         .where(
             BumpaSyncRun.tenant_id == principal.tenant.id,
+            BumpaSyncRun.bumpa_connection_id == connection.id,
+            BumpaSyncRun.boundary_revision == connection.boundary_revision,
             usable_bumpa_sync_run_predicate(),
         )
         .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.started_at.desc())
@@ -341,6 +343,8 @@ def bumpa_status(
         "status": connection.status,
         "scope_type": connection.scope_type,
         "scope_id_last4": connection.scope_id[-4:],
+        "store_timezone": connection.store_timezone,
+        "store_currency": connection.store_currency,
         "provider": connection.provider,
         "last_successful_sync_at": last_successful_sync_at,
         "last_error": connection.last_error,

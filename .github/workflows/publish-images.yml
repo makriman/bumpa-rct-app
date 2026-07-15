@@ -129,6 +129,10 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           provenance: mode=max
           sbom: true
+          # Match the protected CI build: the Hermes Debian security overlay
+          # must be rebuilt against the current security repository before an
+          # immutable production digest is published.
+          no-cache: ${{ matrix.name == 'hermes' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

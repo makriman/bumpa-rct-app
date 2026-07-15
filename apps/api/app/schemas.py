@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
+from app.core.store_context import validate_store_currency, validate_store_timezone
+
 ReportFormat = Literal["csv", "jsonl", "pdf"]
 PlatformAdminRole = Literal["operator", "superadmin"]
 PlatformAccessRole = Literal["operator", "researcher"]
@@ -99,10 +101,15 @@ class TenantCreate(BaseModel):
     timezone: str = "Africa/Lagos"
     currency_code: str = Field(default="NGN", min_length=3, max_length=3)
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_store_timezone(value)
+
     @field_validator("currency_code")
     @classmethod
     def uppercase_currency(cls, value: str) -> str:
-        return value.upper()
+        return validate_store_currency(value)
 
 
 class TenantUpdate(BaseModel):
@@ -111,6 +118,11 @@ class TenantUpdate(BaseModel):
     business_category: str | None = None
     city: str | None = None
     timezone: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str | None) -> str | None:
+        return None if value is None else validate_store_timezone(value)
 
 
 class UserCreate(BaseModel):
@@ -169,7 +181,19 @@ class BumpaConnectionCreate(BaseModel):
     api_key: str = Field(min_length=4, max_length=500)
     scope_type: Literal["business_id", "location_id"]
     scope_id: str = Field(min_length=1, max_length=160)
+    store_timezone: str = Field(min_length=1, max_length=64)
+    store_currency: str = Field(min_length=3, max_length=3)
     provider: Literal["local", "bumpa"] = "local"
+
+    @field_validator("store_timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_store_timezone(value)
+
+    @field_validator("store_currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return validate_store_currency(value)
 
 
 class SyncRequest(BaseModel):

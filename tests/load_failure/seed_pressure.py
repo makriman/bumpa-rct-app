@@ -92,6 +92,8 @@ def main() -> int:
                         ),
                         scope_type="business_id",
                         scope_id=f"synthetic-{side}-{run_id}",
+                        store_timezone="Africa/Lagos",
+                        store_currency="NGN",
                         provider="local",
                         status="active",
                     ),

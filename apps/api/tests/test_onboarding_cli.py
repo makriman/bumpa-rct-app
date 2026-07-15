@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime
 from io import BytesIO, StringIO
 from types import SimpleNamespace
 
@@ -15,6 +16,8 @@ from app.db.base import Base
 from app.db.models import (
     AuditLog,
     BumpaConnection,
+    BumpaOrder,
+    BumpaSyncRun,
     PhoneIdentity,
     PlatformRole,
     Tenant,
@@ -67,7 +70,12 @@ def _payload(*, apply: bool = False, bootstrap: bool = True) -> dict[str, object
             "phone_e164": OPERATOR_PHONE,
             "bootstrap_if_missing": bootstrap,
         },
-        "bumpa": {"api_key": API_KEY, "business_id": "synthetic-business-101"},
+        "bumpa": {
+            "api_key": API_KEY,
+            "business_id": "synthetic-business-101",
+            "store_timezone": "Africa/Lagos",
+            "store_currency": "NGN",
+        },
     }
     if apply:
         payload["apply"] = True
@@ -183,6 +191,8 @@ def test_apply_atomically_creates_encrypted_upserts_and_redacted_audits(
         assert connection is not None
         assert connection.provider == "bumpa"
         assert connection.scope_type == "business_id"
+        assert connection.store_timezone == "Africa/Lagos"
+        assert connection.store_currency == "NGN"
         assert connection.encrypted_api_key != API_KEY
         assert FieldCipher(FIELD_KEY).decrypt(connection.encrypted_api_key) == API_KEY
         assert db.scalar(select(func.count()).select_from(Tenant)) == 1
@@ -231,6 +241,83 @@ def test_apply_is_idempotent_and_requires_explicit_bootstrap_authority(
         assert db.scalar(select(func.count()).select_from(Tenant)) == 1
         assert db.scalar(select(func.count()).select_from(User)) == 2
         assert db.scalar(select(func.count()).select_from(BumpaConnection)) == 1
+
+
+def test_connection_upsert_distinguishes_key_rotation_from_material_boundary_change(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as db:
+        cli.onboard(db, _bundle(apply=True), field_encryption_key=FIELD_KEY)
+        connection = db.scalar(select(BumpaConnection))
+        tenant = db.scalar(select(Tenant))
+        assert connection is not None and tenant is not None
+        connection.last_successful_sync_at = datetime(2026, 7, 15, 10, tzinfo=UTC)
+        db.add_all(
+            [
+                BumpaSyncRun(
+                    id="cli-boundary-run",
+                    tenant_id=tenant.id,
+                    bumpa_connection_id=connection.id,
+                    boundary_revision=connection.boundary_revision,
+                    status="success",
+                    completion_quality="complete",
+                    requested_from=date(2026, 7, 1),
+                    requested_to=date(2026, 7, 14),
+                    started_at=datetime(2026, 7, 15, 9, tzinfo=UTC),
+                    finished_at=datetime(2026, 7, 15, 10, tzinfo=UTC),
+                    orders_availability="available",
+                    orders_count=1,
+                ),
+                BumpaOrder(
+                    tenant_id=tenant.id,
+                    bumpa_order_id="cli-boundary-order",
+                    raw_payload={"id": "cli-boundary-order"},
+                ),
+            ]
+        )
+        db.commit()
+
+    rotated_payload = _payload(apply=True)
+    rotated_bumpa = rotated_payload["bumpa"]
+    assert isinstance(rotated_bumpa, dict)
+    rotated_payload["bumpa"] = {
+        **rotated_bumpa,
+        "api_key": "rotated-synthetic-key",
+    }
+    with session_factory() as db:
+        result = cli.onboard(
+            db,
+            cli.OnboardingBundle.model_validate(rotated_payload),
+            field_encryption_key=FIELD_KEY,
+        )
+        connection = db.scalar(select(BumpaConnection))
+        assert connection is not None
+        assert result.counts["updated"] == 1
+        assert connection.boundary_revision == 1
+        assert connection.last_successful_sync_at is not None
+        assert db.scalar(select(func.count()).select_from(BumpaOrder)) == 1
+
+    changed_payload = _payload(apply=True)
+    changed_bumpa = changed_payload["bumpa"]
+    assert isinstance(changed_bumpa, dict)
+    changed_payload["bumpa"] = {
+        **changed_bumpa,
+        "api_key": "new-store-synthetic-key",
+        "business_id": "synthetic-business-202",
+    }
+    with session_factory() as db:
+        cli.onboard(
+            db,
+            cli.OnboardingBundle.model_validate(changed_payload),
+            field_encryption_key=FIELD_KEY,
+        )
+        connection = db.scalar(select(BumpaConnection))
+        assert connection is not None
+        assert connection.scope_id == "synthetic-business-202"
+        assert connection.boundary_revision == 2
+        assert connection.last_successful_sync_at is None
+        assert db.scalar(select(func.count()).select_from(BumpaOrder)) == 0
+        assert db.scalar(select(func.count()).select_from(BumpaSyncRun)) == 1
 
 
 @pytest.mark.parametrize(

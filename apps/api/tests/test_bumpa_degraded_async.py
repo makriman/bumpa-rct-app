@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -54,18 +56,54 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
             raise httpx.ReadTimeout(private_detail, request=request)
         payload = deepcopy(ANALYTICS[key])
         if "range" in payload:
-            payload["range"] = {
-                "from": request.url.params["from"],
-                "to": request.url.params["to"],
-            }
+            timezone = ZoneInfo("Africa/Lagos")
+            requested_from = date.fromisoformat(request.url.params["from"])
+            requested_to = date.fromisoformat(request.url.params["to"])
+            period = [
+                datetime.combine(requested_from, datetime.min.time(), timezone)
+                .astimezone(UTC)
+                .isoformat(),
+                datetime.combine(requested_to, datetime.max.time(), timezone)
+                .astimezone(UTC)
+                .isoformat(),
+            ]
+            payload["range"] = {"from": period[0], "to": period[1]}
+            raw_data = payload.get("data")
+            if isinstance(raw_data, dict):
+                chart = raw_data.get("chart")
+                if isinstance(chart, dict) and isinstance(chart.get("current_period"), dict):
+                    chart["current_period"]["range"] = period
+                    previous = chart.get("previous_period")
+                    if isinstance(previous, dict):
+                        days = (requested_to - requested_from).days + 1
+                        previous_to = requested_from - timedelta(days=1)
+                        previous_from = previous_to - timedelta(days=days - 1)
+                        previous["range"] = [
+                            datetime.combine(previous_from, datetime.min.time(), timezone)
+                            .astimezone(UTC)
+                            .isoformat(),
+                            datetime.combine(previous_to, datetime.max.time(), timezone)
+                            .astimezone(UTC)
+                            .isoformat(),
+                        ]
         return httpx.Response(200, json=payload)
 
     class IsolatedTimeoutBumpaClient(BumpaClient):
-        def __init__(self, api_key: str, scope_type: str, scope_id: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            scope_type: str,
+            scope_id: str,
+            *,
+            store_timezone: str,
+            store_currency: str,
+        ) -> None:
             super().__init__(
                 api_key,
                 scope_type,
                 scope_id,
+                store_timezone=store_timezone,
+                store_currency=store_currency,
                 client=httpx.Client(
                     transport=httpx.MockTransport(respond),
                     base_url="https://api.getbumpa.com/api",
@@ -115,6 +153,7 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
             payload={
                 "tenant_id": tenant.id,
                 "connection_id": connection.id,
+                "boundary_revision": connection.boundary_revision,
                 "date_from": "2026-07-01",
                 "date_to": "2026-07-12",
             },
@@ -141,20 +180,20 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert stored_job.attempts == 1
         assert stored_job.result is not None
         assert stored_job.result["status"] == "partial"
-        assert stored_job.result["completion_quality"] == "accepted_partial"
-        assert stored_job.result["partial_reason"] == "optional_dataset_unavailable"
+        assert stored_job.result["completion_quality"] == "degraded"
+        assert stored_job.result["partial_reason"] == "dataset_error"
 
         run = session.scalar(
             select(BumpaSyncRun).where(BumpaSyncRun.bumpa_connection_id == connection.id)
         )
         assert run is not None
         assert run.status == "partial"
-        assert run.completion_quality == "accepted_partial"
-        assert run.partial_reason == "optional_dataset_unavailable"
-        assert connection.last_successful_sync_at is not None
-        assert connection.last_failed_sync_at is None
+        assert run.completion_quality == "degraded"
+        assert run.partial_reason == "dataset_error"
+        assert connection.last_successful_sync_at is None
+        assert connection.last_failed_sync_at is not None
         assert run.finished_at is not None
-        assert connection.last_successful_sync_at.replace(tzinfo=None) == run.finished_at.replace(
+        assert connection.last_failed_sync_at.replace(tzinfo=None) == run.finished_at.replace(
             tzinfo=None
         )
         raw_failure = session.scalar(

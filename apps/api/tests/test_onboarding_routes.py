@@ -76,6 +76,29 @@ def test_production_tenant_creation_requires_resumable_onboarding(
     }
 
 
+def test_direct_tenant_create_and_update_reject_invalid_iana_timezones(
+    client: TestClient,
+) -> None:
+    operator = auth_headers(client, "+2348099990001")
+    invalid_create = _tenant_payload("invalid-direct-timezone")
+    invalid_create["timezone"] = "Not/A_Real_Zone"
+
+    created = client.post(
+        "/v1/admin/tenants",
+        headers=operator,
+        json=invalid_create,
+    )
+    assert created.status_code == 422
+
+    owner = auth_headers(client, "+2348012345678")
+    updated = client.patch(
+        "/v1/tenants/current",
+        headers=owner,
+        json={"timezone": "Not/A_Real_Zone"},
+    )
+    assert updated.status_code == 422
+
+
 def test_onboarding_routes_are_published_in_the_local_api_schema(
     client: TestClient,
 ) -> None:
@@ -142,6 +165,56 @@ def test_onboarding_commands_require_revision_and_idempotency_headers(
     assert missing_revision.json()["detail"]["code"] == "revision_required"
     assert missing_idempotency.status_code == 422
     assert missing_idempotency.json()["detail"]["code"] == "idempotency_key_required"
+
+
+def test_onboarding_start_rejects_invalid_timezone_and_currency_context(
+    client: TestClient,
+) -> None:
+    operator = auth_headers(client, "+2348099990001")
+
+    response = client.post(
+        "/v1/admin/onboardings",
+        headers={**operator, "Idempotency-Key": "invalid-timezone-start"},
+        json={
+            "slug": "invalid-timezone-start",
+            "name": "Invalid timezone",
+            "business_category": "retail",
+            "country": "KE",
+            "city": "Nairobi",
+            "timezone": "Africa/Not_A_Real_City",
+            "currency_code": "KES",
+        },
+    )
+
+    assert response.status_code == 422
+    fields = response.json()["error"]["fields"]
+    assert any(
+        error.get("location") == ["body", "timezone"]
+        and "valid IANA timezone" in error.get("message", "")
+        for error in fields
+    )
+    with SessionLocal() as db:
+        assert db.scalar(select(Tenant).where(Tenant.slug == "invalid-timezone-start")) is None
+
+    invalid_currency = client.post(
+        "/v1/admin/onboardings",
+        headers={**operator, "Idempotency-Key": "invalid-currency-start"},
+        json={
+            "slug": "invalid-currency-start",
+            "name": "Invalid currency",
+            "business_category": "retail",
+            "country": "KE",
+            "city": "Nairobi",
+            "timezone": "Africa/Nairobi",
+            "currency_code": "K3S",
+        },
+    )
+
+    assert invalid_currency.status_code == 422
+    assert any(
+        error.get("location") == ["body", "currency_code"]
+        for error in invalid_currency.json()["error"]["fields"]
+    )
 
 
 def test_resumable_onboarding_activates_an_audited_dual_role_demo_tenant(
@@ -267,6 +340,8 @@ def test_resumable_onboarding_activates_an_audited_dual_role_demo_tenant(
         "provider": "bumpa",
         "scope_type": "business_id",
         "scope_id": "saga-e2e-business",
+        "store_timezone": "Africa/Lagos",
+        "store_currency": "NGN",
     }
     bumpa_revision = view["revision"]
     command(

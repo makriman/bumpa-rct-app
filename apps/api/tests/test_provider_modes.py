@@ -71,6 +71,8 @@ def test_nonlocal_disabled_providers_fail_closed_without_side_effects(
                 "api_key": "must-not-be-stored",
                 "scope_type": "business_id",
                 "scope_id": "disabled-business",
+                "store_timezone": "Africa/Lagos",
+                "store_currency": "NGN",
                 "provider": "local",
             },
         )

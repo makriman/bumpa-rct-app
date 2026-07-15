@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import threading
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -31,6 +31,7 @@ from app.jobs.worker import process_one
 from app.main import app
 from app.providers.bumpa import BumpaClient, BumpaProviderError
 from app.routes import whatsapp as whatsapp_route
+from app.routes.bumpa import _today_for_store
 from app.services import bumpa as bumpa_service
 from app.services import whatsapp_webhook_ingress
 from app.services.whatsapp_webhook_ingress import ClaimedWebhookEvent
@@ -482,6 +483,7 @@ def test_nonlocal_bumpa_sync_is_idempotently_queued_and_handler_runs(
         assert job is not None
         assert job.tenant_id == tenant_id
         assert job.payload["tenant_id"] == tenant_id
+        assert job.payload["boundary_revision"] == 1
         assert session.scalar(select(JobOutbox).where(JobOutbox.job_id == job.id)) is not None
         result = bumpa_sync_handler(session, job)
         assert result is not None
@@ -503,6 +505,40 @@ def test_nonlocal_bumpa_sync_is_idempotently_queued_and_handler_runs(
         ).status_code
         == 404
     )
+
+
+def test_store_today_uses_the_connection_timezone_at_utc_day_boundaries() -> None:
+    instant = datetime(2026, 7, 14, 23, 30, tzinfo=UTC)
+    assert _today_for_store("Africa/Lagos", instant=instant) == date(2026, 7, 15)
+    assert _today_for_store("America/New_York", instant=instant) == date(2026, 7, 14)
+    with pytest.raises(ValueError, match="timezone"):
+        _today_for_store("UTC", instant=datetime(2026, 7, 14, 23, 30))
+
+
+def test_queued_bumpa_sync_rejects_a_replaced_connection_boundary(client: TestClient) -> None:
+    owner = auth_headers(client, "+2348012345678")
+    settings = _nonlocal_settings()
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        accepted = client.post(
+            "/v1/bumpa/sync",
+            headers={**owner, "Idempotency-Key": "stale-boundary-job"},
+            json={"date_from": "2026-07-01", "date_to": "2026-07-12"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert accepted.status_code == 202
+
+    with SessionLocal() as session:
+        job = session.get(AsyncJob, accepted.json()["job_id"])
+        assert job is not None
+        connection = session.get(BumpaConnection, job.payload["connection_id"])
+        assert connection is not None
+        assert job.payload["boundary_revision"] == connection.boundary_revision
+        connection.boundary_revision += 1
+        session.commit()
+        with pytest.raises(PermanentJobError, match="replaced"):
+            bumpa_sync_handler(session, job)
 
 
 def test_provider_handlers_reject_malformed_or_cross_tenant_payloads() -> None:
@@ -606,6 +642,7 @@ def test_bumpa_worker_retries_exhausted_transient_failures_and_dead_letters_auth
             payload={
                 "tenant_id": tenant.id,
                 "connection_id": connection.id,
+                "boundary_revision": connection.boundary_revision,
                 "date_from": "2026-01-01",
                 "date_to": "2026-01-02",
             },
@@ -653,11 +690,21 @@ def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budge
         raise httpx.ReadTimeout(private_detail, request=request)
 
     class TimeoutBumpaClient(BumpaClient):
-        def __init__(self, api_key: str, scope_type: str, scope_id: str) -> None:
+        def __init__(
+            self,
+            api_key: str,
+            scope_type: str,
+            scope_id: str,
+            *,
+            store_timezone: str,
+            store_currency: str,
+        ) -> None:
             super().__init__(
                 api_key,
                 scope_type,
                 scope_id,
+                store_timezone=store_timezone,
+                store_currency=store_currency,
                 client=httpx.Client(
                     transport=httpx.MockTransport(timeout),
                     base_url="https://api.getbumpa.com/api",
@@ -707,6 +754,7 @@ def test_bumpa_timeout_is_bounded_per_attempt_and_terminal_after_job_retry_budge
             payload={
                 "tenant_id": tenant.id,
                 "connection_id": connection.id,
+                "boundary_revision": connection.boundary_revision,
                 "date_from": "2026-01-01",
                 "date_to": "2026-01-02",
             },

@@ -498,6 +498,8 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                     encrypted_api_key="local-gate-only",
                     scope_type="business_id",
                     scope_id=f"scope-{tag}",
+                    store_timezone="UTC",
+                    store_currency="NGN",
                     provider="local",
                     status="active",
                 )
@@ -515,6 +517,12 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 dataset=dataset,
                 availability="available",
                 payload={"value": str(value)},
+                canonical_payload={
+                    "schema_version": 1,
+                    "kind": "scalar",
+                    "publication": label,
+                    "value": str(value),
+                },
                 value=value,
                 title=key,
                 currency_code="NGN" if resource == "sales" else None,
@@ -563,7 +571,7 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
         unexpected: dict[str, str] = {}
 
         class ControlledProvider:
-            def __init__(self, _tenant_seed: str) -> None:
+            def __init__(self, _tenant_seed: str, **_context: object) -> None:
                 pass
 
             def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
@@ -645,6 +653,8 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 raise AssertionError(f"Unexpected older/newer HTTP failures: {http_failures}")
             expected_published = 2
             expected_order = "newer"
+            expected_metric_rows = 20
+            expected_raw_rows = 22
             expected_runs: dict[int, tuple[str, str | None]] = {
                 1: ("success", None),
                 2: ("success", None),
@@ -657,6 +667,8 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 raise AssertionError(f"Older extraction was not superseded: {http_failures}")
             expected_published = 2
             expected_order = "newer"
+            expected_metric_rows = 10
+            expected_raw_rows = 11
             expected_runs = {
                 1: ("failed", "Superseded by a newer Bumpa sync"),
                 2: ("success", None),
@@ -668,6 +680,8 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 raise AssertionError(f"Newer failure was not audited: {http_failures}")
             expected_published = 1
             expected_order = "older"
+            expected_metric_rows = 10
+            expected_raw_rows = 11
             expected_runs = {
                 1: ("success", None),
                 2: ("failed", "Commerce sync failed"),
@@ -695,6 +709,27 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
             }
             if runs != expected_runs:
                 raise AssertionError(f"Terminal generation audits are invalid for {case}: {runs}")
+            metric_count = int(
+                connection.scalar(
+                    text(
+                        "SELECT COUNT(*) FROM bumpa_metric_snapshots WHERE tenant_id = :tenant_id"
+                    ),
+                    {"tenant_id": tenant_id},
+                )
+                or 0
+            )
+            raw_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_raw_responses WHERE tenant_id = :tenant_id"),
+                    {"tenant_id": tenant_id},
+                )
+                or 0
+            )
+            if metric_count != expected_metric_rows or raw_count != expected_raw_rows:
+                raise AssertionError(
+                    f"Generation evidence is invalid for {case}: "
+                    f"metrics={metric_count}, raw={raw_count}"
+                )
             order = connection.execute(
                 text(
                     "SELECT status, raw_payload FROM bumpa_orders "
@@ -709,6 +744,14 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 or order.raw_payload.get("publication") != expected_order
             ):
                 raise AssertionError(f"Canonical generation order is invalid for {case}: {order}")
+            item_name = connection.scalar(
+                text("SELECT name FROM bumpa_order_items WHERE tenant_id = :tenant_id"),
+                {"tenant_id": tenant_id},
+            )
+            if item_name != f"{expected_order} item":
+                raise AssertionError(
+                    f"Canonical generation item is invalid for {case}: {item_name}"
+                )
 
     def verify_rotation(column: str, value: str) -> None:
         tenant_id, connection_id = create_fixture(f"rot-{column[:3]}")
@@ -719,7 +762,7 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
         unexpected: list[str] = []
 
         class RotationProvider:
-            def __init__(self, _tenant_seed: str) -> None:
+            def __init__(self, _tenant_seed: str, **_context: object) -> None:
                 pass
 
             def sync(self, _date_from: date, _date_to: date) -> BumpaSnapshot:
@@ -796,10 +839,41 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
                 )
                 or 0
             )
-            if tuple(state) != (1, 0) or run_count != 0 or order_count != 0:
+            metric_count = int(
+                connection.scalar(
+                    text(
+                        "SELECT COUNT(*) FROM bumpa_metric_snapshots WHERE tenant_id = :tenant_id"
+                    ),
+                    {"tenant_id": tenant_id},
+                )
+                or 0
+            )
+            raw_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_raw_responses WHERE tenant_id = :tenant_id"),
+                    {"tenant_id": tenant_id},
+                )
+                or 0
+            )
+            item_count = int(
+                connection.scalar(
+                    text("SELECT COUNT(*) FROM bumpa_order_items WHERE tenant_id = :tenant_id"),
+                    {"tenant_id": tenant_id},
+                )
+                or 0
+            )
+            if (
+                tuple(state) != (1, 0)
+                or run_count != 0
+                or order_count != 0
+                or metric_count != 0
+                or raw_count != 0
+                or item_count != 0
+            ):
                 raise AssertionError(
                     f"{column} rotation leaked publication state: "
-                    f"state={state}, runs={run_count}, orders={order_count}"
+                    f"state={state}, runs={run_count}, orders={order_count}, "
+                    f"metrics={metric_count}, raw={raw_count}, items={item_count}"
                 )
 
     try:
@@ -808,6 +882,8 @@ def _verify_bumpa_sync_atomicity(admin_engine: Engine) -> None:
         verify_pair("newer_failure")
         verify_rotation("encrypted_api_key", "rotated-local-key")
         verify_rotation("scope_id", "rotated-scope")
+        verify_rotation("store_timezone", "Africa/Nairobi")
+        verify_rotation("store_currency", "KES")
         verify_rotation("status", "inactive")
     finally:
         service_module.LocalCommerceProvider = original_provider

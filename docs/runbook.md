@@ -444,11 +444,18 @@ each passed their activation gate for the exact release:
    across tenants.
 4. Add and approve the owner's WhatsApp number; verify the intended tenant mapping
    without logging the raw number.
-5. Write the Bumpa key once, with explicit `scope_type` and `scope_id`; never display
-   the decrypted key afterward.
+5. Write the Bumpa key once, with explicit `scope_type`, `scope_id`, IANA
+   `store_timezone`, and three-letter `store_currency`; never display the decrypted
+   key afterward. These store fields are provider-contract data and can differ from
+   the tenant timezone/currency used for presentation and scheduling. A provider,
+   scope, timezone, or currency change increments `boundary_revision`, invalidates
+   queued/in-flight sync publication, clears the canonical order projection, and
+   excludes older evidence from current reads. A verified same-boundary key rotation
+   deliberately preserves the revision and current data.
 6. Run a bounded test sync. Confirm all expected datasets/orders, availability,
-   Decimal normalization, rate-limit metadata and freshness. Do not proceed on an
-   auth error or unexplained partial result.
+   exact response instants, canonical local-date ranges, Decimal/currency
+   normalization, rate-limit metadata and freshness. Do not proceed on an auth
+   error, range mismatch, currency conflict, or unexplained partial result.
 7. Provision and activate the tenant's Hermes profile. The admin request must not
    return `active` until the private control plane has imported the exact staged
    bundle, started the selected gateway and passed authenticated readiness. Verify
@@ -477,6 +484,21 @@ analytics datasets and degraded store 5 returns 7/10, with `products.overview`
 failing at the upstream boundary by timeout/HTTP 504. Do not close a Bumpa incident
 or enable freshness-dependent behavior until the expected 10/10 dataset surface is
 restored and a redacted canonical/raw count reconciliation succeeds.
+
+The production helper rejects every dataset error by default. Only after a fresh
+independent probe reconfirms this exact upstream condition and the degraded release
+is explicitly approved may an operator run:
+
+```bash
+./scripts/production_onboard.py sync --allow-operator-owner-overlap \
+  --allow-dataset-error 5:products.overview
+```
+
+That Store-5-only allowance additionally requires durable evidence of either a
+no-response timeout or upstream HTTP 5xx. It does not permit a transport disconnect,
+invalid response, authentication failure, the same error on stores 1–4, another
+error, an unexpected unavailable dataset, missing orders, a completion-state
+mismatch, or any auth/range/currency failure.
 
 1. Establish affected tenant, date range, sync run and correlation ID.
 2. Inspect HTTP status, body-level error, pagination checkpoint and rate-limit

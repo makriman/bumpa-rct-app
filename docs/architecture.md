@@ -78,7 +78,15 @@ hosts. FastAPI independently verifies roles for every privileged API.
 - Webhook and job idempotency keys are unique and claimed transactionally.
 - Transactional outbox records connect state changes to queued side effects.
 - Retries are bounded with exponential backoff and terminal failures are visible.
-- Timestamps are UTC; tenant timezone is applied only at presentation boundaries.
+- Persisted timestamps are UTC. Tenant timezone controls presentation and scheduling;
+  the separately persisted Bumpa store timezone defines the provider's inclusive
+  reporting-day request/response contract. A material Bumpa boundary change—provider,
+  scope type, scope ID, store timezone, or store currency—atomically increments
+  `boundary_revision`, clears freshness/error state, removes the mutable canonical
+  order projection, and excludes earlier run/raw/metric evidence from product reads
+  while retaining it for audit. Queued and in-flight syncs capture the revision and
+  cannot execute or publish after replacement. A verified same-boundary key rotation
+  preserves both the revision and current data.
 
 ## Runtime profiles
 
