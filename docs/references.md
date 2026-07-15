@@ -27,11 +27,14 @@ profile activation; an image-level contract is not a substitute for those canari
   route to provider support/access.
 
 The repository uses a direct server-side Bumpa REST adapter; Bumpa MCP is out of
-scope. The adapter has authenticated all five supplied business credentials. Four
-completed the bounded live provider probe; store 5 returned a bounded degraded
-timeout with usable prior data. Public landing material and credential probes do
-not prove a mapped production sync/reconciliation contract, so retain versioned
-redacted fixtures and re-run tenant-scoped canaries before each activation.
+scope. The adapter has authenticated all five supplied business credentials. The
+current mapped production canaries persist orders for all five stores: four are
+accepted partial at eight available analytics datasets, while store 5 is degraded
+only because `products.overview` receives no provider response inside the scoped
+90-second policy. Current raw/metric/canonical evidence reconciles at schema 0015.
+Public landing material and credential probes still do not prove that contract, so
+retain versioned redacted fixtures and re-run tenant-scoped canaries for every
+application activation.
 
 ## Meta WhatsApp Cloud API
 

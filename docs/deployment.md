@@ -12,56 +12,60 @@ evidenced. A selected adapter is not unrestricted-traffic approval: every
 unsupported or externally blocked capability remains fail-closed until its full
 activation gate passes.
 
-As of 2026-07-14, release
-`0ec2c58f8b0a26734ca08788787640dca1409821` is live on the five branded
-`bumpabestie.com` hosts through Cloudflare. Temporary web-login
-[PR 45](https://github.com/makriman/bumpa-rct-app/pull/45), exact-revision
-[main CI 29333098858](https://github.com/makriman/bumpa-rct-app/actions/runs/29333098858)
-(13/13 jobs) and
-[publish run 29333505495](https://github.com/makriman/bumpa-rct-app/actions/runs/29333505495)
-(7/7 jobs) complete the current build and publication gates. The deployed release
-record matches all six promoted release indexes, and the eight running services
-use their intended exact references. The redacted production transcript is
-[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md).
+As of 2026-07-15, application release
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6` is live on the five branded
+`bumpabestie.com` hosts through Cloudflare. Brand/SEO and data hardening
+[PR 49](https://github.com/makriman/bumpa-rct-app/pull/49), store-boundary
+persistence [PR 51](https://github.com/makriman/bumpa-rct-app/pull/51), the final
+slow-product timeout [PR 52](https://github.com/makriman/bumpa-rct-app/pull/52), exact-revision
+[main CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
+(13/13 jobs), and
+[publish run 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
+(7/7 jobs) complete the build and publication gates. The deployed release record,
+all six promoted indexes and their OCI revision labels match the exact application
+revision. The redacted production transcript is
+[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its later
+documentation commit is evidence only and is not a separately promoted application
+release.
 
-Production verification found seven long-running application services using their
-intended successor references and Redis using its separately pinned upstream
-digest. All eight services were running, all seven configured healthchecks were
-healthy, and every container had zero restarts, OOM kills or unhealthy states at
-schema `0013_web_pin_challenges`. Temporary web sign-in is
-limited to exactly five existing mapped collaborators and preserves the existing
-role boundary. Acceptance covered every collaborator on public chat,
-administration and research: five browser and ten API/BFF sign-ins completed the
-15 host-scoped combinations. Wrong-code and unmapped canaries failed generically,
-sibling hosts did not inherit cookies, role gates held, logout revoked sessions,
-and the final active-session/challenge counts were zero.
+Production runs all eight intended services at schema
+`0015_bumpa_store_context`; all seven configured healthchecks pass, and the
+accepted runtime samples have zero restarts and zero OOM kills. The complete
+mapped-login matrix covered all five collaborators on public chat, administration
+and research: 15 host-scoped sign-ins passed. Generic unmapped denial, host-only
+cookie isolation, role gates, logout and cleanup all held, leaving zero active
+canary sessions and challenges.
 
-Historical predecessor evidence recorded five correlated Bumpa runs with orders
-available. Stores 1–4 returned accepted-partial 8/10 analytics datasets; degraded
-store 5 returned 7/10 because `products.overview` timed out/returned HTTP 504. The
-same predecessor evidence recorded five Hermes health/completion canaries, 40
-rejected foreign-profile gateway/control attempts, and an audited restart plus
-post-restart completion. Those provider canaries were not rerun for this web
-release. The current release does not activate WhatsApp: WhatsApp authentication,
-Meta test-sender verification and proactive/daily/weekly delivery are disabled. The
-operational WhatsApp/outbox fingerprint was unchanged by the complete web-login
-acceptance matrix; no Meta send or delivery receipt is claimed.
+Current Bumpa canaries and read-only persistence reconciliation cover all five
+connections. Four stores complete as accepted partial with eight available
+analytics datasets, the two typed provider profit limitations and orders. The
+fifth completes durably as degraded with orders and seven available analytics
+datasets; its sole error is the provider-side `products.overview` no-response
+timeout under the exact 90-second read policy. Store 3's previously slow
+`products.overview` now succeeds under that policy. Stored raw evidence, ten
+metric snapshots per current run, canonical orders/items, currency, local date
+ranges, redaction and current-boundary freshness all reconcile. The scoped helper
+reached its fixed 240-second polling deadline for the fifth store; the durable job
+finished successfully seconds later and was reconciled directly rather than
+widening the helper boundary.
 
-The prior release's local recovery points remain historical evidence only. A new
-exact-successor local backup passed its guarded wrapper, five-artifact checksum
-replay and format-3 revision/schema/image manifest checks. The stability observation
-also passed: every container had at least 20 minutes of continuous uptime, five
-closing samples retained all eight IDs, and exact images, seven healthchecks,
-readiness, public smoke, severe/exit-signal logs, firewall, interlock and timers
-remained clean. Backup and disk-usage timers are active. All five DNS records are
-Cloudflare-proxied; Full (strict), Always Use HTTPS, TLS 1.2 minimum and TLS 1.3 are
-enabled. TLS 1.0/1.1 are rejected on every host, `www` canonically redirects to the
-apex with path/query intact, and dynamic documents have unique nonce-based CSP.
-Provider selectors and valid credentials do not by themselves authorize real
-tenant traffic. Complete Bumpa provider coverage, a launch-ready Meta sender with
-approved authentication templates and outbound-delivery evidence, off-host
-durability, a real alert destination and privacy/security/retention approval remain open
-gates.
+All five isolated Hermes profiles completed one live Claude request from a
+synthetic prompt. Normal tenant-scoped redacted context remained inside Hermes;
+prompt/response bodies were omitted from evidence. Five same-profile health probes
+passed, 20 cross-profile gateway credential attempts were rejected, and cleanup
+left zero active canary sessions. WhatsApp authentication, Meta
+test-sender verification and proactive/daily/weekly delivery remain disabled; no
+Meta send or receipt is claimed.
+
+All five DNS records remain Cloudflare-proxied; Full (strict), Always Use HTTPS,
+TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
+`www` redirects canonically, and dynamic documents use nonce-based CSP. Public
+pages now ship route-specific canonical/Open Graph/Twitter metadata, homepage
+JSON-LD, robots, sitemap, manifest, favicons and the Bumpa Bestie brand assets; private surfaces
+enforce `X-Robots-Tag: noindex`. Provider selectors and credentials never imply
+unrestricted traffic approval. WhatsApp activation, the remaining provider-side
+dataset timeout, encrypted off-host durability, an external alert destination and
+privacy/security/retention approval remain open gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -632,21 +636,24 @@ still proves only the local stage unless a reviewed operator-owned handoff is
 configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
-The previously verified recovery points belong to the predecessor release, but a
-new exact-successor local backup is recorded in
-[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md). Its guarded
-wrapper, five expected artifacts, SHA-256 replay and format-3 manifest all passed;
-the manifest binds the exact successor, schema `0013_web_pin_challenges` and the
-current backup digest. The stability observation also passed its 20-minute minimum
-uptime/log window and five closing live samples, with stable identities, exact
-images, 8/8 services, 7/7 configured healthchecks, zero restart/OOM/severe/exit
-signals, healthy readiness/public smoke, firewall persistence, clear interlock and
-active timers. Off-host copy, external backup-alert delivery and remote restore
-evidence remain open.
+The exact-application-release local backup is recorded in
+[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its guarded
+systemd wrapper, five expected checksum entries, six-file inventory, SHA-256 replay
+and format-3 manifest all passed; the manifest binds application revision
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6`, schema
+`0015_bumpa_store_context`, PostgreSQL/pg_dump 16.14 and the exact backup digest.
+All eight services resumed with all seven configured healthchecks healthy. Off-host
+copy, external backup-alert delivery and remote restore evidence remain open.
+
+The post-backup stability gate also passed after a full 20-minute clock. Five
+samples at 60-second spacing retained all eight identities and exact images, seven
+healthy configured healthchecks, zero restart/OOM signals, schema 0015 and healthy
+readiness. Bounded logs, direct-origin/public smoke, timers, firewall/UFW and
+maintenance/interlocks passed the final gate.
 
 ## Five-store production onboarding
 
-The 2026-07-13 production database audit verifies all five
+The 2026-07-15 production database audit verifies all five
 owner/tenant/phone/Bumpa mappings and the intended dual global-admin/demo
 membership. The workflow below remains the fail-closed method for re-auditing or
 reconciling those mappings; do not create duplicates merely to rerun a canary.
@@ -700,6 +707,14 @@ datasets; every unnamed error, unexpected unavailable dataset, completion-state
 mismatch, auth/range/currency failure, or order failure remains a hard stop. The five
 secret-file entries must provide explicit `store_timezone` and `store_currency`; the
 helper has no pilot fallback for missing context.
+
+The current application-release canary first ran strict. Stores 1–4 completed
+accepted partial at 8/10 analytics datasets plus orders; Store 3's previously slow
+`products.overview` succeeded under the exact 90-second read policy. A separate
+one-attempt Store 5 probe then proved the typed no-response provider timeout before
+the scoped allowance was used. The helper reached its fixed 240-second polling
+boundary; the durable job completed seconds later and direct read-only
+reconciliation proved the allowed degraded result, so neither timeout was widened.
 
 Authenticated canary HTTP calls reject every redirect. Sync evidence is correlated
 through the exact durable job ID and sync-run ID returned by the API, rather than by

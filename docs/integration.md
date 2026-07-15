@@ -66,32 +66,38 @@ publication, clears mutable canonical orders, and retains older evidence for aud
 without exposing it to current product reads. A verified same-boundary key rotation
 preserves the revision and current projections.
 
-The bounded pre-release five-key adapter probe returned eight available analytics
-datasets and the two typed profit limitations for stores 1–4. Store 5 returned seven
-available datasets, the two profit limitations, and one isolated upstream
-`products.overview` failure. Orders decoded for all five stores, including valid
-historical per-order currencies. This proves adapter decoding and typed failure
-handling only; schema-0015 durable production canaries and redacted persisted-data
-reconciliation remain release gates.
+The current schema-0015 production canaries persist all five mapped connections.
+Stores 1–4 finish accepted partial with eight available analytics datasets, the
+two typed provider profit limitations, and orders. Store 5 finishes durably as
+degraded with seven available datasets, the same two limitations and orders; its
+sole dataset error is the provider-side `products.overview` no-response timeout.
+Read-only reconciliation proves the current connection boundary, ten raw analytics
+rows and ten metric snapshots per store, complete order page sets, canonical
+orders/items, valid current and historical currencies, store-local inclusive date
+ranges, idempotent redaction and freshness semantics. The scoped helper reached its
+fixed 240-second poll boundary on Store 5; its durable job finished seconds later
+and was reconciled directly rather than widening the helper timeout.
 
 A later exact-endpoint production probe established that `products.overview` has a
-different latency envelope from the other analytics reads: Store 3 returned a valid
-HTTP 200 document after 56.8 seconds, while Store 5 returned an upstream HTTP 524
-after 125.1 seconds. The adapter therefore gives only this exact dataset a 90-second
-read window and at most two attempts; every other analytics and orders request keeps
-the normal 30-second policy. This does not convert Store 5's upstream 524 into
-success; its narrowly approved degraded evidence remains a provider limitation.
+different latency envelope from the other analytics reads: Store 3 has returned a
+valid late document, while Store 5 has exceeded the bounded policy. The adapter
+therefore gives only this exact dataset a 90-second read window and at most two
+attempts; every other analytics and orders request keeps the normal 30-second
+policy. Current production evidence confirms Store 3 succeeds under the new
+window. Store 5 still produces a typed no-response timeout; its narrowly scoped
+degraded state remains a provider limitation, not a fabricated success.
 
 ## WhatsApp contract
 
 Local webhook tests use canonical raw JSON bytes and compute real HMAC signatures.
 They cover verification challenge, wrong/missing signature, unknown and known
 senders, duplicates, durable acknowledgement, delivery callbacks, STOP/START, and
-retry after job failure. The live adapter has a versioned sender, service-window
-rules, idempotency, and an ambiguous-send guard. The production phone is verified,
-Cloud API is connected, callback subscriptions are active, and signed public ingress
-passes. Meta Business verification, approved OTP/insight templates, and a live
-outbound delivery receipt remain external activation gates.
+retry after job failure. The production-capable adapter has a versioned sender,
+service-window rules, idempotency, and an ambiguous-send guard. The current
+application release keeps `WHATSAPP_BACKEND=disabled`; it does not claim current
+phone verification, callback subscription, signed public ingress or outbound
+delivery. Meta Business verification, approved OTP/insight templates, and a live
+delivery receipt remain external activation gates.
 
 ### Meta test-sender lane
 
@@ -112,15 +118,17 @@ messages and OTPs continue to use the primary production sender. The test lane h
 code was sent, or substitute for an approved production authentication template.
 Keep the mode `disabled` when any identifier or subscription is uncertain.
 
-Read-only Graph checks confirm that the current test WABA and phone-number ID pair
-with the configured display number, and its app subscription list is non-empty.
-The sender reports `PENDING` and has five approved non-authentication templates but
+Historical predecessor read-only Graph checks confirmed that the then-configured
+test WABA and phone-number ID paired with the display number and that its app
+subscription list was non-empty. They were not rerun for the current application
+release.
+The sender reported `PENDING` with five approved non-authentication templates and
 zero authentication templates. Both attempted authentication-template create
-endpoints were denied with Graph code `10` and subcode `2388185`, so this is an
-external account/permission gate rather than application delivery evidence. No
-outbound message was sent. The lane remains reply-only with `supports_otp=false`
-and cannot satisfy OTP, proactive insight, authentication-template or delivery-
-receipt gates.
+endpoints were denied, so the historical result is an external account/permission
+gate rather than application delivery evidence. No outbound message was sent. The
+current release keeps the lane disabled; the design remains reply-only with
+`supports_otp=false` and cannot satisfy OTP, proactive insight,
+authentication-template or delivery-receipt gates.
 
 ## Agent contract
 
@@ -128,10 +136,13 @@ The fake agent returns deterministic, tenant-tagged responses and captures only 
 redacted context envelope. The Hermes runtime uses a pinned upstream-derived image,
 an authenticated private gateway per profile, staged profile directories, and a
 Hermes-only Anthropic secret. Contract tests cover authentication, lifecycle,
-redacted context, and profile isolation. All five production profiles pass
-authenticated health and each completed an explicitly authorized live Claude
-request through its own Hermes gateway. Forty foreign-profile gateway/control
-attempts were rejected, and an audited restart plus post-restart completion passed.
+redacted context, and profile isolation. Current production evidence records five
+authenticated profile-health checks and five live Claude requests from a synthetic
+prompt, with normal tenant-scoped redacted context retained inside Hermes and bodies
+omitted from evidence. All 20 current GET-only cross-profile gateway credential
+checks were rejected. Historical predecessor evidence separately records 40
+gateway/control rejections plus an audited restart and post-restart completion;
+those historical lifecycle checks are not relabelled as current-release evidence.
 WhatsApp routing and unrestricted launch readiness remain separate gates.
 
 Claude is the model provider through Hermes. The Anthropic key belongs only to the
@@ -149,8 +160,8 @@ and generated client. MSW handlers are not implemented. Twenty-six Playwright
 project checks exercise desktop/mobile public navigation, OTP-to-chat, fail-closed
 role boundaries, resumable operator onboarding, team mutation, Bumpa evidence,
 research filtering/report queueing, responsive navigation, accessibility, visual
-baselines and production nonce CSP. The exact-release web gate also passes 128
-unit/component tests across 23 files and a production build.
+baselines and production nonce CSP. The exact-release web gate also passes 171
+unit/component tests across 26 files and a production build.
 The separate `make integration` gate exercises the real FastAPI/Postgres path
 through the web proxy.
 

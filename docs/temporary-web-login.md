@@ -2,12 +2,15 @@
 
 ## Evidence state
 
-This document describes the temporary web-login boundary deployed in release
-`0ec2c58f8b0a26734ca08788787640dca1409821`. Exact-revision merged-main CI
-29333098858 passed 13/13 jobs, image publication 29333505495 passed 7/7 jobs, the
-six immutable indexes were promoted through the guarded two-phase procedure, and
-schema `0013_web_pin_challenges` is live. Older release evidence predates this
-feature and must not be used as proof of the current authentication boundary.
+This document describes the temporary web-login boundary carried by application
+release `c0c15443352ab84fde1d2edfde1ed0692ed842f6`. Exact-revision
+[merged-main CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
+passed 13/13 jobs,
+[image publication 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
+passed 7/7 jobs, all six immutable indexes were promoted through the guarded
+coordinator, and schema `0015_bumpa_store_context` is live. Older evidence may
+describe the initial feature rollout but predates this application boundary and
+current reverification.
 
 This is a containment mode while WhatsApp verification remains parked. It is not
 the long-term authentication design and it is not equivalent to per-user identity
@@ -17,11 +20,12 @@ proof.
 
 The live allowlist contains exactly five approved mapped collaborators. Redacted
 acceptance canaries proved mapped login and generic wrong/unmapped denial without
-recording any identity or credential. The country selector, national-number
-normalization and six-digit provider-free PIN form were exercised on desktop and
-mobile across the apex, admin and research login surfaces, including two different
-country prefixes. The authenticated apex chat and the role-gated admin and research
-destinations rendered without horizontal overflow.
+recording any identity or credential. The current in-app-browser audit exercised
+the public homepage/login, searchable flag/calling-code selector and national-number
+field at desktop and mobile widths without horizontal overflow. The separate
+production BFF matrix completed all 15 collaborator/surface sign-ins across apex,
+admin and research and reached each protected destination; it is HTTP/DOM contract
+evidence, not a retained authenticated screenshot set.
 
 Authentication remained separate from authorization: the apex accepted an active
 mapped membership, while admin and research access still required their independent
@@ -30,9 +34,8 @@ revoked by logout. After canary cleanup, the database contained zero active
 temporary challenges and zero active acceptance sessions.
 
 WhatsApp verification, test-sender verification and proactive/daily/weekly
-WhatsApp delivery remained disabled throughout. A redacted operational-state
-fingerprint was identical before and after the web-login canaries, so this evidence
-does not imply a Meta send, OTP or delivery receipt.
+WhatsApp delivery remained disabled throughout. This evidence does not imply a
+Meta send, OTP or delivery receipt.
 
 ## Authentication modes
 
@@ -261,11 +264,12 @@ make e2e-linux
 ```
 
 The exact command syntax is subordinate to the repository's pinned tool versions;
-CI is authoritative. For release `0ec2c58f8b0a26734ca08788787640dca1409821`,
+CI is authoritative. For application release
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6`,
 exact-SHA CI/image publication, migration-head proof, the five-mapping acceptance
-set, generic unmapped and wrong-PIN denials, role/host boundaries, unchanged
-WhatsApp operational state and public desktop/mobile browser checks are production
-evidence for this bounded web-login mode only.
+set, generic unmapped and wrong-PIN denials, role/host boundaries, disabled
+WhatsApp state and public desktop/mobile browser checks are production evidence for
+this bounded web-login mode only.
 
 Still unproven and outside this release decision are WhatsApp sender/template and
 delivery activation, per-user proof of phone possession, complete provider-backed
