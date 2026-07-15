@@ -12,7 +12,7 @@ RUN mkdir -p /out \
     && go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/gosu . \
     && /out/gosu --version
 
-FROM postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777 AS upstream
+FROM postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15 AS upstream
 
 COPY --from=gosu-builder /out/gosu /usr/local/bin/gosu
 COPY infra/postgres/init-app-role.sh /docker-entrypoint-initdb.d/10-app-role.sh
