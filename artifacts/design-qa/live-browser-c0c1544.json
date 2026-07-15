@@ -1,0 +1,47 @@
+{
+  "application_revision": "c0c15443352ab84fde1d2edfde1ed0692ed842f6",
+  "observed_on": "2026-07-15",
+  "method": "Read-only in-app browser DOM/console checks and HTTPS-to-source asset hash comparison",
+  "homepage_desktop": {
+    "viewport": [1280, 720],
+    "document_scroll_width": 1280,
+    "horizontal_overflow": false,
+    "brand_link_box": [157, 38],
+    "heading": "Know your business. Move with confidence.",
+    "console_warnings_or_errors": 0
+  },
+  "homepage_mobile": {
+    "viewport": [390, 844],
+    "document_scroll_width": 390,
+    "horizontal_overflow": false,
+    "visible_sign_in_actions": 3,
+    "console_warnings_or_errors": 0
+  },
+  "login": {
+    "desktop_horizontal_overflow": false,
+    "mobile_viewport": [390, 844],
+    "mobile_document_scroll_width": 390,
+    "mobile_horizontal_overflow": false,
+    "mobile_country_control_visible": true,
+    "mobile_phone_field_visible": true,
+    "mobile_submit_action_visible": true,
+    "country_options": 245,
+    "selected_calling_code": "+44",
+    "verified_flag_asset_class": "fi fi-in",
+    "verified_flag_calling_code": "+91",
+    "console_warnings_or_errors": 0
+  },
+  "public_asset_sha256": {
+    "/icon.svg": "c274de113d76c724311b2afbc576bc9dc6dd0e50120266e529353a4170199d44",
+    "/favicon.ico": "2921a3f2592bb9565e1c29bb31e2d70538feaf7c9c86e84dbe1b4d2c1d2d0593",
+    "/apple-icon.png": "8b883cac3966920f770c3e3ffb0a4c654af94780dbd76eb3d4c0077a77fafaa1",
+    "/brand/app-icon-192.png": "313022047b759b383366cd3498eb42d20e877d801a077f5e490bcfb36fdf46cc",
+    "/brand/app-icon-512.png": "9647d5caf34485ae2d75a14b80b30c4432a5629193b309d93cb0b9e431a9464f",
+    "/brand/maskable-icon-512.png": "9647d5caf34485ae2d75a14b80b30c4432a5629193b309d93cb0b9e431a9464f",
+    "/brand/social-card.png": "2ff91544ad4438534506ebdde49d294d39515098edbaa67a8d5329b3adb7cf47"
+  },
+  "asset_hash_match": {
+    "matched": 7,
+    "mismatched": 0
+  }
+}

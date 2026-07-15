@@ -3,10 +3,10 @@
 ## Safety boundary
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
-Hermes/Claude and the durable worker/scheduler runtime. Release
-`0ec2c58f8b0a26734ca08788787640dca1409821` is deployed on the branded
+Hermes/Claude and the durable worker/scheduler runtime. Application release
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6` is deployed on the branded
 `bumpabestie.com` hosts with all eight services at schema
-`0013_web_pin_challenges`. The current contained boundary uses temporary mapped-
+`0015_bumpa_store_context`. The current contained boundary uses temporary mapped-
 collaborator web sign-in while WhatsApp, Meta test-sender verification and
 proactive/daily/weekly delivery are disabled. Always confirm the actual boundary
 from `.deployed-release.json`, Compose state and
@@ -29,7 +29,7 @@ Never:
 
 The active temporary web-only release is documented in
 [`docs/temporary-web-login.md`](temporary-web-login.md) and evidenced in
-[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md). Its containment
+[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its containment
 boundary is
 `AUTH_LOGIN_MODE=temporary_static_pin`, `WHATSAPP_BACKEND=disabled`, disabled Meta
 test-sender verification, and disabled proactive/daily/weekly WhatsApp delivery.
@@ -99,7 +99,7 @@ During incident triage, compare redacted counts rather than raw identities:
 - eligible mapped users, successful and denied login audits;
 - active temporary challenges and locked/expired attempts;
 - WhatsApp outbound/outbox rows before and after the canary; and
-- service health, schema head `0013_web_pin_challenges` and the exact image SHA.
+- service health, schema head `0015_bumpa_store_context` and the exact image SHA.
 
 Any Meta send, a successful unmapped login, a non-expiring verifier, a verifier
 visible outside the API-only secret volume, or admin/research access without the
@@ -154,7 +154,8 @@ reconciled before another deployment or backup.
 
 The verified production snapshot has Caddy, web, API, worker, scheduler, Hermes,
 PostgreSQL and Redis running; all seven services with configured healthchecks are
-healthy, Caddy is running, and every service has zero restarts and zero OOM kills.
+healthy, Caddy is running, and accepted runtime samples have zero restarts and zero
+OOM kills.
 Caddy is 2.11.4 built with Go 1.26.5 and runs as UID 10001 with restricted
 capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The public, `www`, API, admin
 and research branded hosts are Cloudflare-proxied with Full (strict), Always Use
@@ -162,18 +163,24 @@ HTTPS, minimum TLS 1.2 and TLS 1.3 enabled; TLS 1.0/1.1 are rejected and `www`
 canonically redirects to the apex while preserving path/query. Dynamic web
 documents carry a unique nonce-based CSP. Readiness reports
 database/Redis/worker/scheduler `ok` and the intended provider selectors. Historical
-predecessor data-boundary evidence recorded all 23 tenant tables with ENABLE+FORCE
+data-boundary evidence recorded all 23 tenant tables with ENABLE+FORCE
 RLS and one policy each; its non-bypass application-role audit covered 115
 tenant/table contexts across 670 scoped rows with zero no-context or cross-tenant
-rows. Exact-release CI reran the RLS contracts, while the additive schema 0013
-migration introduced no tenant table or RLS change. The onboarding audit records
-five stores and exactly one approved operator/owner dual role. Historical
-predecessor evidence recorded five Hermes health/live-completion canaries, 40
-rejected foreign-profile gateway/control attempts, and an audited restart plus
-post-restart completion. Historical Bumpa evidence remains partial: stores 1–4
-returned 8/10 analytics datasets; degraded store 5 returned 7/10 because
-`products.overview` hit an upstream timeout/HTTP 504. Those provider canaries were
-not rerun for this web release. Missing values remain unavailable, not zero.
+rows. Exact-release CI reran the RLS contracts; schema 0015 adds the validated
+store-context and revision boundary without weakening RLS. The onboarding audit
+records five stores and exactly one approved operator/owner dual role. Current
+Hermes evidence records five live completions from a synthetic prompt through five
+active profiles, with normal tenant-scoped redacted context retained inside Hermes
+and bodies omitted from evidence; five authenticated same-profile health probes,
+20 rejected cross-profile gateway credential attempts and zero retained canary
+sessions also passed. Runtime/filesystem/context contracts supply the broader
+isolation evidence. Current Bumpa evidence records four
+accepted-partial stores at 8/10 analytics datasets plus orders. The fifth store is
+durably degraded at 7/10 plus orders because `products.overview` alone receives no
+provider response inside the scoped 90-second policy. Store 3's previously slow
+request now succeeds. The exact durable rows reconcile raw evidence, ten metrics
+per store, canonical orders/items, currencies, ranges, redaction and freshness.
+Missing or failed values remain unavailable, not zero.
 
 Historical read-only Graph checks confirmed that the configured Meta test WABA and
 test-sender ID were paired; the sender reported `PENDING` and had five approved
@@ -343,16 +350,17 @@ and resumes exactly the recorded service set even when backup creation fails. Al
 if no verified backup ID appears within the expected window or any service fails to
 resume.
 
-The predecessor release's local recovery points remain historical evidence. The
-active successor's guarded local backup is recorded in
-[`docs/release-evidence-0ec2c58.md`](release-evidence-0ec2c58.md): its five
-checksums replayed successfully and the format-3 manifest binds revision
-`0ec2c58f8b0a26734ca08788787640dca1409821`, schema
-`0013_web_pin_challenges` and the current exact backup digest. The recorded
-stability observation also passed: every container had at least 20 minutes of
-continuous uptime, five closing samples retained all eight identities, exact
-images/schema/readiness/public smoke/firewall/timers passed, and the bounded log
-review found no restart/OOM/severe/exit-signal event or promotion interlock.
+Older release recovery points remain historical evidence. The current application
+release's guarded local backup is recorded in
+[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md): its five
+checksums replayed successfully, its six-file inventory was exact, and the format-3
+manifest binds revision `c0c15443352ab84fde1d2edfde1ed0692ed842f6`, schema
+`0015_bumpa_store_context`, PostgreSQL/pg_dump 16.14 and the current exact backup
+digest. All eight services resumed with all seven configured healthchecks healthy.
+After the full post-backup 20-minute clock, five samples at 60-second spacing kept
+all eight identities/exact images, seven healthy checks, zero restart/OOM signals,
+schema/readiness healthy and bounded logs clean. Final origin/public smoke,
+timers, firewall/UFW and maintenance/interlocks also passed.
 Off-host durability and external alert delivery remain unconfigured until
 separately evidenced.
 
@@ -479,9 +487,11 @@ If readiness reports `BUMPA_BACKEND=disabled`, sync must be unavailable; treat a
 fabricated success as a critical configuration defect. When the selector is
 `bumpa`, use the procedure below.
 
-The current provider baseline is partial, not recovered: stores 1–4 return 8/10
-analytics datasets and degraded store 5 returns 7/10, with `products.overview`
-failing at the upstream boundary by timeout/HTTP 504. Do not close a Bumpa incident
+The current provider baseline is partial: stores 1–4 return accepted-partial 8/10
+analytics datasets plus orders, and Store 3's formerly slow `products.overview`
+succeeds under the exact 90-second policy. Degraded Store 5 returns 7/10 plus
+orders, with `products.overview` alone failing as a typed no-response provider
+timeout. Do not close a Bumpa incident
 or enable freshness-dependent behavior until the expected 10/10 dataset surface is
 restored and a redacted canonical/raw count reconciliation succeeds.
 
@@ -520,11 +530,12 @@ If readiness reports `WHATSAPP_BACKEND=disabled`, callback verification, inbound
 processing and OTP delivery must be unavailable; do not point Meta at that state or
 tell users an OTP was sent. When the selector is `meta`, use the procedure below.
 
-For the test lane, read-only Graph checks confirm the configured WABA/phone-number
-pair and a non-empty subscription list. The sender reports `PENDING`, five approved
-non-authentication templates and zero authentication templates; both auth-template
-create endpoints return code
-`10`/subcode `2388185`. This is a provider permission
+For the test lane, historical predecessor read-only Graph checks confirmed the
+then-configured account/phone pair and a non-empty subscription list. The sender
+reported `PENDING`, five approved non-authentication templates and zero
+authentication templates; both auth-template create endpoints returned a provider
+permission error. Those checks were not rerun for the current release and are not
+current sender evidence. This is a provider permission
 block: do not retry in a loop, claim OTP support, switch on proactive sends or use
 the reply-only sender as a production authentication substitute.
 
@@ -555,10 +566,13 @@ command, and has no Docker socket, host mount or root identity. Use a full
 service/container restart only when the profile-scoped control plane itself is
 unhealthy.
 
-All five mapped profiles have completed one live Claude request through Hermes. A
-failure to complete now is a regression from that baseline. Forty foreign-profile
-gateway/control attempts were rejected, and audited restart plus post-restart
-completion passed; these do not replace backup/restore or WhatsApp-routing canaries.
+All five mapped profiles have completed a current live Claude request from a
+synthetic prompt; normal tenant-scoped redacted context remained inside Hermes and
+bodies were omitted from evidence. A failure to complete now is a regression from
+that baseline. Current acceptance rejected 20 GET-only cross-profile gateway
+credential attempts. Historical predecessor evidence separately rejected 40
+gateway/control attempts and passed an audited restart plus post-restart
+completion. Neither replaces backup/restore or WhatsApp-routing canaries.
 
 1. Circuit-break only the affected profile and return a clear unavailable response.
 2. Verify tenant/profile mapping, private endpoint, authentication, process health,

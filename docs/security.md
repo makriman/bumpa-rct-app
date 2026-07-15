@@ -47,9 +47,10 @@ through connectors and compromised dependencies/images.
 
 ### Temporary web-only authentication
 
-The release candidate adds a deliberately temporary shared six-digit pilot PIN
-while WhatsApp authentication is parked. It is **implemented-tested but not yet
-production evidence**. Only an active user whose primary phone has an approved,
+The live contained release uses a deliberately temporary shared six-digit pilot
+PIN while WhatsApp authentication is parked. It is production-evidenced only for
+the five approved mapped collaborators and is not a long-term identity factor.
+Only an active user whose primary phone has an approved,
 non-opted-out mapping to an active tenant membership can receive a provider-free
 challenge; platform role alone is insufficient. Request/verification responses are
 generic, challenges are short-lived and single-use, attempt and Redis phone/IP
@@ -141,11 +142,14 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Delivery-hardening
-[PR 41](https://github.com/makriman/bumpa-rct-app/pull/41) and its CI run
-29290441375 passed 13/13 jobs. Protected-main CI 29290795169 passed 13/13 jobs and
-publish run 29291129708 passed 7/7 jobs for all six images deployed at release
-`b35762ab2a9d5c1a4956530cae63040354805510`. Redis remains pinned to its reviewed
+and SBOM, then scans each exact registry digest. Brand/data hardening
+[PR 49](https://github.com/makriman/bumpa-rct-app/pull/49), persistence
+[PR 51](https://github.com/makriman/bumpa-rct-app/pull/51), the final timeout
+[PR 52](https://github.com/makriman/bumpa-rct-app/pull/52), protected-main
+[CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
+and [publish run 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
+passed for all six images deployed at application release
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6`. Redis remains pinned to its reviewed
 upstream digest.
 
 ## Research governance
@@ -168,30 +172,41 @@ Critical branches—authorization, RLS, signature verification, dedupe, encrypti
 redaction and export permissions—target complete branch coverage. See
 `docs/verification.md` for claim status and evidence locations.
 
-The current production audit confirms ENABLE+FORCE RLS and one policy on all 23
-tenant tables. Its non-bypass application role exercised 115 tenant/table contexts
-across 670 scoped rows and returned zero rows without tenant context and zero
-cross-tenant rows. All eight services are running, all seven configured
-healthchecks are healthy, and every service has zero restarts and zero OOM kills.
+Historical predecessor production evidence confirms ENABLE+FORCE RLS and one
+policy on all 23 tenant tables. Its non-bypass application role exercised 115
+tenant/table contexts across 670 scoped rows and returned zero rows without tenant
+context and zero cross-tenant rows. Current exact-release CI reran the RLS
+contracts; schema-0015 store-boundary reconciliation adds current production
+evidence without relabelling that historical full-catalog audit. All eight services
+are running, all seven configured healthchecks are healthy, and accepted runtime
+samples show zero restarts and zero OOM kills.
 
 All five branded records are Cloudflare-proxied with Full (strict), Always Use
 HTTPS, minimum TLS 1.2 and TLS 1.3 enabled. External probes reject TLS 1.0/1.1 on
 every host. The edge strips spoofed nonce/CSP inputs; request-rendered documents use
 unique nonce-bearing CSP without script `unsafe-inline` or `unsafe-eval`, suppress
-the internal nonce header, and are marked `private, no-store`.
+the internal nonce header, and are marked `private, no-store`. Five public routes
+carry route-specific canonical/OG/Twitter metadata; the homepage additionally
+carries nonce-bearing JSON-LD. Private login,
+workspace, admin and research surfaces enforce `X-Robots-Tag: noindex` even though
+their shared document shell retains the public default meta tag.
 
-Live-provider evidence does not broaden authorization. Five Hermes profiles have
-completed one live Claude request each. Forty cross-profile gateway/lifecycle
-attempts were rejected, an audited demo-profile restart recovered, a post-restart
-Claude completion succeeded, and all profiles returned healthy with no Hermes
-system errors; WhatsApp channel routing remains unproven. Bumpa is partial at 8/10
-analytics datasets for stores 1–4 and 7/10 for degraded store 5;
-`products.overview` timed out/returned HTTP 504. Redacted raw/metric/canonical
-counts reconcile for all five runs, but the provider still does not supply 10/10.
-The subscribed Meta test lane reports `PENDING`, has five approved
-non-authentication templates but zero authentication templates, remains reply-only
-with `supports_otp=false`, and sent no outbound message after both auth-template
-create paths were denied with Graph code `10`/subcode `2388185`. The Meta sender is
-not OTP- or launch-ready. `OFFSITE_BACKUP_SCRIPT` is unset, external alert delivery
-is absent, and formal privacy/retention approval remains an open security and
-governance gate.
+Live-provider evidence does not broaden authorization. Five Hermes profiles each
+completed a current live Claude request from a synthetic prompt; normal
+tenant-scoped redacted context remained inside Hermes and prompt/response bodies
+were omitted from evidence. Five same-profile health checks passed, and all 20
+cross-profile gateway credential attempts were rejected; cleanup left zero active
+canary sessions and no new Hermes errors. WhatsApp channel routing remains
+unproven. Bumpa is accepted partial at 8/10 analytics datasets plus orders for
+stores 1–4 and degraded at 7/10 plus orders for store 5. Store 3's slow
+`products.overview` succeeds under the scoped 90-second policy; the same dataset
+alone receives no provider response for store 5 inside that boundary. Current raw
+evidence, 50 metric snapshots, canonical orders/items, ranges, currency, redaction
+and freshness reconcile, but the provider still does not supply 10/10.
+Historical predecessor Graph evidence reported the Meta test lane `PENDING`, with
+five approved non-authentication templates, zero authentication templates and both
+auth-template create paths denied. It was not rerun for this application release
+and is not current sender evidence. WhatsApp is disabled, and no outbound message,
+OTP or receipt is claimed. The Meta sender is not OTP- or launch-ready.
+`OFFSITE_BACKUP_SCRIPT` is unset, external alert delivery is absent, and formal
+privacy/retention approval remains an open security and governance gate.
