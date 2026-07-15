@@ -22,10 +22,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_SECRET_FILE = Path.cwd() / "bumpa bestie secrets.md"
 DEFAULT_HOST = "root@165.227.228.20"
@@ -83,6 +85,8 @@ class Store:
     api_key: str
     business_id: str
     owner_phone: str
+    store_timezone: str
+    store_currency: str
 
     @property
     def slug(self) -> str:
@@ -251,6 +255,8 @@ with SessionLocal() as db:
             or connection.provider != "bumpa"
             or connection.scope_type != "business_id"
             or connection.scope_id != store.get("business_id")
+            or connection.store_timezone != store.get("store_timezone")
+            or connection.store_currency != store.get("store_currency")
             or hmac.compare_digest(connection.encrypted_api_key, store.get("api_key", ""))
         ):
             raise RuntimeError("bumpa_connection_invariant_failed")
@@ -355,13 +361,36 @@ def _read_inputs(path: Path, *, allow_operator_owner_overlap: bool = False) -> I
             str(raw_business_id) if isinstance(raw_business_id, (str, int)) else ""
         )
         owner_phone = mappings.get(business_id, "")
+        raw_store_timezone = payload.get("store_timezone")
+        raw_store_currency = payload.get("store_currency")
+        store_timezone = (
+            raw_store_timezone if isinstance(raw_store_timezone, str) else ""
+        )
+        store_currency = (
+            raw_store_currency.upper() if isinstance(raw_store_currency, str) else ""
+        )
         if not isinstance(api_key, str) or len(api_key) < 8:
             raise OpsError("bumpa_api_key_missing_or_invalid")
         if not BUSINESS_ID_RE.fullmatch(business_id):
             raise OpsError("bumpa_business_id_missing_or_invalid")
         if not E164_RE.fullmatch(owner_phone):
             raise OpsError("owner_phone_missing_or_invalid")
-        stores.append(Store(index, api_key, business_id, owner_phone))
+        try:
+            ZoneInfo(store_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise OpsError("bumpa_store_timezone_missing_or_invalid") from exc
+        if not re.fullmatch(r"[A-Z]{3}", store_currency):
+            raise OpsError("bumpa_store_currency_missing_or_invalid")
+        stores.append(
+            Store(
+                index,
+                api_key,
+                business_id,
+                owner_phone,
+                store_timezone,
+                store_currency,
+            )
+        )
 
     business_ids = {store.business_id for store in stores}
     api_keys = {store.api_key for store in stores}
@@ -442,7 +471,12 @@ def _onboard_bundle(inputs: Inputs, store: Store, *, apply: bool) -> dict[str, A
             "bootstrap_if_missing": True,
             "platform_role": "superadmin",
         },
-        "bumpa": {"api_key": store.api_key, "business_id": store.business_id},
+        "bumpa": {
+            "api_key": store.api_key,
+            "business_id": store.business_id,
+            "store_timezone": store.store_timezone,
+            "store_currency": store.store_currency,
+        },
         "apply": apply,
     }
     if apply:
@@ -524,6 +558,8 @@ def audit_onboarding(inputs: Inputs, host: str) -> None:
                 "business_id": store.business_id,
                 "api_key": store.api_key,
                 "owner_phone": store.owner_phone,
+                "store_timezone": store.store_timezone,
+                "store_currency": store.store_currency,
             }
             for store in inputs.stores
         ],
@@ -658,6 +694,8 @@ def _validate_api_base(value: str) -> None:
 
 def _validate_completed_sync_run(
     completed_run: dict[str, Any],
+    *,
+    allowed_dataset_errors: frozenset[str] = frozenset(),
 ) -> tuple[str, str, int, int, int]:
     run_id = completed_run.get("id")
     status = completed_run.get("status")
@@ -689,6 +727,8 @@ def _validate_completed_sync_run(
     errors = {key for key, value in datasets.items() if value == "error"}
     if unavailable - OPTIONAL_UNAVAILABLE_SYNC_DATASETS:
         raise OpsError("bumpa_sync_required_dataset_unavailable")
+    if errors - allowed_dataset_errors:
+        raise OpsError("bumpa_sync_dataset_error")
     expected_status = "partial" if unavailable or errors else "success"
     if status != expected_status:
         raise OpsError("bumpa_sync_run_status_mismatch")
@@ -712,6 +752,100 @@ def _validate_completed_sync_run(
         len(unavailable),
         len(errors),
     )
+
+
+def _validate_allowed_dataset_error_evidence(
+    host: str,
+    *,
+    tenant_id: str,
+    run_id: str,
+    expected_errors: frozenset[str],
+) -> None:
+    if not expected_errors:
+        return
+    program = r"""
+import json, sys
+from sqlalchemy import select
+from app.db.models import BumpaRawResponse
+from app.db.session import SessionLocal, set_security_context
+
+request = json.load(sys.stdin)
+expected = set(request["expected_errors"])
+with SessionLocal() as db:
+    set_security_context(db, privileged=True)
+    rows = db.execute(
+        select(
+            BumpaRawResponse.resource,
+            BumpaRawResponse.dataset,
+            BumpaRawResponse.http_status,
+            BumpaRawResponse.availability,
+            BumpaRawResponse.failure_kind,
+        ).where(
+            BumpaRawResponse.tenant_id == request["tenant_id"],
+            BumpaRawResponse.sync_run_id == request["run_id"],
+        )
+    ).all()
+result = []
+for resource, dataset, http_status, availability, failure_kind in rows:
+    key = f"{resource}.{dataset}" if dataset is not None else resource
+    if key in expected:
+        result.append({
+            "dataset": key,
+            "http_status": http_status,
+            "availability": availability,
+            "failure_kind": failure_kind,
+        })
+print(json.dumps({"rows": result}, sort_keys=True))
+""".strip()
+    payload = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "run_id": run_id,
+            "expected_errors": sorted(expected_errors),
+        },
+        separators=(",", ":"),
+    ).encode()
+    raw = _remote_api_python(host, program, payload)
+    try:
+        result = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OpsError("bumpa_sync_error_evidence_invalid") from exc
+    rows = result.get("rows") if isinstance(result, dict) else None
+    if not isinstance(rows, list) or len(rows) != len(expected_errors):
+        raise OpsError("bumpa_sync_error_evidence_invalid")
+    evidence: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("dataset"), str):
+            raise OpsError("bumpa_sync_error_evidence_invalid")
+        dataset = row["dataset"]
+        if dataset in evidence:
+            raise OpsError("bumpa_sync_error_evidence_invalid")
+        evidence[dataset] = row
+    if set(evidence) != expected_errors:
+        raise OpsError("bumpa_sync_error_evidence_invalid")
+    for row in evidence.values():
+        failure_kind = row.get("failure_kind")
+        http_status = row.get("http_status")
+        if row.get("availability") != "error":
+            raise OpsError("bumpa_sync_error_evidence_invalid")
+        if failure_kind == "timeout" and http_status is None:
+            continue
+        if (
+            failure_kind == "upstream_http"
+            and isinstance(http_status, int)
+            and not isinstance(http_status, bool)
+            and 500 <= http_status <= 599
+        ):
+            continue
+        raise OpsError("bumpa_sync_error_evidence_invalid")
+
+
+def _parse_dataset_error_allowance(value: str) -> tuple[int, str]:
+    if value != "5:products.overview":
+        raise argparse.ArgumentTypeError(
+            "the only approved release exception is 5:products.overview"
+        )
+    return 5, "products.overview"
 
 
 def _tenant_ids(inputs: Inputs, host: str, api_base: str) -> dict[str, str]:
@@ -840,9 +974,20 @@ def provision_hermes(
             print(f"owner_session_{store.index}=revoked;session_id={session_id}")
 
 
-def bumpa_sync_canaries(inputs: Inputs, host: str, api_base: str) -> None:
+def bumpa_sync_canaries(
+    inputs: Inputs,
+    host: str,
+    api_base: str,
+    *,
+    allowed_dataset_errors: Mapping[int, frozenset[str]] | None = None,
+) -> None:
     tenant_ids = _tenant_ids(inputs, host, api_base)
     for store in inputs.stores:
+        store_allowed_errors = (
+            allowed_dataset_errors.get(store.index, frozenset())
+            if allowed_dataset_errors is not None
+            else frozenset()
+        )
         tenant_id = tenant_ids[store.slug]
         token, session_id = _issue_session(
             host, phone=store.owner_phone, kind="owner", tenant_id=tenant_id
@@ -930,8 +1075,24 @@ def bumpa_sync_canaries(inputs: Inputs, host: str, api_base: str) -> None:
             ):
                 raise OpsError("bumpa_sync_run_range_mismatch")
             run_id, status, available, unavailable, errors = (
-                _validate_completed_sync_run(completed_run)
+                _validate_completed_sync_run(
+                    completed_run,
+                    allowed_dataset_errors=store_allowed_errors,
+                )
             )
+            if errors:
+                dataset_results = completed_run["dataset_results"]
+                if not isinstance(dataset_results, dict):
+                    raise OpsError("bumpa_sync_dataset_set_invalid")
+                actual_error_datasets = frozenset(
+                    key for key, value in dataset_results.items() if value == "error"
+                )
+                _validate_allowed_dataset_error_evidence(
+                    host,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    expected_errors=actual_error_datasets,
+                )
             print(
                 f"bumpa_sync_{store.index}={status};tenant_id={tenant_id};run_id={run_id};"
                 f"datasets_available={available};datasets_unavailable={unavailable};"
@@ -957,6 +1118,17 @@ def main() -> int:
         "--live-chat",
         action="store_true",
         help="Run one real Hermes/Claude response canary per tenant after readiness",
+    )
+    parser.add_argument(
+        "--allow-dataset-error",
+        action="append",
+        type=_parse_dataset_error_allowance,
+        default=[],
+        metavar="STORE:DATASET",
+        help=(
+            "Explicitly accept the approved Store 5 products.overview transient "
+            "upstream error; all other errors still fail"
+        ),
     )
     parser.add_argument(
         "--allow-operator-owner-overlap",
@@ -991,7 +1163,18 @@ def main() -> int:
         if args.action in {"hermes", "all"}:
             provision_hermes(inputs, args.host, args.api_base, live_chat=args.live_chat)
         if args.action in {"sync", "all"}:
-            bumpa_sync_canaries(inputs, args.host, args.api_base)
+            allowed_dataset_errors: dict[int, set[str]] = {}
+            for store_index, dataset in args.allow_dataset_error:
+                allowed_dataset_errors.setdefault(store_index, set()).add(dataset)
+            bumpa_sync_canaries(
+                inputs,
+                args.host,
+                args.api_base,
+                allowed_dataset_errors={
+                    store_index: frozenset(datasets)
+                    for store_index, datasets in allowed_dataset_errors.items()
+                },
+            )
         return 0
     except OpsError as exc:
         print(f"operation=failed;reason={exc}", file=sys.stderr)

@@ -4,7 +4,7 @@ import hmac
 import json
 from collections.abc import Callable
 from datetime import date
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,7 @@ from app.providers.hermes_control import HermesControlClient
 from app.providers.local import local_profile_key
 from app.services.admin_operations import mask_phone
 from app.services.audit import audit
+from app.services.bumpa_connections import BumpaBoundaryInput, replace_bumpa_connection
 from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
 from app.services.production_readiness import (
     ProductionReadiness,
@@ -64,8 +65,20 @@ from app.services.production_readiness import (
 )
 
 ReadinessChecker = Callable[[Settings], ProductionReadiness]
-BumpaClientFactory = Callable[[str, str, str], BumpaClient]
 HermesControlFactory = Callable[[Settings], HermesControlClient]
+
+
+class BumpaClientFactory(Protocol):
+    def __call__(
+        self,
+        api_key: str,
+        scope_type: str,
+        scope_id: str,
+        *,
+        store_timezone: str,
+        store_currency: str,
+    ) -> BumpaClient: ...
+
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "dead_letter", "cancelled"})
 
@@ -444,7 +457,11 @@ class OnboardingService:
                 raise OnboardingError("providers_not_ready")
             try:
                 with self._bumpa_client_factory(
-                    api_key, payload.scope_type, payload.scope_id
+                    api_key,
+                    payload.scope_type,
+                    payload.scope_id,
+                    store_timezone=payload.store_timezone,
+                    store_currency=payload.store_currency,
                 ) as client:
                     client.verify()
             except (BumpaProviderError, ValueError) as error:
@@ -472,24 +489,42 @@ class OnboardingService:
 
         encrypted = FieldCipher.from_settings(self.settings).encrypt(api_key)
         connection = db.scalar(
-            select(BumpaConnection).where(BumpaConnection.tenant_id == saga.tenant_id)
+            select(BumpaConnection)
+            .where(BumpaConnection.tenant_id == saga.tenant_id)
+            .with_for_update()
         )
         if connection is not None:
             if (
                 connection.scope_type != payload.scope_type
                 or connection.scope_id != payload.scope_id
+                or connection.store_timezone != payload.store_timezone
+                or connection.store_currency != payload.store_currency
                 or connection.provider != provider
             ):
                 raise OnboardingError("bumpa_connection_conflict")
-            connection.encrypted_api_key = encrypted
-            connection.status = "active"
-            connection.last_error = None
+            # Resumable onboarding permits only verified credential rotation on
+            # the exact same logical store boundary. The shared writer policy
+            # therefore preserves current evidence and its boundary revision.
+            replace_bumpa_connection(
+                db,
+                connection,
+                encrypted_api_key=encrypted,
+                boundary=BumpaBoundaryInput(
+                    scope_type=payload.scope_type,
+                    scope_id=payload.scope_id,
+                    store_timezone=payload.store_timezone,
+                    store_currency=payload.store_currency,
+                    provider=provider,
+                ),
+            )
         else:
             candidate = BumpaConnection(
                 tenant_id=saga.tenant_id,
                 encrypted_api_key=encrypted,
                 scope_type=payload.scope_type,
                 scope_id=payload.scope_id,
+                store_timezone=payload.store_timezone,
+                store_currency=payload.store_currency,
                 provider=provider,
                 status="active",
             )
@@ -500,15 +535,31 @@ class OnboardingService:
                 connection = candidate
             except IntegrityError:
                 connection = db.scalar(
-                    select(BumpaConnection).where(BumpaConnection.tenant_id == saga.tenant_id)
+                    select(BumpaConnection)
+                    .where(BumpaConnection.tenant_id == saga.tenant_id)
+                    .with_for_update()
                 )
                 if (
                     connection is None
                     or connection.scope_type != payload.scope_type
                     or connection.scope_id != payload.scope_id
+                    or connection.store_timezone != payload.store_timezone
+                    or connection.store_currency != payload.store_currency
                     or connection.provider != provider
                 ):
                     raise OnboardingError("bumpa_connection_conflict") from None
+                replace_bumpa_connection(
+                    db,
+                    connection,
+                    encrypted_api_key=encrypted,
+                    boundary=BumpaBoundaryInput(
+                        scope_type=payload.scope_type,
+                        scope_id=payload.scope_id,
+                        store_timezone=payload.store_timezone,
+                        store_currency=payload.store_currency,
+                        provider=provider,
+                    ),
+                )
 
         saga.bumpa_connection_id = connection.id
         self._advance(
@@ -531,6 +582,8 @@ class OnboardingService:
                 "provider": provider,
                 "scope_type": payload.scope_type,
                 "scope_id_last4": payload.scope_id[-4:],
+                "store_timezone": payload.store_timezone,
+                "store_currency": payload.store_currency,
                 "revision": saga.revision,
             },
         )
@@ -586,6 +639,13 @@ class OnboardingService:
         self._require_step(saga, "initial_sync", expected_revision)
         if saga.bumpa_connection_id is None:
             raise OnboardingError("completion_requirements_not_met")
+        connection = db.get(BumpaConnection, saga.bumpa_connection_id)
+        if (
+            connection is None
+            or connection.tenant_id != saga.tenant_id
+            or connection.status != "active"
+        ):
+            raise OnboardingError("completion_requirements_not_met")
 
         previous_job = (
             db.get(AsyncJob, saga.initial_sync_job_id)
@@ -602,6 +662,7 @@ class OnboardingService:
         job_payload = {
             "tenant_id": saga.tenant_id,
             "connection_id": saga.bumpa_connection_id,
+            "boundary_revision": connection.boundary_revision,
             "date_from": payload.date_from.isoformat(),
             "date_to": payload.date_to.isoformat(),
         }
@@ -1258,10 +1319,15 @@ class OnboardingService:
         except (KeyError, TypeError, ValueError):
             return None
         return db.scalar(
-            select(BumpaSyncRun).where(
+            select(BumpaSyncRun)
+            .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
+            .where(
                 BumpaSyncRun.id == run_id,
                 BumpaSyncRun.tenant_id == saga.tenant_id,
                 BumpaSyncRun.bumpa_connection_id == saga.bumpa_connection_id,
+                BumpaConnection.tenant_id == saga.tenant_id,
+                BumpaConnection.status == "active",
+                BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
                 BumpaSyncRun.requested_from == requested_from,
                 BumpaSyncRun.requested_to == requested_to,
                 usable_bumpa_sync_run_predicate(),
@@ -1311,10 +1377,15 @@ class OnboardingService:
         except (KeyError, TypeError, ValueError):
             return None
         run = db.scalar(
-            select(BumpaSyncRun).where(
+            select(BumpaSyncRun)
+            .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
+            .where(
                 BumpaSyncRun.id == saga.initial_sync_run_id,
                 BumpaSyncRun.tenant_id == saga.tenant_id,
                 BumpaSyncRun.bumpa_connection_id == saga.bumpa_connection_id,
+                BumpaConnection.tenant_id == saga.tenant_id,
+                BumpaConnection.status == "active",
+                BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
                 usable_bumpa_sync_run_predicate(),
             )
         )
@@ -1396,6 +1467,8 @@ class OnboardingService:
                     provider=connection.provider,
                     scope_type=connection.scope_type,
                     scope_id_last4=connection.scope_id[-4:],
+                    store_timezone=connection.store_timezone,
+                    store_currency=connection.store_currency,
                     status=connection.status,
                 )
 
@@ -1437,6 +1510,8 @@ class OnboardingService:
                 slug=tenant.slug,
                 name=tenant.name,
                 status=tenant.status,
+                timezone=tenant.timezone,
+                currency_code=tenant.currency_code,
             ),
             owner=owner,
             phone=phone_view,

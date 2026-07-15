@@ -29,6 +29,8 @@ class BumpaConnectionStatusView(BaseModel):
     status: str
     scope_type: str | None
     scope_id_last4: str | None
+    store_timezone: str | None
+    store_currency: str | None
     provider: str | None
     last_successful_sync_at: datetime | None
     last_failed_sync_at: datetime | None

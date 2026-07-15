@@ -78,6 +78,8 @@ def seed_demo(db: Session, settings: Settings) -> None:
                 encrypted_api_key=cipher.encrypt("local-demo-bumpa-key"),
                 scope_type="business_id",
                 scope_id="demo-business",
+                store_timezone="Africa/Lagos",
+                store_currency="NGN",
                 provider="local",
             ),
             BumpaConnection(
@@ -85,6 +87,8 @@ def seed_demo(db: Session, settings: Settings) -> None:
                 encrypted_api_key=cipher.encrypt("local-other-bumpa-key"),
                 scope_type="business_id",
                 scope_id="other-business",
+                store_timezone="Africa/Lagos",
+                store_currency="NGN",
                 provider="local",
             ),
             HermesProfile(

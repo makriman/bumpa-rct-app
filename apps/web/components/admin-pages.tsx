@@ -489,6 +489,8 @@ export function TenantDetail({ id }: { id: string }) {
         status: "not_connected",
         scope_type: null,
         scope_id_last4: null,
+        store_timezone: null,
+        store_currency: null,
         provider: null,
         last_successful_sync_at: null,
         last_failed_sync_at: null,
@@ -543,6 +545,8 @@ export function TenantDetail({ id }: { id: string }) {
     api_key: "",
     scope_type: "business_id",
     scope_id: "",
+    store_timezone: "Africa/Lagos",
+    store_currency: "NGN",
   });
   const tenant = resource.data;
 
@@ -661,7 +665,13 @@ export function TenantDetail({ id }: { id: string }) {
       });
       await operations.reload();
       setModal(null);
-      setBumpaForm({ api_key: "", scope_type: "business_id", scope_id: "" });
+      setBumpaForm({
+        api_key: "",
+        scope_type: "business_id",
+        scope_id: "",
+        store_timezone: tenant.timezone,
+        store_currency: tenant.currency_code,
+      });
       setToast(
         "Bumpa connection verified. The API key is no longer displayed.",
       );
@@ -1004,6 +1014,14 @@ export function TenantDetail({ id }: { id: string }) {
                     : "Not set",
                 ],
                 [
+                  "Store timezone",
+                  operations.data?.bumpa.store_timezone ?? "Not set",
+                ],
+                [
+                  "Store currency",
+                  operations.data?.bumpa.store_currency ?? "Not set",
+                ],
+                [
                   "Last successful sync",
                   formatDate(operations.data?.bumpa.last_successful_sync_at),
                 ],
@@ -1020,7 +1038,20 @@ export function TenantDetail({ id }: { id: string }) {
               <button
                 className="button button-secondary"
                 disabled={operations.source !== "live"}
-                onClick={() => setModal("bumpa")}
+                onClick={() => {
+                  setBumpaForm((current) => ({
+                    ...current,
+                    store_timezone:
+                      operations.data?.bumpa.store_timezone ??
+                      tenant?.timezone ??
+                      "Africa/Lagos",
+                    store_currency:
+                      operations.data?.bumpa.store_currency ??
+                      tenant?.currency_code ??
+                      "NGN",
+                  }));
+                  setModal("bumpa");
+                }}
                 style={{ marginTop: 16 }}
               >
                 {operations.data?.bumpa.connected
@@ -1400,7 +1431,11 @@ export function TenantDetail({ id }: { id: string }) {
               <button
                 className="button button-primary"
                 disabled={
-                  saving || !bumpaForm.api_key || !bumpaForm.scope_id.trim()
+                  saving ||
+                  !bumpaForm.api_key ||
+                  !bumpaForm.scope_id.trim() ||
+                  !bumpaForm.store_timezone.trim() ||
+                  bumpaForm.store_currency.length !== 3
                 }
                 onClick={() => void saveBumpa()}
               >
@@ -1459,6 +1494,43 @@ export function TenantDetail({ id }: { id: string }) {
                 }))
               }
             />
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-bumpa-timezone">Store timezone</label>
+            <input
+              id="tenant-bumpa-timezone"
+              className="input"
+              value={bumpaForm.store_timezone}
+              onChange={(event) =>
+                setBumpaForm((current) => ({
+                  ...current,
+                  store_timezone: event.target.value,
+                }))
+              }
+              aria-describedby="tenant-bumpa-timezone-help"
+            />
+            <span className="field-help" id="tenant-bumpa-timezone-help">
+              IANA timezone used for Bumpa reporting-day boundaries.
+            </span>
+          </div>
+          <div className="field">
+            <label htmlFor="tenant-bumpa-currency">Store currency</label>
+            <input
+              id="tenant-bumpa-currency"
+              className="input"
+              maxLength={3}
+              value={bumpaForm.store_currency}
+              onChange={(event) =>
+                setBumpaForm((current) => ({
+                  ...current,
+                  store_currency: event.target.value.toUpperCase(),
+                }))
+              }
+              aria-describedby="tenant-bumpa-currency-help"
+            />
+            <span className="field-help" id="tenant-bumpa-currency-help">
+              Three-letter code used to validate monetary data.
+            </span>
           </div>
         </Modal>
       )}
@@ -2650,6 +2722,8 @@ type OnboardingForm = {
   phoneLabel: string;
   bumpaApiKey: string;
   bumpaScopeId: string;
+  bumpaTimezone: string;
+  bumpaCurrency: string;
 };
 
 type BumpaConnectionResult = {
@@ -2685,6 +2759,8 @@ export function Onboarding() {
     phoneLabel: "Owner",
     bumpaApiKey: "",
     bumpaScopeId: "",
+    bumpaTimezone: "Africa/Lagos",
+    bumpaCurrency: "NGN",
   });
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [owner, setOwner] = useState<{
@@ -2757,6 +2833,8 @@ export function Onboarding() {
               api_key: form.bumpaApiKey,
               scope_type: bumpaScopeType,
               scope_id: form.bumpaScopeId,
+              store_timezone: form.bumpaTimezone,
+              store_currency: form.bumpaCurrency,
               provider: "bumpa",
             }),
           },
@@ -3009,6 +3087,46 @@ export function Onboarding() {
                           update("bumpaScopeId", event.target.value)
                         }
                       />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="bumpa-timezone">Store timezone</label>
+                      <input
+                        id="bumpa-timezone"
+                        className="input"
+                        required
+                        autoComplete="off"
+                        disabled={busy}
+                        value={form.bumpaTimezone}
+                        onChange={(event) =>
+                          update("bumpaTimezone", event.target.value)
+                        }
+                        aria-describedby="bumpa-timezone-help"
+                      />
+                      <span className="field-help" id="bumpa-timezone-help">
+                        IANA timezone used for Bumpa reporting-day boundaries.
+                      </span>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="bumpa-currency">Store currency</label>
+                      <input
+                        id="bumpa-currency"
+                        className="input"
+                        required
+                        maxLength={3}
+                        autoComplete="off"
+                        disabled={busy}
+                        value={form.bumpaCurrency}
+                        onChange={(event) =>
+                          update(
+                            "bumpaCurrency",
+                            event.target.value.toUpperCase(),
+                          )
+                        }
+                        aria-describedby="bumpa-currency-help"
+                      />
+                      <span className="field-help" id="bumpa-currency-help">
+                        Three-letter code used to validate monetary data.
+                      </span>
                     </div>
                   </div>
                   <div className="alert alert-info">

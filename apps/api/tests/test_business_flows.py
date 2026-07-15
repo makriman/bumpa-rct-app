@@ -84,6 +84,8 @@ def test_admin_can_onboard_tenant_and_all_mutations_are_audited(client: TestClie
             "api_key": "local-key",
             "scope_type": "business_id",
             "scope_id": "new-shop-id",
+            "store_timezone": "Africa/Lagos",
+            "store_currency": "NGN",
             "provider": "local",
         },
     )

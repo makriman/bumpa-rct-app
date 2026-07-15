@@ -8,7 +8,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.db.models import BumpaMetricSnapshot, BumpaSyncRun
+from app.db.models import BumpaConnection, BumpaMetricSnapshot, BumpaSyncRun
 
 
 @dataclass(frozen=True)
@@ -33,9 +33,7 @@ def usable_bumpa_sync_run_predicate() -> ColumnElement[bool]:
             and_(
                 BumpaSyncRun.status == "partial",
                 BumpaSyncRun.completion_quality == "accepted_partial",
-                BumpaSyncRun.partial_reason.in_(
-                    ("profit_not_calculable", "optional_dataset_unavailable")
-                ),
+                BumpaSyncRun.partial_reason == "profit_not_calculable",
                 BumpaSyncRun.orders_availability == "available",
                 BumpaSyncRun.orders_count.is_not(None),
             ),
@@ -69,6 +67,10 @@ def latest_available_metrics(
         BumpaSyncRun.finished_at.is_not(None),
         BumpaSyncRun.status.in_(("success", "partial")),
         BumpaSyncRun.completion_quality.in_(("complete", "accepted_partial", "degraded")),
+        BumpaConnection.tenant_id == tenant_id,
+        BumpaConnection.status == "active",
+        BumpaSyncRun.bumpa_connection_id == BumpaConnection.id,
+        BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
     ]
     requested_keys = tuple(metric_keys or ())
     if requested_keys:
@@ -87,6 +89,7 @@ def latest_available_metrics(
             .label("freshness_rank"),
         )
         .join(BumpaSyncRun, BumpaSyncRun.id == BumpaMetricSnapshot.sync_run_id)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
         .where(*filters)
         .subquery()
     )
@@ -116,11 +119,16 @@ def latest_complete_orders_run(
         BumpaSyncRun.status.in_(("success", "partial")),
         BumpaSyncRun.orders_availability == "available",
         BumpaSyncRun.orders_count.is_not(None),
+        BumpaConnection.tenant_id == tenant_id,
+        BumpaConnection.status == "active",
+        BumpaSyncRun.bumpa_connection_id == BumpaConnection.id,
+        BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
     ]
     if as_of is not None:
         filters.append(BumpaSyncRun.finished_at <= as_of)
     return db.scalar(
         select(BumpaSyncRun)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
         .where(*filters)
         .order_by(BumpaSyncRun.finished_at.desc(), BumpaSyncRun.id.desc())
         .limit(1)

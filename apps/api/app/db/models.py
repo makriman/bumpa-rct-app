@@ -161,8 +161,23 @@ class BumpaConnection(IdMixin, TimestampMixin, Base):
             name="ck_bumpa_connections_sync_generation_nonnegative",
         ),
         CheckConstraint(
+            "boundary_revision > 0",
+            name="ck_bumpa_connections_boundary_revision_positive",
+        ),
+        CheckConstraint(
             "published_sync_generation >= 0 AND published_sync_generation <= sync_generation",
             name="ck_bumpa_connections_published_generation_valid",
+        ),
+        CheckConstraint(
+            "length(store_timezone) BETWEEN 1 AND 64",
+            name="ck_bumpa_connections_store_timezone_length",
+        ),
+        CheckConstraint(
+            "length(store_currency) = 3 AND store_currency = upper(store_currency) "
+            "AND substr(store_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(store_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(store_currency, 3, 1) BETWEEN 'A' AND 'Z'",
+            name="ck_bumpa_connections_store_currency",
         ),
         UniqueConstraint("tenant_id"),
     )
@@ -171,8 +186,13 @@ class BumpaConnection(IdMixin, TimestampMixin, Base):
     encrypted_api_key: Mapped[str] = mapped_column(Text)
     scope_type: Mapped[str] = mapped_column(String(24))
     scope_id: Mapped[str] = mapped_column(String(160))
+    store_timezone: Mapped[str] = mapped_column(
+        String(64), default="Africa/Lagos", server_default="Africa/Lagos"
+    )
+    store_currency: Mapped[str] = mapped_column(String(3), default="NGN", server_default="NGN")
     provider: Mapped[str] = mapped_column(String(24), default="local")
     status: Mapped[str] = mapped_column(String(24), default="active")
+    boundary_revision: Mapped[int] = mapped_column(BigInteger, default=1, server_default="1")
     sync_generation: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     published_sync_generation: Mapped[int] = mapped_column(
         BigInteger, default=0, server_default="0"
@@ -248,9 +268,19 @@ class BumpaSyncRun(IdMixin, Base):
             name="ck_bumpa_sync_runs_sync_generation_positive",
         ),
         CheckConstraint(
+            "boundary_revision > 0",
+            name="ck_bumpa_sync_runs_boundary_revision_positive",
+        ),
+        CheckConstraint(
             "orders_availability IS NULL OR orders_availability IN "
             "('available', 'unavailable', 'error')",
             name="ck_bumpa_sync_runs_orders_availability",
+        ),
+        Index(
+            "ix_bumpa_sync_runs_connection_boundary_finished",
+            "bumpa_connection_id",
+            "boundary_revision",
+            "finished_at",
         ),
     )
 
@@ -273,6 +303,7 @@ class BumpaSyncRun(IdMixin, Base):
     orders_availability: Mapped[str | None] = mapped_column(String(24))
     orders_count: Mapped[int | None] = mapped_column(Integer)
     dataset_results: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    boundary_revision: Mapped[int] = mapped_column(BigInteger, default=1, server_default="1")
     # Nullable for rolling compatibility with writers deployed before the
     # generation fence. New syncs always persist their claimed generation.
     sync_generation: Mapped[int | None] = mapped_column(BigInteger)

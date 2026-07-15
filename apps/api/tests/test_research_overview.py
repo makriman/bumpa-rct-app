@@ -11,6 +11,7 @@ from app.db.models import (
     AgentMessage,
     Artifact,
     BumpaConnection,
+    BumpaSyncRun,
     Conversation,
     HermesProfile,
     ResearchEvent,
@@ -31,6 +32,7 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
         AgentMessage: [],
         Artifact: [],
         BumpaConnection: [],
+        BumpaSyncRun: [],
         Conversation: [],
         HermesProfile: [],
         ResearchEvent: [],
@@ -86,6 +88,19 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
         )
         db.add_all([conversation, profile, connection, report])
         db.flush()
+        sync_run = BumpaSyncRun(
+            tenant_id=consented.id,
+            bumpa_connection_id=connection.id,
+            boundary_revision=connection.boundary_revision,
+            status="success",
+            completion_quality="complete",
+            requested_from=now.date(),
+            requested_to=now.date(),
+            started_at=now - timedelta(hours=1, minutes=1),
+            finished_at=now - timedelta(hours=1),
+            orders_availability="available",
+            orders_count=1,
+        )
 
         messages = [
             AgentMessage(
@@ -172,7 +187,7 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
             byte_size=128,
             checksum_sha256="a" * 64,
         )
-        db.add_all([*messages, *events, excluded, artifact])
+        db.add_all([*messages, *events, excluded, artifact, sync_run])
         db.commit()
 
         for model, rows in (
@@ -181,6 +196,7 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
             (Conversation, [conversation]),
             (HermesProfile, [profile]),
             (BumpaConnection, [connection]),
+            (BumpaSyncRun, [sync_run]),
             (ResearchReport, [report]),
             (AgentMessage, messages),
             (ResearchEvent, [*events, excluded]),
@@ -245,6 +261,7 @@ def test_research_overview_covers_full_consent_safe_measurement_catalogue(
                 AgentMessage,
                 ResearchEvent,
                 ResearchReport,
+                BumpaSyncRun,
                 BumpaConnection,
                 HermesProfile,
                 Conversation,

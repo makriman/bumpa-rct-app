@@ -55,10 +55,28 @@ ADDRESS_SIGNAL_RE = re.compile(
 FORMULA_PREFIX_RE = re.compile(r"^[\s\x00-\x1f]*[=+\-@]")
 
 SENSITIVE_STRUCTURED_FIELDS = SENSITIVE_ORDER_FIELDS | {
+    "access_token",
+    "accesstoken",
     "address",
+    "api_key",
+    "apikey",
+    "api_secret",
+    "apisecret",
+    "api_token",
+    "apitoken",
+    "auth_token",
+    "authtoken",
+    "authorization",
+    "bearer_token",
+    "bearertoken",
     "billing_address",
     "buyer",
     "buyer_details",
+    "client_secret",
+    "clientsecret",
+    "cookie",
+    "credential",
+    "credentials",
     "customer",
     "customer_address",
     "customer_email",
@@ -71,10 +89,14 @@ SENSITIVE_STRUCTURED_FIELDS = SENSITIVE_ORDER_FIELDS | {
     "first_name",
     "full_name",
     "display_name",
+    "id_token",
+    "idtoken",
     "invoice_url",
     "last_name",
     "order_url",
     "payment_url",
+    "password",
+    "passwd",
     "phone",
     "phone_e164",
     "phone_number",
@@ -82,9 +104,30 @@ SENSITIVE_STRUCTURED_FIELDS = SENSITIVE_ORDER_FIELDS | {
     "recipient_address",
     "recipient_name",
     "recipient_phone",
+    "private_key",
+    "privatekey",
+    "proxy_authorization",
+    "proxyauthorization",
+    "refresh_token",
+    "refreshtoken",
+    "secret",
+    "secret_key",
+    "secretkey",
+    "session_token",
+    "sessiontoken",
+    "set_cookie",
+    "signing_secret",
+    "signingsecret",
     "shipping_address",
+    "token",
     "wa_id",
     "whatsapp_message_id",
+    "webhook_secret",
+    "webhooksecret",
+    "x_auth_token",
+    "xauthtoken",
+    "x_api_key",
+    "xapikey",
 }
 
 PSEUDONYM_LABELS = {
@@ -94,8 +137,18 @@ PSEUDONYM_LABELS = {
     "conversation": "CONV",
 }
 
+_CURRENCY_TOKENS: dict[str, tuple[str, ...]] = {
+    "EUR": ("EUR", "€"),
+    "GBP": ("GBP", "£"),
+    "GHS": ("GHS", "GH₵", "₵"),
+    "INR": ("INR", "₹"),
+    "KES": ("KES", "KSh", "KSH"),
+    "NGN": ("NGN", "₦"),
+    "USD": ("USD", "$"),
+}
 
-def parse_money(value: Any) -> Decimal | None:
+
+def parse_money(value: Any, *, currency_code: str | None = None) -> Decimal | None:
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, Decimal):
@@ -105,7 +158,17 @@ def parse_money(value: Any) -> Decimal | None:
     elif isinstance(value, float):
         parsed = Decimal(str(value))
     elif isinstance(value, str):
-        cleaned = value.replace("₦", "").replace(",", "").strip()
+        cleaned = value.replace(",", "").strip()
+        sign = cleaned[0] if cleaned[:1] in {"+", "-"} else ""
+        if sign:
+            cleaned = cleaned[1:].strip()
+        tokens = _CURRENCY_TOKENS.get(currency_code or "NGN", ())
+        for token in tokens:
+            if cleaned.startswith(token):
+                cleaned = cleaned[len(token) :].strip()
+            if cleaned.endswith(token):
+                cleaned = cleaned[: -len(token)].strip()
+        cleaned = sign + cleaned
         if not cleaned:
             return None
         try:
@@ -126,7 +189,13 @@ def parse_money(value: Any) -> Decimal | None:
 
 
 def _normalise_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    # Provider payloads are not consistent about field casing. Split both
+    # ordinary camelCase boundaries (``customerName``) and acronym boundaries
+    # (``APIKey``) before removing punctuation so the allow/deny lists have one
+    # canonical representation for snake_case, camelCase and PascalCase keys.
+    with_acronym_boundaries = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    with_word_boundaries = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", with_acronym_boundaries)
+    return re.sub(r"[^a-z0-9]+", "_", with_word_boundaries.lower()).strip("_")
 
 
 def _redact_structured(value: Any) -> Any:

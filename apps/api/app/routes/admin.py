@@ -74,6 +74,7 @@ from app.services.admin_operations import (
     whatsapp_delivery_failures,
 )
 from app.services.audit import audit
+from app.services.bumpa_connections import BumpaBoundaryInput, replace_bumpa_connection
 from app.services.platform_access import (
     PlatformAccessConflict,
     PlatformAccessTargetInactive,
@@ -523,29 +524,48 @@ def connect_bumpa(
         )
     if payload.provider == "bumpa" and settings.bumpa_backend == "bumpa":
         try:
-            with BumpaClient(payload.api_key, payload.scope_type, payload.scope_id) as provider:
+            with BumpaClient(
+                payload.api_key,
+                payload.scope_type,
+                payload.scope_id,
+                store_timezone=payload.store_timezone,
+                store_currency=payload.store_currency,
+            ) as provider:
                 provider.verify()
         except (BumpaProviderError, ValueError) as exc:
             raise HTTPException(
                 status_code=422, detail="Bumpa connection verification failed"
             ) from exc
-    connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
+    connection = db.scalar(
+        select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id).with_for_update()
+    )
     encrypted = FieldCipher.from_settings(settings).encrypt(payload.api_key)
+    boundary_changed = False
     if connection:
-        connection.encrypted_api_key = encrypted
-        connection.scope_type = payload.scope_type
-        connection.scope_id = payload.scope_id
-        connection.provider = payload.provider
-        connection.status = "active"
+        boundary_changed = replace_bumpa_connection(
+            db,
+            connection,
+            encrypted_api_key=encrypted,
+            boundary=BumpaBoundaryInput(
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+                store_timezone=payload.store_timezone,
+                store_currency=payload.store_currency,
+                provider=payload.provider,
+            ),
+        )
     else:
         connection = BumpaConnection(
             tenant_id=tenant.id,
             encrypted_api_key=encrypted,
             scope_type=payload.scope_type,
             scope_id=payload.scope_id,
+            store_timezone=payload.store_timezone,
+            store_currency=payload.store_currency,
             provider=payload.provider,
         )
         db.add(connection)
+        db.flush()
     audit(
         db,
         actor_user_id=principal.user.id,
@@ -556,7 +576,11 @@ def connect_bumpa(
         after={
             "scope_type": payload.scope_type,
             "scope_id_last4": payload.scope_id[-4:],
+            "store_timezone": payload.store_timezone,
+            "store_currency": payload.store_currency,
             "provider": payload.provider,
+            "boundary_changed": boundary_changed,
+            "boundary_revision": connection.boundary_revision,
         },
     )
     db.commit()
@@ -597,6 +621,7 @@ def trigger_bumpa_sync(
     job_payload = {
         "tenant_id": tenant.id,
         "connection_id": connection.id,
+        "boundary_revision": connection.boundary_revision,
         "date_from": payload.date_from.isoformat(),
         "date_to": payload.date_to.isoformat(),
     }

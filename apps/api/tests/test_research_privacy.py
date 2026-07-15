@@ -84,6 +84,38 @@ def test_text_and_structured_redaction_remove_identifiable_pii_without_mutation(
     assert safe["total"] == "12500.00"
 
 
+def test_structured_redaction_normalises_deep_camel_and_pascal_case_keys() -> None:
+    payload = {
+        "customerName": "Ada Lovelace",
+        "Profile": {
+            "DisplayName": "Ada L.",
+            "authConfig": {
+                "apiKey": "secret-one",
+                "APISecret": "secret-two",
+                "RefreshToken": "secret-three",
+            },
+        },
+        "Rows": [{"CustomerPhone": "+2348001112222", "total": "12"}],
+    }
+    original = deepcopy(payload)
+
+    safe = redact_order_payload(payload)
+
+    assert payload == original
+    assert safe == {
+        "customerName": "[REDACTED]",
+        "Profile": {
+            "DisplayName": "[REDACTED]",
+            "authConfig": {
+                "apiKey": "[REDACTED]",
+                "APISecret": "[REDACTED]",
+                "RefreshToken": "[REDACTED]",
+            },
+        },
+        "Rows": [{"CustomerPhone": "[REDACTED]", "total": "12"}],
+    }
+
+
 def test_pseudonyms_are_keyed_deterministic_and_domain_separated() -> None:
     identifier = "56d7ff9d-5e0a-4d17-a927-f0a84176c59e"
     tenant = pseudonymize(identifier, "research-key-a", namespace="tenant")

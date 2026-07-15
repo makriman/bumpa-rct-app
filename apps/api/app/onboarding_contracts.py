@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
+from app.core.store_context import validate_store_currency, validate_store_timezone
+
 OnboardingStatus = Literal["in_progress", "attention_required", "completed"]
 OnboardingStep = Literal[
     "owner",
@@ -44,6 +46,16 @@ class OnboardingStartRequest(OnboardingInput):
     timezone: str = Field(default="Africa/Lagos", min_length=1, max_length=64)
     currency_code: str = Field(default="NGN", pattern=r"^[A-Z]{3}$")
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_store_timezone(value)
+
+    @field_validator("currency_code")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return validate_store_currency(value)
+
 
 class OnboardingOwnerRequest(OnboardingInput):
     name: str = Field(min_length=1, max_length=200)
@@ -68,6 +80,8 @@ class OnboardingBumpaRequest(OnboardingInput):
     provider: Literal["bumpa"] = "bumpa"
     scope_type: Literal["business_id", "location_id"] = "business_id"
     scope_id: str = Field(min_length=1, max_length=160)
+    store_timezone: str = Field(min_length=1, max_length=64)
+    store_currency: str = Field(min_length=3, max_length=3)
 
     @field_validator("scope_id")
     @classmethod
@@ -75,6 +89,16 @@ class OnboardingBumpaRequest(OnboardingInput):
         if _SCOPE_ID.fullmatch(value) is None:
             raise ValueError("Bumpa scope ID contains unsupported characters")
         return value
+
+    @field_validator("store_timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        return validate_store_timezone(value)
+
+    @field_validator("store_currency")
+    @classmethod
+    def validate_currency(cls, value: str) -> str:
+        return validate_store_currency(value)
 
 
 class OnboardingInitialSyncRequest(OnboardingInput):
@@ -117,6 +141,8 @@ class OnboardingTenantView(BaseModel):
     slug: str
     name: str
     status: str
+    timezone: str
+    currency_code: str
 
 
 class OnboardingOwnerView(BaseModel):
@@ -140,6 +166,8 @@ class OnboardingBumpaView(BaseModel):
     provider: str
     scope_type: str
     scope_id_last4: str
+    store_timezone: str
+    store_currency: str
     status: str
 
 

@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.crypto import FieldCipher
 from app.db.models import (
+    AsyncJob,
     AuditLog,
+    BumpaConnection,
     HermesProfile,
     PhoneIdentity,
     SystemError,
@@ -151,6 +153,11 @@ def test_operator_sync_requires_confirmation_and_idempotency_and_is_audited(
     assert conflicting.status_code == 409
     with SessionLocal() as db:
         set_security_context(db, privileged=True)
+        job = db.get(AsyncJob, queued.json()["job_id"])
+        assert job is not None
+        connection = db.get(BumpaConnection, job.payload["connection_id"])
+        assert connection is not None
+        assert job.payload["boundary_revision"] == connection.boundary_revision
         audits = db.scalars(
             select(AuditLog).where(
                 AuditLog.action == "tenant.bumpa_sync.requested",

@@ -423,6 +423,16 @@ HERMES_IMAGE=ghcr.io/<owner>/bumpabestie-hermes@sha256:<index-digest>
 environment. `hermes_anthropic_api_key` is a `0600` file in the `0700` secrets
 directory. Per-tenant Bumpa keys do not belong in this file; the onboarding/admin
 workflow stores them encrypted in Postgres.
+Each Bumpa connection also stores validated, non-secret `store_timezone` and
+`store_currency` metadata. Migration `0015_bumpa_store_context` backfills them from
+the owning tenant, initializes positive connection and sync-run `boundary_revision`
+values, and adds the revision lookup index and database constraints. Current writers
+must always set context and revision explicitly; server defaults exist only as the
+schema-forward rollback floor for the 0014 application. Current product reads require
+the active connection revision. An automatic downgrade refuses after any boundary
+has advanced because dropping the revision would make retained stale evidence
+eligible on re-upgrade. Remove compatibility defaults only in a later reviewed
+contraction migration after the rollback floor retires.
 
 Hermes lifecycle operations use an internal-only control listener on
 `HERMES_CONTROL_PORT` (default `8699`). The port must sit outside the per-profile
@@ -670,6 +680,26 @@ also be rerun independently:
 ./scripts/production_onboard.py hermes --live-chat --allow-operator-owner-overlap
 ./scripts/production_onboard.py sync --allow-operator-owner-overlap
 ```
+
+Run the strict sync command without an error allowance by default. A dataset error
+is a hard stop. If a contemporaneous independent probe reconfirms the already
+identified upstream `products.overview` failure and the degraded release is
+explicitly approved, the only permitted exception is:
+
+```bash
+./scripts/production_onboard.py sync --allow-operator-owner-overlap \
+  --allow-dataset-error 5:products.overview
+```
+
+This allowance is scoped to Store 5 and changes canary acceptance only after the
+durable raw evidence proves either a transport timeout with no HTTP response or an
+upstream HTTP 5xx. It does not accept transport disconnects, invalid responses,
+authentication failures, or the same error on stores 1–4. Orders must remain
+available; the two documented profit datasets are the only permitted unavailable
+datasets; every unnamed error, unexpected unavailable dataset, completion-state
+mismatch, auth/range/currency failure, or order failure remains a hard stop. The five
+secret-file entries must provide explicit `store_timezone` and `store_currency`; the
+helper has no pilot fallback for missing context.
 
 Authenticated canary HTTP calls reject every redirect. Sync evidence is correlated
 through the exact durable job ID and sync-run ID returned by the API, rather than by

@@ -54,6 +54,8 @@ export type BumpaStatus = {
   status: string;
   scope_type?: string;
   scope_id_last4?: string;
+  store_timezone?: string;
+  store_currency?: string;
   provider?: string;
   last_successful_sync_at?: string | null;
   last_error?: string | null;
@@ -89,6 +91,8 @@ export type TenantOnboarding = {
     slug: string;
     name: string;
     status: string;
+    timezone: string;
+    currency_code: string;
   };
   owner: {
     user_id: string;
@@ -110,6 +114,8 @@ export type TenantOnboarding = {
     status: string;
     scope_type: string;
     scope_id_last4: string;
+    store_timezone: string;
+    store_currency: string;
   } | null;
   initial_sync: {
     attempt: number;
@@ -164,6 +170,8 @@ export type TenantOperations = {
     status: string;
     scope_type: string | null;
     scope_id_last4: string | null;
+    store_timezone: string | null;
+    store_currency: string | null;
     provider: string | null;
     last_successful_sync_at: string | null;
     last_failed_sync_at: string | null;

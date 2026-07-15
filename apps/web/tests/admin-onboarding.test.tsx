@@ -57,6 +57,8 @@ function onboarding(
       slug: "anika-studio",
       name: "Anika Studio",
       status: currentStep === "completed" ? "active" : "provisioning",
+      timezone: "Africa/Lagos",
+      currency_code: "NGN",
     },
     owner:
       index > 0
@@ -85,6 +87,8 @@ function onboarding(
             provider: "bumpa",
             scope_type: "business_id",
             scope_id_last4: "1042",
+            store_timezone: "Africa/Lagos",
+            store_currency: "NGN",
             status: "active",
           }
         : null,
@@ -176,6 +180,11 @@ describe("resumable production onboarding", () => {
 
   it("keeps the Bumpa key in memory only and clears it after failure", async () => {
     const view = onboarding("bumpa");
+    view.tenant = {
+      ...view.tenant,
+      timezone: "Africa/Nairobi",
+      currency_code: "KES",
+    };
     apiRequest.mockImplementation((path: string, init?: RequestInit) => {
       if (path === "/admin/onboardings/onboarding-live" && !init) {
         return Promise.resolve(view);
@@ -196,9 +205,16 @@ describe("resumable production onboarding", () => {
 
     render(<ResumableOnboarding onboardingId="onboarding-live" />);
     const key = await screen.findByLabelText("Bumpa API key");
+    expect(screen.getByLabelText("Store timezone")).toHaveValue(
+      "Africa/Nairobi",
+    );
+    expect(screen.getByLabelText("Store currency")).toHaveValue("KES");
     fireEvent.change(key, { target: { value: "bumpa-secret-never-persist" } });
     fireEvent.change(screen.getByLabelText("Business ID"), {
       target: { value: "business-1042" },
+    });
+    fireEvent.change(screen.getByLabelText("Store timezone"), {
+      target: { value: "Africa/Kampala" },
     });
     fireEvent.click(
       screen.getByRole("button", { name: "Connect and verify Bumpa →" }),
@@ -208,6 +224,10 @@ describe("resumable production onboarding", () => {
       "Bumpa verification failed",
     );
     expect(screen.getByLabelText("Bumpa API key")).toHaveValue("");
+    expect(screen.getByLabelText("Store timezone")).toHaveValue(
+      "Africa/Kampala",
+    );
+    expect(screen.getByLabelText("Store currency")).toHaveValue("KES");
     expect(JSON.stringify(window.sessionStorage)).not.toContain(
       "bumpa-secret-never-persist",
     );
@@ -223,6 +243,10 @@ describe("resumable production onboarding", () => {
     const firstCommand = apiRequest.mock.calls.find(([path]) =>
       String(path).endsWith("/bumpa"),
     );
+    expect(JSON.parse(String(firstCommand?.[1]?.body))).toMatchObject({
+      store_timezone: "Africa/Kampala",
+      store_currency: "KES",
+    });
     fireEvent.change(screen.getByLabelText("Bumpa API key"), {
       target: { value: "replacement-secret" },
     });
@@ -242,6 +266,50 @@ describe("resumable production onboarding", () => {
         ],
       );
     });
+  });
+
+  it("blocks malformed Bumpa timezone and currency context before submission", async () => {
+    const view = onboarding("bumpa");
+    apiRequest.mockImplementation((path: string, init?: RequestInit) => {
+      if (path === "/admin/onboardings/onboarding-live" && !init) {
+        return Promise.resolve(view);
+      }
+      throw new Error(`Unexpected API request: ${path}`);
+    });
+
+    render(<ResumableOnboarding onboardingId="onboarding-live" />);
+    const submit = await screen.findByRole("button", {
+      name: "Connect and verify Bumpa →",
+    });
+    fireEvent.change(screen.getByLabelText("Bumpa API key"), {
+      target: { value: "memory-only-key" },
+    });
+    fireEvent.change(screen.getByLabelText("Business ID"), {
+      target: { value: "business-1042" },
+    });
+    fireEvent.change(screen.getByLabelText("Store timezone"), {
+      target: { value: "Not/A_Real_Zone" },
+    });
+    expect(screen.getByLabelText("Store timezone")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    expect(submit).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Store timezone"), {
+      target: { value: "Europe/London" },
+    });
+    const currency = screen.getByLabelText("Store currency");
+    fireEvent.change(currency, { target: { value: "£££" } });
+    expect(currency).toHaveAttribute("pattern", "[A-Z]{3}");
+    expect(submit).toBeDisabled();
+
+    fireEvent.change(currency, { target: { value: "gbp" } });
+    expect(currency).toHaveValue("GBP");
+    expect(submit).toBeEnabled();
+    expect(
+      apiRequest.mock.calls.filter(([path]) => String(path).endsWith("/bumpa")),
+    ).toHaveLength(0);
   });
 
   it("resumes from server state after a reload and never unlocks Hermes before sync acceptance", async () => {
@@ -318,6 +386,13 @@ describe("resumable production onboarding", () => {
     fireEvent.change(screen.getByLabelText("Slug"), {
       target: { value: "anika-studio" },
     });
+    fireEvent.change(screen.getByLabelText("Country"), {
+      target: { value: "KE" },
+    });
+    expect(screen.getByLabelText("Business timezone")).toHaveValue(
+      "Africa/Nairobi",
+    );
+    expect(screen.getByLabelText("Business currency")).toHaveValue("KES");
     fireEvent.click(screen.getByRole("button", { name: "Start onboarding →" }));
 
     await waitFor(() =>
@@ -334,10 +409,10 @@ describe("resumable production onboarding", () => {
       slug: "anika-studio",
       name: "Anika Studio",
       business_category: null,
-      country: "NG",
+      country: "KE",
       city: null,
-      timezone: "Africa/Lagos",
-      currency_code: "NGN",
+      timezone: "Africa/Nairobi",
+      currency_code: "KES",
     });
   });
 

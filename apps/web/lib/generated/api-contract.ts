@@ -1531,6 +1531,10 @@ export interface components {
        * @enum {string}
        */
       scope_type: "business_id" | "location_id";
+      /** Store Currency */
+      store_currency: string;
+      /** Store Timezone */
+      store_timezone: string;
     };
     /** BumpaConnectionStatusView */
     BumpaConnectionStatusView: {
@@ -1550,6 +1554,10 @@ export interface components {
       scope_type: string | null;
       /** Status */
       status: string;
+      /** Store Currency */
+      store_currency: string | null;
+      /** Store Timezone */
+      store_timezone: string | null;
     };
     /** ChatRequest */
     ChatRequest: {
@@ -1796,6 +1804,10 @@ export interface components {
        * @enum {string}
        */
       scope_type: "business_id" | "location_id";
+      /** Store Currency */
+      store_currency: string;
+      /** Store Timezone */
+      store_timezone: string;
     };
     /** OnboardingBumpaView */
     OnboardingBumpaView: {
@@ -1809,6 +1821,10 @@ export interface components {
       scope_type: string;
       /** Status */
       status: string;
+      /** Store Currency */
+      store_currency: string;
+      /** Store Timezone */
+      store_timezone: string;
     };
     /** OnboardingCompleteRequest */
     OnboardingCompleteRequest: {
@@ -1986,6 +2002,8 @@ export interface components {
     };
     /** OnboardingTenantView */
     OnboardingTenantView: {
+      /** Currency Code */
+      currency_code: string;
       /** Id */
       id: string;
       /** Name */
@@ -1994,6 +2012,8 @@ export interface components {
       slug: string;
       /** Status */
       status: string;
+      /** Timezone */
+      timezone: string;
     };
     /** OnboardingView */
     OnboardingView: {

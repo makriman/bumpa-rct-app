@@ -44,16 +44,35 @@ send behavior at the adapter/job boundaries.
 The defined read surface is ten analytics datasets plus paginated orders. Code and
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
-Decimal money, unknown-value preservation, and deep redaction. The current bounded
-live production sync is partial for every store: stores 1–4 each returned 8/10 analytics
-datasets, while store 5 returned 7/10 and is degraded because
-`products.overview` hit an upstream timeout/HTTP 504. Missing datasets remain
-unavailable rather than being reported as zero. All five mapped jobs were queued
-through the durable production path, reached a correlated terminal run, and
-reported orders as available. This proves mapped sync execution and typed
-partial/degraded handling, not complete provider coverage or a redacted
-canonical/raw count reconciliation; 10/10 dataset evidence and final reconciliation
-remain required.
+Decimal money, unknown-value preservation, and deep redaction. Every connection
+persists an explicit IANA `store_timezone` and three-letter `store_currency`.
+For a top-level analytics request whose query bounds are store-local dates, the
+response `range` must encode the exact UTC instants corresponding to the inclusive
+start and end of those local days. Canonical schema-v1 keeps the local dates while
+metric evidence retains the exact instants. Time-bearing values require an explicit
+offset; nested current/previous periods may use exact instants or date-only values
+only when their derived local dates match the validated parent or immediately
+adjacent comparison range. Previous-period length may differ by at most three
+calendar days. Analytics currency evidence must be valid and consistent with
+`store_currency`. Each order may instead carry its own valid three-letter currency,
+with `store_currency` used only as a fallback; conflicting aliases, nested line-item
+claims, malformed codes, or invalid monetary facts fail the page closed. Customer
+ranking identity is removed, anonymous/deleted-customer aggregate counts remain
+usable, and product ranking labels accept product-specific fields only.
+
+Every queued sync captures the active `boundary_revision`. A material provider,
+scope, timezone, or currency replacement invalidates queued work, fences in-flight
+publication, clears mutable canonical orders, and retains older evidence for audit
+without exposing it to current product reads. A verified same-boundary key rotation
+preserves the revision and current projections.
+
+The bounded pre-release five-key adapter probe returned eight available analytics
+datasets and the two typed profit limitations for stores 1–4. Store 5 returned seven
+available datasets, the two profit limitations, and one isolated upstream
+`products.overview` failure. Orders decoded for all five stores, including valid
+historical per-order currencies. This proves adapter decoding and typed failure
+handling only; schema-0015 durable production canaries and redacted persisted-data
+reconciliation remain release gates.
 
 ## WhatsApp contract
 

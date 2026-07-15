@@ -412,6 +412,8 @@ def test_configured_logging_suppresses_httpx_provider_query_strings(capsys) -> N
         "api-key-must-never-reach-logs",
         "business_id",
         scope_secret,
+        store_timezone="Africa/Lagos",
+        store_currency="NGN",
         client=httpx.Client(
             base_url="https://api.getbumpa.com/api",
             transport=httpx.MockTransport(success),

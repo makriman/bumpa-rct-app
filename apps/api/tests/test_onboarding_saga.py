@@ -20,6 +20,7 @@ from app.db.models import (
     AsyncJob,
     AuditLog,
     BumpaConnection,
+    BumpaOrder,
     BumpaSyncRun,
     HermesProfile,
     PhoneIdentity,
@@ -154,6 +155,8 @@ def _input(db: Session, *, owner: User | None = None) -> SagaInput:
             api_key=SecretStr(api_key),
             scope_type="business_id",
             scope_id=f"business-{token}",
+            store_timezone="Africa/Lagos",
+            store_currency="NGN",
         ),
         api_key=api_key,
     )
@@ -194,6 +197,9 @@ def _start_to_sync(
         expected_revision=phone.revision,
         idempotency_key=data.key("bumpa"),
     ).view
+    assert bumpa.bumpa is not None
+    assert bumpa.bumpa.store_timezone == data.bumpa.store_timezone
+    assert bumpa.bumpa.store_currency == data.bumpa.store_currency
     sync = service.trigger_initial_sync(
         db,
         started.id,
@@ -205,6 +211,12 @@ def _start_to_sync(
         expected_revision=bumpa.revision,
         idempotency_key=data.key("sync-1"),
     ).view
+    assert sync.initial_sync is not None
+    sync_job = db.get(AsyncJob, sync.initial_sync.job_id)
+    assert sync_job is not None
+    connection = db.get(BumpaConnection, bumpa.bumpa.connection_id)
+    assert connection is not None
+    assert sync_job.payload["boundary_revision"] == connection.boundary_revision
     return started, owner, phone, bumpa, sync
 
 
@@ -442,6 +454,105 @@ def test_changed_bumpa_secret_with_same_key_is_an_idempotency_conflict(
         )
 
     _assert_error("idempotency_conflict", captured.value)
+
+
+def test_resumable_onboarding_rejects_material_change_but_rotates_same_boundary_key(
+    db: Session,
+    service: OnboardingService,
+) -> None:
+    data = _input(db)
+    started = service.start(
+        db,
+        data.start,
+        actor_user_id=data.actor_user_id,
+        idempotency_key=data.key("start"),
+    ).view
+    owner = service.set_owner(
+        db,
+        started.id,
+        data.owner,
+        actor_user_id=data.actor_user_id,
+        expected_revision=started.revision,
+        idempotency_key=data.key("owner"),
+    ).view
+    phone = service.approve_phone(
+        db,
+        started.id,
+        data.phone,
+        actor_user_id=data.actor_user_id,
+        expected_revision=owner.revision,
+        idempotency_key=data.key("phone"),
+    ).view
+    prior_freshness = utcnow()
+    existing = BumpaConnection(
+        tenant_id=started.tenant_id,
+        encrypted_api_key=FieldCipher(service.settings.field_encryption_key).encrypt(
+            "prior-synthetic-key"
+        ),
+        scope_type=data.bumpa.scope_type,
+        scope_id=data.bumpa.scope_id,
+        store_timezone=data.bumpa.store_timezone,
+        store_currency=data.bumpa.store_currency,
+        provider="local",
+        status="active",
+        last_successful_sync_at=prior_freshness,
+    )
+    db.add(existing)
+    db.flush()
+    db.add(
+        BumpaOrder(
+            tenant_id=started.tenant_id,
+            bumpa_order_id=f"onboarding-order-{data.token}",
+            raw_payload={"id": f"onboarding-order-{data.token}"},
+        )
+    )
+    db.commit()
+
+    conflicting = data.bumpa.model_copy(update={"scope_id": f"other-{data.token}"})
+    with pytest.raises(OnboardingError) as captured:
+        service.connect_bumpa(
+            db,
+            started.id,
+            conflicting,
+            actor_user_id=data.actor_user_id,
+            expected_revision=phone.revision,
+            idempotency_key=data.key("bumpa-conflict"),
+        )
+    _assert_error("bumpa_connection_conflict", captured.value)
+    db.rollback()
+
+    connected = service.connect_bumpa(
+        db,
+        started.id,
+        data.bumpa,
+        actor_user_id=data.actor_user_id,
+        expected_revision=phone.revision,
+        idempotency_key=data.key("bumpa"),
+    ).view
+    current = db.get(BumpaConnection, existing.id)
+    assert connected.bumpa is not None
+    assert connected.bumpa.connection_id == existing.id
+    assert current is not None
+    assert current.boundary_revision == 1
+    assert current.last_successful_sync_at is not None
+    assert current.last_successful_sync_at.replace(tzinfo=None) == prior_freshness.replace(
+        tzinfo=None
+    )
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(BumpaOrder)
+            .where(
+                BumpaOrder.tenant_id == started.tenant_id,
+                BumpaOrder.bumpa_order_id == f"onboarding-order-{data.token}",
+            )
+        )
+        == 1
+    )
+    assert (
+        FieldCipher(service.settings.field_encryption_key).decrypt(current.encrypted_api_key)
+        == data.api_key
+    )
 
 
 def test_platform_operator_can_be_owner_without_role_mutation(

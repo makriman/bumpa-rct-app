@@ -21,7 +21,9 @@ from tests.conftest import auth_headers
 
 
 def test_all_local_provider_contracts_and_safety_branches(tmp_path: Path) -> None:
-    snapshot = LocalCommerceProvider("tenant-a").sync(date(2026, 1, 1), date(2026, 1, 2))
+    snapshot = LocalCommerceProvider(
+        "tenant-a", store_timezone="Africa/Lagos", store_currency="NGN"
+    ).sync(date(2026, 1, 1), date(2026, 1, 2))
     assert len(snapshot.datasets) == 10
     assert len(snapshot.orders) == 6
     messaging = LocalMessagingProvider()
@@ -91,6 +93,8 @@ def test_bumpa_failure_is_recorded_and_recovery_succeeds(client: TestClient) -> 
             "api_key": "placeholder-key",
             "scope_type": "business_id",
             "scope_id": "demo-business",
+            "store_timezone": "Africa/Lagos",
+            "store_currency": "NGN",
             "provider": "bumpa",
         },
     )
@@ -107,6 +111,8 @@ def test_bumpa_failure_is_recorded_and_recovery_succeeds(client: TestClient) -> 
             "api_key": "local-key",
             "scope_type": "business_id",
             "scope_id": "demo-business",
+            "store_timezone": "Africa/Lagos",
+            "store_currency": "NGN",
             "provider": "local",
         },
     )
