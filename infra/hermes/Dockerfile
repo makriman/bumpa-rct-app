@@ -9,6 +9,9 @@ USER root
 # contract boots an authenticated profile gateway after this overlay.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes --no-install-recommends \
+    && dpkg --compare-versions \
+        "$(dpkg-query --show --showformat='${Version}' libxfont2)" \
+        ge '1:2.0.6-1+deb13u1' \
     && rm -rf /var/lib/apt/lists/* \
     && uv pip install --python /opt/hermes/.venv/bin/python --no-cache --no-deps --upgrade \
         cryptography==48.0.1 \

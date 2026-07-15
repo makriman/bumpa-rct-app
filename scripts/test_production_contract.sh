@@ -1701,4 +1701,13 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+# The third-party Hermes base is digest-pinned, but its Debian security overlay
+# is intentionally refreshed on every protected and publication build. A cached
+# apt layer can otherwise retain a package after Debian has shipped a fix.
+grep -Fq '      fail-fast: false' .github/workflows/ci.yml
+grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/ci.yml
+grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
+grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
+grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
+
 echo "Production environment and immutable Compose contracts passed"
