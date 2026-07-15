@@ -74,6 +74,14 @@ historical per-order currencies. This proves adapter decoding and typed failure
 handling only; schema-0015 durable production canaries and redacted persisted-data
 reconciliation remain release gates.
 
+A later exact-endpoint production probe established that `products.overview` has a
+different latency envelope from the other analytics reads: Store 3 returned a valid
+HTTP 200 document after 56.8 seconds, while Store 5 returned an upstream HTTP 524
+after 125.1 seconds. The adapter therefore gives only this exact dataset a 90-second
+read window and at most two attempts; every other analytics and orders request keeps
+the normal 30-second policy. This does not convert Store 5's upstream 524 into
+success; its narrowly approved degraded evidence remains a provider limitation.
+
 ## WhatsApp contract
 
 Local webhook tests use canonical raw JSON bytes and compute real HMAC signatures.
