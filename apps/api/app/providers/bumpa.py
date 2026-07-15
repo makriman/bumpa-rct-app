@@ -23,6 +23,47 @@ MAX_ORDER_PAGES = 1_000
 MAX_ORDER_RECORDS = 100_000
 MAX_ANALYTICS_POINTS = 2_000
 MAX_RANKING_ROWS = 500
+
+
+@dataclass(frozen=True, slots=True)
+class BumpaEndpointRequestPolicy:
+    """Timeout and retry budget for an explicitly identified Bumpa endpoint."""
+
+    connect_seconds: float
+    read_seconds: float
+    write_seconds: float
+    pool_seconds: float
+    max_attempts: int
+
+    def to_httpx(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.connect_seconds,
+            read=self.read_seconds,
+            write=self.write_seconds,
+            pool=self.pool_seconds,
+        )
+
+
+DEFAULT_REQUEST_POLICY = BumpaEndpointRequestPolicy(
+    connect_seconds=5.0,
+    read_seconds=30.0,
+    write_seconds=30.0,
+    pool_seconds=30.0,
+    max_attempts=3,
+)
+# Bumpa's product overview aggregation can legitimately take close to a minute
+# while the remaining analytics and orders endpoints complete within the normal
+# budget. Keep its larger read-inactivity window and two-attempt ceiling isolated
+# to this exact endpoint; response bodies remain independently size-bounded.
+ANALYTICS_REQUEST_POLICIES: dict[tuple[str, str], BumpaEndpointRequestPolicy] = {
+    ("products", "overview"): BumpaEndpointRequestPolicy(
+        connect_seconds=5.0,
+        read_seconds=90.0,
+        write_seconds=30.0,
+        pool_seconds=30.0,
+        max_attempts=2,
+    )
+}
 DATASETS: dict[str, tuple[str, ...]] = {
     "sales": ("overview", "total_sales", "gross_profit", "net_profit"),
     "products": (
@@ -112,7 +153,7 @@ class BumpaClient:
         store_currency: str,
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        max_attempts: int = 3,
+        max_attempts: int = DEFAULT_REQUEST_POLICY.max_attempts,
     ) -> None:
         if scope_type not in {"business_id", "location_id"}:
             raise ValueError("Invalid Bumpa scope_type")
@@ -127,7 +168,7 @@ class BumpaClient:
         self.store_currency = validate_store_currency(store_currency)
         self._client = client or httpx.Client(
             base_url=BUMPA_BASE_URL,
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=DEFAULT_REQUEST_POLICY.to_httpx(),
             limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
             follow_redirects=False,
         )
@@ -163,13 +204,27 @@ class BumpaClient:
         params: dict[str, str],
         *,
         max_attempts: int | None = None,
+        request_policy: BumpaEndpointRequestPolicy | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        attempt_limit = self._max_attempts if max_attempts is None else max_attempts
-        if not 1 <= attempt_limit <= self._max_attempts:
+        requested_attempt_limit = self._max_attempts if max_attempts is None else max_attempts
+        if not 1 <= requested_attempt_limit <= self._max_attempts:
             raise ValueError("Invalid Bumpa request attempt limit")
+        attempt_limit = (
+            min(requested_attempt_limit, request_policy.max_attempts)
+            if request_policy is not None
+            else requested_attempt_limit
+        )
         for attempt in range(1, attempt_limit + 1):
             try:
-                response = self._client.get(path, params=params, headers=self._headers)
+                if request_policy is None:
+                    response = self._client.get(path, params=params, headers=self._headers)
+                else:
+                    response = self._client.get(
+                        path,
+                        params=params,
+                        headers=self._headers,
+                        timeout=request_policy.to_httpx(),
+                    )
             except httpx.TimeoutException as exc:
                 if attempt == attempt_limit:
                     raise BumpaProviderError(
@@ -286,7 +341,12 @@ class BumpaClient:
             "to": date_to.isoformat(),
             **self._scope,
         }
-        return self._request(f"/commerce/v1/analytics/{area}", params, max_attempts=max_attempts)
+        return self._request(
+            f"/commerce/v1/analytics/{area}",
+            params,
+            max_attempts=max_attempts,
+            request_policy=ANALYTICS_REQUEST_POLICIES.get((area, dataset)),
+        )
 
     def get_orders_page(
         self,

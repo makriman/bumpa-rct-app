@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -434,6 +434,79 @@ def test_live_bumpa_retries_rate_limits_and_bounds_retry_after() -> None:
     assert calls == 2 and sleeps == [10.0]
 
 
+def test_products_overview_gets_only_the_extended_endpoint_read_timeout() -> None:
+    timeouts: dict[str, dict[str, float | None]] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/orders"):
+            key = "orders"
+        else:
+            area = request.url.path.rsplit("/", 1)[-1]
+            key = f"{area}.{request.url.params['dataset']}"
+        timeouts[key] = dict(cast(dict[str, float | None], request.extensions["timeout"]))
+        return httpx.Response(200, json={"data": {"value": "1"}})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(respond),
+        base_url="https://api.getbumpa.com/api",
+        timeout=httpx.Timeout(connect=1.0, read=11.0, write=12.0, pool=13.0),
+    )
+    provider = BumpaClient(
+        "secret",
+        "business_id",
+        "business-test",
+        client=client,
+        sleep=lambda _seconds: None,
+    )
+
+    provider.get_analytics("products", "overview", date(2026, 1, 1), date(2026, 1, 1))
+    provider.get_analytics("products", "products_sold", date(2026, 1, 1), date(2026, 1, 1))
+    provider.get_analytics("sales", "overview", date(2026, 1, 1), date(2026, 1, 1))
+    provider.get_orders_page(date(2026, 1, 1), date(2026, 1, 1), 1)
+
+    assert timeouts["products.overview"] == {
+        "connect": 5.0,
+        "read": 90.0,
+        "write": 30.0,
+        "pool": 30.0,
+    }
+    inherited_client_timeout = {
+        "connect": 1.0,
+        "read": 11.0,
+        "write": 12.0,
+        "pool": 13.0,
+    }
+    assert timeouts["products.products_sold"] == inherited_client_timeout
+    assert timeouts["sales.overview"] == inherited_client_timeout
+    assert timeouts["orders"] == inherited_client_timeout
+
+
+def test_products_overview_caps_retry_budget_at_two_attempts() -> None:
+    calls: dict[str, int] = {}
+    sleeps: list[float] = []
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        area = request.url.path.rsplit("/", 1)[-1]
+        key = f"{area}.{request.url.params['dataset']}"
+        calls[key] = calls.get(key, 0) + 1
+        raise httpx.ReadTimeout("private provider detail", request=request)
+
+    provider = BumpaClient(
+        "secret",
+        "business_id",
+        "business-test",
+        client=_client(httpx.MockTransport(timeout)),
+        sleep=sleeps.append,
+        max_attempts=3,
+    )
+
+    with pytest.raises(BumpaProviderError, match="temporarily unreachable"):
+        provider.get_analytics("products", "overview", date(2026, 1, 1), date(2026, 1, 1))
+
+    assert calls == {"products.overview": 2}
+    assert sleeps == [1]
+
+
 def test_live_bumpa_timeout_exhausts_bounded_retry_budget_with_sanitized_error() -> None:
     secret = "never-include-this-key"
     private_detail = "private-timeout-detail-must-not-escape"
@@ -528,7 +601,7 @@ def test_live_bumpa_sync_persists_one_isolated_exhausted_dataset_failure(
     assert evidence.status_code == expected_status
     assert evidence.failure_kind == expected_kind
     assert evidence.payload == {}
-    assert calls["products.overview"] == 3
+    assert calls["products.overview"] == 2
     assert calls["products.products_sold"] == 1
     assert calls["customers.top_customers_order"] == 1
     assert calls["orders"] == 1

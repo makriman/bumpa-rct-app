@@ -208,6 +208,6 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert raw_failure.failure_kind == "timeout"
         assert private_detail not in (raw_failure.error_message or "")
         assert private_detail not in repr(stored_job.result)
-        assert calls["products.overview"] == 3
+        assert calls["products.overview"] == 2
         assert calls["products.products_sold"] == 1
         assert calls["orders"] == 1
