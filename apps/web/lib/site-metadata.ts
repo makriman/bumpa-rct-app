@@ -147,13 +147,7 @@ export function buildStructuredData() {
   } as const;
 }
 
-const publicSitemapRoutes = [
-  "",
-  "/about",
-  "/privacy",
-  "/terms",
-  "/research-consent",
-];
+const publicSitemapRoutes = ["", "/about", "/privacy", "/terms"];
 
 export function buildSitemap(): MetadataRoute.Sitemap {
   return publicSitemapRoutes.map((route, index) => ({
@@ -167,16 +161,8 @@ export function buildRobots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: "*",
-      allow: ["/", "/research-consent"],
-      disallow: [
-        "/admin",
-        "/api/",
-        "/chat",
-        "/login",
-        "/profile",
-        "/research",
-        "/settings",
-      ],
+      allow: ["/"],
+      disallow: ["/api/", "/chat", "/login", "/profile", "/settings"],
     },
     sitemap: `${siteOrigin}/sitemap.xml`,
     host: siteOrigin,

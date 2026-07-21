@@ -225,6 +225,31 @@ class ChatResponse(BaseModel):
     data_freshness: datetime | None = None
 
 
+class ConversationSummary(BaseModel):
+    id: str
+    title: str | None
+    channel: str
+    updated_at: datetime
+    last_message_preview: str | None = None
+
+
+class ConversationSummaryPage(BaseModel):
+    items: list[ConversationSummary]
+    next_cursor: str | None = None
+
+
+class ChatMessageView(BaseModel):
+    id: str
+    direction: Literal["inbound", "outbound"]
+    content: str
+    created_at: datetime
+
+
+class ChatMessagePage(BaseModel):
+    items: list[ChatMessageView]
+    next_cursor: str | None = None
+
+
 class ConsentUpdate(BaseModel):
     status: Literal["granted", "withdrawn"]
     policy_version: str = Field(default="v1", max_length=32)

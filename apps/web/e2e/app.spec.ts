@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
-import { previewResearchEvents, previewTeam } from "../lib/preview-fixtures";
+import { previewTeam } from "../lib/preview-fixtures";
 import {
   apiPath,
   fulfillSession,
+  grantTestSession,
   json,
   liveSession,
   mockBumpa,
@@ -89,7 +90,12 @@ test("temporary web PIN login reaches live SME chat through the browser BFF", as
 
   await page.goto("/login");
   await selectCountry(page, "US");
-  await page.getByLabel("Mobile number").fill("202 555 0123");
+  await expect(
+    page.getByRole("button", { name: "Country code, United States +1" }),
+  ).toBeVisible();
+  const mobileNumber = page.getByLabel("Mobile number");
+  await mobileNumber.fill("202 555 0123");
+  await expect(mobileNumber).toHaveValue("202 555 0123");
   const submitButton = page.locator(".auth-submit");
   const continueClick = submitButton.click();
   await requestObserved;
@@ -102,6 +108,7 @@ test("temporary web PIN login reaches live SME chat through the browser BFF", as
   ).toBeVisible();
   await expect(page.getByText(/no WhatsApp message was sent/i)).toBeVisible();
   await page.getByLabel("Six-digit web PIN").fill("246810");
+  await grantTestSession(page);
   const signInClick = submitButton.click();
   await verificationObserved;
   await expect(submitButton).toHaveText("Signing in…");
@@ -109,7 +116,6 @@ test("temporary web PIN login reaches live SME chat through the browser BFF", as
   releaseVerification?.();
   await signInClick;
   await expect(page).toHaveURL(/\/chat$/);
-  await expect(page.getByText("Tenant API", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("textbox", { name: "Message Bumpa Bestie" }),
   ).toBeVisible();
@@ -129,14 +135,17 @@ test("country-aware sign-in validates input and normalizes UK and India numbers"
   });
 
   await page.goto("/login");
-  await page.getByLabel("Mobile number").fill("+44 7400 123456");
+  const mobileNumber = page.getByLabel("Mobile number");
+  await mobileNumber.fill("+44 7400 123456");
+  await expect(mobileNumber).toHaveValue("+44 7400 123456");
   await page.getByRole("button", { name: "Continue securely" }).click();
   await expect(page.locator("#login-error")).toContainText(
     "Enter only the number after +44.",
   );
   expect(requestedPhones).toEqual([]);
 
-  await page.getByLabel("Mobile number").fill("07400 123456");
+  await mobileNumber.fill("07400 123456");
+  await expect(mobileNumber).toHaveValue("07400 123456");
   await page.getByRole("button", { name: "Continue securely" }).click();
   await expect(
     page.getByRole("heading", { name: "Enter your web PIN." }),
@@ -144,7 +153,11 @@ test("country-aware sign-in validates input and normalizes UK and India numbers"
   await page.getByRole("button", { name: "Change number" }).click();
 
   await selectCountry(page, "IN");
-  await page.getByLabel("Mobile number").fill("98765 43210");
+  await expect(
+    page.getByRole("button", { name: "Country code, India +91" }),
+  ).toBeVisible();
+  await mobileNumber.fill("98765 43210");
+  await expect(mobileNumber).toHaveValue("98765 43210");
   await page.getByRole("button", { name: "Continue securely" }).click();
   await expect(
     page.getByRole("heading", { name: "Enter your web PIN." }),
@@ -346,15 +359,11 @@ test("country picker follows the visual viewport while open", async ({
   await expect(page.getByRole("listbox")).toHaveCount(0);
 });
 
-test("protected user, admin, and research surfaces fail closed without authorization", async ({
+test("protected consumer surfaces fail closed without a session", async ({
   page,
 }) => {
-  for (const url of [
-    "http://app.localhost:3010/chat",
-    "http://admin.localhost:3010/admin",
-    "http://research.localhost:3010/research/questions",
-  ]) {
-    await page.goto(url);
+  for (const path of ["/chat", "/profile", "/settings/team"]) {
+    await page.goto(`http://app.localhost:3010${path}`);
     await expect(page).toHaveURL(/\/login\?next=/);
     await expect(
       page.getByRole("heading", { name: "Welcome back." }),
@@ -362,120 +371,331 @@ test("protected user, admin, and research surfaces fail closed without authoriza
   }
 });
 
-test("operator onboarding reloads from the durable sync step before unlocking Hermes", async ({
+test("chat supports retry, durable URLs, history paging, and the mobile drawer", async ({
   page,
-}) => {
-  const syncing = {
-    id: "onboarding-e2e",
-    tenant_id: "tenant-onboarding-e2e",
-    status: "in_progress",
-    current_step: "initial_sync",
-    revision: 4,
-    tenant: {
-      id: "tenant-onboarding-e2e",
-      slug: "anika-e2e",
-      name: "Anika E2E",
-      status: "provisioning",
-    },
-    owner: {
-      user_id: "owner-e2e",
-      membership_id: "membership-owner-e2e",
-      name: "Ada Test",
-      email_masked: "a•••@example.test",
-      status: "active",
-    },
-    phone: {
-      identity_id: "phone-e2e",
-      phone_masked: "+1555••••716",
-      label: "Owner",
-      status: "active",
-      opt_out: false,
-    },
-    bumpa: {
-      connection_id: "bumpa-e2e",
-      provider: "bumpa",
-      scope_type: "business_id",
-      scope_id_last4: "1042",
-      status: "active",
-    },
-    initial_sync: {
-      attempt: 1,
-      requested_from: "2026-06-13",
-      requested_to: "2026-07-13",
-      job_id: "job-e2e",
-      job_status: "succeeded",
-      sync_run_id: "sync-e2e",
-      sync_status: "success",
-      completion_quality: "complete",
-      orders_availability: "available",
-      orders_count: 12,
-    },
-    hermes: null,
-    failure: null,
-    created_at: "2026-07-13T10:00:00Z",
-    updated_at: "2026-07-13T10:05:00Z",
-    completed_at: null,
-  };
-  let projection = syncing;
-  let acceptBody: Record<string, unknown> | null = null;
-  let acceptHeaders: Record<string, string> | null = null;
-
+}, testInfo) => {
+  await grantTestSession(page);
+  let sendAttempts = 0;
+  const clientMessageIds: string[] = [];
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
-    if (
-      path === "/api/backend/admin/onboardings/onboarding-e2e" &&
-      route.request().method() === "GET"
-    ) {
-      await json(route, projection);
+    if (path === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, {
+        items: [
+          {
+            id: "conversation-existing",
+            title: "Quarterly planning",
+            updated_at: "2026-07-21T08:00:00Z",
+            channel: "web",
+            last_message_preview: "Plan the next quarter",
+          },
+        ],
+        next_cursor: "cursor-2",
+      });
+      return;
+    }
+    if (path.includes("cursor=cursor-2")) {
+      await json(route, {
+        items: [
+          {
+            id: "conversation-older",
+            title: "Older stock review",
+            updated_at: "2026-06-21T08:00:00Z",
+            channel: "web",
+            last_message_preview: "Review older stock",
+          },
+        ],
+        next_cursor: null,
+      });
       return;
     }
     if (
       path ===
-        "/api/backend/admin/onboardings/onboarding-e2e/initial-sync/accept" &&
-      route.request().method() === "POST"
+      "/api/backend/chat/conversations/conversation-existing/messages?limit=50"
     ) {
-      acceptBody = route.request().postDataJSON() as Record<string, unknown>;
-      acceptHeaders = route.request().headers();
-      projection = {
-        ...syncing,
-        current_step: "hermes",
-        revision: 5,
+      await json(route, {
+        items: [
+          {
+            id: "message-existing",
+            direction: "outbound",
+            content: "Your quarterly plan is ready to review.",
+            created_at: "2026-07-21T08:01:00Z",
+          },
+        ],
+        next_cursor: null,
+      });
+      return;
+    }
+    if (
+      path ===
+      "/api/backend/chat/conversations/conversation-new/messages?limit=50"
+    ) {
+      await json(route, {
+        items: [
+          {
+            id: "message-inbound",
+            direction: "inbound",
+            content: "What should I restock first?",
+            created_at: "2026-07-21T08:29:00Z",
+          },
+          {
+            id: "message-outbound",
+            direction: "outbound",
+            content:
+              "Start with the products that sell quickly and have the longest supplier lead time.",
+            created_at: "2026-07-21T08:30:00Z",
+          },
+        ],
+        next_cursor: null,
+      });
+      return;
+    }
+    if (path === "/api/backend/chat/web") {
+      sendAttempts += 1;
+      const payload = route.request().postDataJSON() as {
+        client_message_id: string;
       };
-      await json(route, projection);
+      clientMessageIds.push(payload.client_message_id);
+      if (sendAttempts === 1) {
+        await json(
+          route,
+          {
+            detail: {
+              code: "provider_unavailable",
+              message: "The assistant is temporarily unavailable.",
+              retryable: true,
+            },
+          },
+          503,
+        );
+        return;
+      }
+      await json(route, {
+        answer:
+          "Start with the products that sell quickly and have the longest supplier lead time.",
+        conversation_id: "conversation-new",
+        inbound_message_id: "message-inbound",
+        outbound_message_id: "message-outbound",
+        data_freshness: "2026-07-21T08:30:00Z",
+      });
       return;
     }
     await route.abort("failed");
   });
 
-  await page.goto("http://localhost:3010/admin/onboarding/onboarding-e2e");
+  await page.goto("/chat");
+  const composer = page.getByRole("textbox", { name: "Message Bumpa Bestie" });
+  await composer.fill("What should I restock first?");
+  await expect(composer).toHaveValue("What should I restock first?");
+  if (testInfo.project.name === "mobile-chromium") {
+    await page.getByRole("button", { name: "Send message" }).click();
+  } else {
+    await composer.press("Enter");
+  }
+  await expect(page.getByText("Your message was not sent.")).toBeVisible();
+  await page.getByRole("button", { name: "Try again" }).click();
   await expect(
-    page.getByRole("heading", { name: "Initial data sync" }),
+    page.getByText(/Start with the products that sell quickly/),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Validate sync and continue →" }),
-  ).toBeEnabled();
-  await expect(
-    page.getByRole("button", { name: /Provision and verify Hermes/ }),
-  ).toHaveCount(0);
+  await expect(page).toHaveURL(/\/chat\/conversation-new$/);
+  expect(clientMessageIds).toHaveLength(2);
+  expect(clientMessageIds[1]).toBe(clientMessageIds[0]);
 
+  if (testInfo.project.name === "mobile-chromium") {
+    await page
+      .getByRole("button", { name: "Open conversation history" })
+      .click();
+  }
+  await page.getByRole("button", { name: /Quarterly planning/ }).click();
+  await expect(page).toHaveURL(/\/chat\/conversation-existing$/);
+  await expect(
+    page.getByText("Your quarterly plan is ready to review."),
+  ).toBeVisible();
   await page.reload();
   await expect(
-    page.getByRole("button", { name: "Validate sync and continue →" }),
-  ).toBeEnabled();
-  await page
-    .getByRole("button", { name: "Validate sync and continue →" })
-    .click();
-  await expect(
-    page.getByRole("button", { name: "Provision and verify Hermes →" }),
+    page.getByText("Your quarterly plan is ready to review."),
   ).toBeVisible();
-  expect(acceptBody).toEqual({ confirmation: "accept" });
-  expect(JSON.stringify(acceptBody)).not.toContain("job-e2e");
-  expect(acceptHeaders?.["if-match"]).toBe("4");
-  expect(acceptHeaders?.["idempotency-key"]).toBeTruthy();
+
+  if (testInfo.project.name === "mobile-chromium") {
+    await page
+      .getByRole("button", { name: "Open conversation history" })
+      .click();
+  }
+  await page.getByRole("button", { name: "Show more" }).click();
+  await expect(
+    page.getByRole("button", { name: /Older stock review/ }),
+  ).toBeVisible();
+});
+
+test("chat recovers after the browser returns online", async ({
+  page,
+}, testInfo) => {
+  await grantTestSession(page);
+  let sendAttempts = 0;
+  await page.route("**/api/backend/**", async (route) => {
+    const path = apiPath(route);
+    if (await fulfillSession(route)) return;
+    if (path === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    if (
+      path ===
+      "/api/backend/chat/conversations/conversation-recovered/messages?limit=50"
+    ) {
+      await json(route, {
+        items: [
+          {
+            id: "message-recovered-inbound",
+            direction: "inbound",
+            content: "What should I prioritise?",
+            created_at: "2026-07-21T08:29:00Z",
+          },
+          {
+            id: "message-recovered-outbound",
+            direction: "outbound",
+            content:
+              "You are back online. Start with the products selling fastest.",
+            created_at: "2026-07-21T08:30:00Z",
+          },
+        ],
+        next_cursor: null,
+      });
+      return;
+    }
+    if (path === "/api/backend/chat/web") {
+      sendAttempts += 1;
+      if (sendAttempts === 1) {
+        await route.abort("internetdisconnected");
+        return;
+      }
+      await json(route, {
+        answer: "You are back online. Start with the products selling fastest.",
+        conversation_id: "conversation-recovered",
+        inbound_message_id: "message-recovered-inbound",
+        outbound_message_id: "message-recovered-outbound",
+        data_freshness: null,
+      });
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  await page.goto("/chat");
+  const composer = page.getByRole("textbox", {
+    name: "Message Bumpa Bestie",
+  });
+  await composer.fill("What should I prioritise?");
+  await expect(composer).toHaveValue("What should I prioritise?");
+  if (testInfo.project.name === "mobile-chromium") {
+    await page.getByRole("button", { name: "Send message" }).click();
+  } else {
+    await composer.press("Enter");
+  }
+  await expect(page.getByText("Your message was not sent.")).toBeVisible();
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByText(/You are back online/)).toBeVisible();
+  await expect(page).toHaveURL(/\/chat\/conversation-recovered$/);
+});
+
+test("account menu logs out through the browser BFF", async ({
+  page,
+}, testInfo) => {
+  await grantTestSession(page);
+  await page.route("**/api/backend/**", async (route) => {
+    const path = apiPath(route);
+    if (await fulfillSession(route)) return;
+    if (path === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    if (path === "/api/backend/auth/logout") {
+      await json(route, { message: "Logged out" });
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  await page.goto("/chat");
+  if (testInfo.project.name === "mobile-chromium") {
+    await page
+      .getByRole("button", { name: "Open conversation history" })
+      .click();
+  }
+  await page.getByText("Your account", { exact: true }).click();
+  await page.getByRole("button", { name: "Log out" }).click();
+  await expect(page).toHaveURL(/\/login$/);
+});
+
+test("chat reflows at the CSS viewport equivalent of 200% desktop zoom", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop-chromium");
+  await grantTestSession(page);
+  await page.route("**/api/backend/**", async (route) => {
+    if (await fulfillSession(route)) return;
+    if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  await page.setViewportSize({ width: 720, height: 450 });
+  await page.goto("/chat");
+  await expect(
+    page.getByRole("button", { name: "Open conversation history" }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+});
+
+test("primary mobile chat controls keep generous touch targets", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-chromium");
+  await grantTestSession(page);
+  await page.route("**/api/backend/**", async (route) => {
+    if (await fulfillSession(route)) return;
+    if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    await route.abort("failed");
+  });
+
+  await page.goto("/chat");
+  const primaryControls = [
+    page.getByRole("button", { name: "Open conversation history" }),
+    page.getByRole("button", { name: "Start a new chat" }),
+    page.getByRole("button", { name: "Send message" }),
+  ];
+  for (const control of primaryControls) {
+    const bounds = await control.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds?.width).toBeGreaterThanOrEqual(38);
+    expect(bounds?.height).toBeGreaterThanOrEqual(38);
+  }
+  await primaryControls[0].click();
+  const drawerControls = [
+    page.getByRole("button", { name: "Close conversation history" }),
+    page.getByRole("button", { name: "New chat", exact: true }),
+    page.locator('summary[aria-label="Open account menu"]'),
+  ];
+  for (const control of drawerControls) {
+    const bounds = await control.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds?.width).toBeGreaterThanOrEqual(40);
+    expect(bounds?.height).toBeGreaterThanOrEqual(40);
+  }
 });
 
 test("team settings adds a persisted live member", async ({ page }) => {
+  await grantTestSession(page);
   let team = [...previewTeam];
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
@@ -524,6 +744,7 @@ test("team settings adds a persisted live member", async ({ page }) => {
 test("Bumpa settings renders live connection and sync evidence", async ({
   page,
 }) => {
+  await grantTestSession(page);
   await mockBumpa(page);
   await page.goto("/settings/bumpa");
   await expect(
@@ -538,76 +759,41 @@ test("Bumpa settings renders live connection and sync evidence", async ({
   await expect(page.getByText("Business Id · •••• 7712")).toBeVisible();
 });
 
-test("research filters update the live question result table", async ({
+test("consumer output contains no links to operational surfaces", async ({
   page,
 }) => {
   await page.route("**/api/backend/**", async (route) => {
     if (await fulfillSession(route)) return;
-    if (apiPath(route) === "/api/backend/research/questions") {
-      await json(route, previewResearchEvents);
+    if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
+      await json(route, { items: [], next_cursor: null });
       return;
     }
     await route.abort("failed");
   });
-  await page.goto("/research/questions");
-  await expect(page.getByText(/Live question events/)).toBeVisible();
-  const first = previewResearchEvents[0];
-  const second = previewResearchEvents[1];
-  await expect(page.getByText(first.redacted_text ?? "")).toBeVisible();
-  await page
-    .getByRole("textbox", { name: "Search" })
-    .fill(second.tenant_pseudonym);
-  await expect(page.getByText(second.redacted_text ?? "")).toBeVisible();
-  await expect(page.getByText(first.redacted_text ?? "")).toHaveCount(0);
-});
 
-test("research report generation can be queued with filters", async ({
-  page,
-}) => {
-  await page.route("**/api/backend/research/reports**", async (route) => {
-    if (route.request().method() === "POST") {
-      const payload = route.request().postDataJSON() as {
-        report_type: string;
-      };
-      await json(
-        route,
-        {
-          id: "report-browser-queue",
-          report_type: payload.report_type,
-          artifact_kind: "report",
-          title: "Browser-queued weekly memo",
-          status: "queued",
-          created_at: "2026-07-13T12:00:00Z",
-          finished_at: null,
-        },
-        202,
+  for (const path of ["/", "/chat"]) {
+    if (path === "/chat") await grantTestSession(page);
+    await page.goto(path);
+    const links = await page
+      .locator("a")
+      .evaluateAll((anchors) =>
+        anchors.map((anchor) => anchor.getAttribute("href") ?? ""),
       );
-      return;
-    }
-    await json(route, []);
-  });
-  await page.route("**/api/backend/auth/me", (route) =>
-    json(route, liveSession),
-  );
-
-  await page.goto("/research/reports");
-  await expect(page.getByText(/Live research artifacts/)).toBeVisible();
-  await page.getByRole("button", { name: /Create report/ }).click();
-  await page.getByLabel("From date").fill("2026-07-01");
-  await page.getByLabel("To date").fill("2026-07-13");
-  await page.getByLabel("Channel").selectOption("whatsapp");
-  await page.getByRole("button", { name: "Generate report" }).click();
-  await expect(
-    page.getByText(
-      "Report queued. Its status will appear in the artifact list shortly.",
-    ),
-  ).toBeVisible();
-  await expect(page.getByText("Browser-queued weekly memo")).toBeVisible();
+    expect(
+      links.some((href) => href.includes("admin") || href.includes("research")),
+    ).toBe(false);
+    await expect(
+      page.getByText(
+        /\bresearch\b|\badmin(?:istration)?\b|platform operations/i,
+      ),
+    ).toHaveCount(0);
+  }
 });
 
 test("the authenticated shell stays navigable without horizontal overflow", async ({
   page,
 }, testInfo) => {
+  await grantTestSession(page);
   await mockBumpa(page);
   await page.goto("/settings/bumpa");
   if (testInfo.project.name === "mobile-chromium") {

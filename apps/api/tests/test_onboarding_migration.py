@@ -65,7 +65,10 @@ def test_onboarding_migration_is_in_head_lineage_and_has_forced_tenant_rls(
 ) -> None:
     config = _config("sqlite://", monkeypatch)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_current_head() == "0015_bumpa_store_context"
+    assert scripts.get_current_head() == "0016_chat_pagination"
+    assert scripts.get_revision("0016_chat_pagination").down_revision == (
+        "0015_bumpa_store_context"
+    )
     assert scripts.get_revision("0015_bumpa_store_context").down_revision == (
         "0014_bumpa_canonical_metrics"
     )

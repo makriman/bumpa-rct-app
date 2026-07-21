@@ -56,7 +56,7 @@
 	# omits CSP (for example, a health response or an upstream error).
 	header ?Content-Security-Policy "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'"
 	encode zstd gzip
-	reverse_proxy web:3000 {
+	reverse_proxy {args[0]}:3000 {
 		import trusted_client_ip_headers
 		# Do not allow a client-supplied policy or nonce to reach Next. Middleware
 		# creates and overwrites both again before rendering as defense in depth.
@@ -69,8 +69,26 @@
 }
 
 {$CADDY_SITE_SCHEME:http}://{$APP_DOMAIN:bumpabestie.localhost} {
+	@legacyAdminRoot path /admin
+	redir @legacyAdminRoot {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/ 308
+	@legacyAdminErrors path /admin/errors
+	redir @legacyAdminErrors {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/failures 308
+	@legacyAdminProviders path /admin/providers
+	redir @legacyAdminProviders {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/provider-failures 308
+	@legacyAdminSync path /admin/sync
+	redir @legacyAdminSync {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/sync-runs 308
+	@legacyAdminUsers path /admin/users
+	redir @legacyAdminUsers {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/administrators 308
+	@legacyAdmin path_regexp legacyAdmin ^/admin/(.*)$
+	redir @legacyAdmin {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost}/{re.legacyAdmin.1} 308
+	@legacyResearchRoot path /research
+	redir @legacyResearchRoot {$CADDY_SITE_SCHEME:http}://{$RESEARCH_DOMAIN:research.bumpabestie.localhost}/ 308
+	@legacyResearch path_regexp legacyResearch ^/research/(.*)$
+	redir @legacyResearch {$CADDY_SITE_SCHEME:http}://{$RESEARCH_DOMAIN:research.bumpabestie.localhost}/{re.legacyResearch.1} 308
+	@legacyResearchConsent path /research-consent
+	redir @legacyResearchConsent {$CADDY_SITE_SCHEME:http}://{$RESEARCH_DOMAIN:research.bumpabestie.localhost}/consent 308
 	request_header X-Bumpa-Surface public
-	import web_proxy
+	import web_proxy web
 }
 
 {$CADDY_SITE_SCHEME:http}://{$WWW_DOMAIN:www.bumpabestie.localhost} {
@@ -81,12 +99,12 @@
 
 {$CADDY_SITE_SCHEME:http}://{$ADMIN_DOMAIN:admin.bumpabestie.localhost} {
 	request_header X-Bumpa-Surface admin
-	import web_proxy
+	import web_proxy admin-web
 }
 
 {$CADDY_SITE_SCHEME:http}://{$RESEARCH_DOMAIN:research.bumpabestie.localhost} {
 	request_header X-Bumpa-Surface research
-	import web_proxy
+	import web_proxy research-web
 }
 
 {$CADDY_SITE_SCHEME:http}://{$API_DOMAIN:api.bumpabestie.localhost} {

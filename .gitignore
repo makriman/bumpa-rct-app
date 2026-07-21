@@ -32,6 +32,7 @@ out/
 coverage/
 playwright-report/
 test-results/
+lighthouse-reports/
 *.tsbuildinfo
 
 # Runtime data and generated artifacts

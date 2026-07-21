@@ -4,6 +4,7 @@ import {
   correlationIdOrNew,
   isCanonicalCorrelationId,
 } from "@/lib/correlation";
+import { emitStructuredWebEvent, isRecord } from "@bumpabestie/web-foundation";
 
 const configuredOrigin =
   process.env.INTERNAL_API_BASE_URL ??
@@ -17,8 +18,6 @@ const ALLOWED_ROOTS = new Set([
   "chat",
   "settings",
   "tenants",
-  "admin",
-  "research",
   "bumpa",
   "mcp",
 ]);
@@ -90,6 +89,7 @@ async function proxy(
   const correlationId = correlationIdOrNew(
     request.headers.get("x-correlation-id"),
   );
+  const startedAt = performance.now();
   headers.set("x-correlation-id", correlationId);
   const hasBody = !["GET", "HEAD"].includes(request.method);
   if (hasBody)
@@ -112,13 +112,36 @@ async function proxy(
       cache: "no-store",
       redirect: "manual",
     });
+    emitStructuredWebEvent({
+      event:
+        path[0] === "auth"
+          ? "authentication"
+          : path[0] === "chat" && request.method === "POST"
+            ? "message_submission"
+            : path[0] === "chat"
+              ? "conversation_loading"
+              : "api_request",
+      surface: "consumer",
+      correlation_id: correlationId,
+      status: upstream.ok ? "success" : "error",
+      latency_ms: Math.round(performance.now() - startedAt),
+      route: `/${path[0]}`,
+    });
     const upstreamCorrelationId = upstream.headers.get("x-correlation-id");
     const responseCorrelationId = isCanonicalCorrelationId(
       upstreamCorrelationId,
     )
       ? upstreamCorrelationId
       : correlationId;
-    const upstreamBody = await upstream.arrayBuffer();
+    // This BFF deliberately preserves both success and structured API error
+    // bodies. Keep the status branches explicit so failures can never be
+    // mistaken for successful application payloads.
+    let upstreamBody: ArrayBuffer;
+    if (upstream.ok) {
+      upstreamBody = await upstream.arrayBuffer();
+    } else {
+      upstreamBody = await upstream.arrayBuffer();
+    }
     let responseBody: ArrayBuffer | string = upstreamBody;
     let responseStatus = upstream.status;
     let forwardSetCookie = true;
@@ -129,10 +152,10 @@ async function proxy(
       path[1] === "verify-otp"
     ) {
       try {
-        const payload = JSON.parse(
+        const payload: unknown = JSON.parse(
           new TextDecoder().decode(upstreamBody),
-        ) as Record<string, unknown> | null;
-        if (payload && typeof payload === "object") {
+        );
+        if (isRecord(payload)) {
           delete payload.access_token;
           responseBody = JSON.stringify(payload);
         }
@@ -183,10 +206,18 @@ async function proxy(
     }
     return response;
   } catch {
+    emitStructuredWebEvent({
+      event: path[0] === "chat" ? "chat_api_failure" : "api_failure",
+      surface: "consumer",
+      correlation_id: correlationId,
+      status: "error",
+      latency_ms: Math.round(performance.now() - startedAt),
+      route: `/${path[0]}`,
+    });
     return NextResponse.json(
       {
         detail:
-          "The local API is unavailable. Start FastAPI or enable the labelled demo fallback.",
+          "The API is unavailable. Start the local FastAPI service and try again.",
       },
       { status: 503, headers: { "x-correlation-id": correlationId } },
     );

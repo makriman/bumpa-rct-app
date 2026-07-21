@@ -24,7 +24,7 @@ x-app-environment: &app-environment
   FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-local-only-change-me-at-least-32-characters}
   FIELD_ENCRYPTION_KEY_ID: ${FIELD_ENCRYPTION_KEY_ID:-primary}
   FIELD_ENCRYPTION_WRITE_VERSION: ${FIELD_ENCRYPTION_WRITE_VERSION:-v1}
-  FIELD_ENCRYPTION_OLD_KEYS: '${FIELD_ENCRYPTION_OLD_KEYS:-{}}'
+  FIELD_ENCRYPTION_OLD_KEYS: "${FIELD_ENCRYPTION_OLD_KEYS:-{}}"
   RESEARCH_PSEUDONYM_KEY: ${RESEARCH_PSEUDONYM_KEY:-local-only-change-me-at-least-32-characters}
   ONBOARDING_INTEGRITY_KEY: ${ONBOARDING_INTEGRITY_KEY:-local-only-change-me-at-least-32-characters}
   INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-local-only-change-me-at-least-32-characters}
@@ -189,6 +189,10 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+      admin-web:
+        condition: service_healthy
+      research-web:
+        condition: service_healthy
     networks:
       - edge
       - app
@@ -202,8 +206,6 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-      args:
-        NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-true}
     init: true
     environment:
       NODE_ENV: ${NODE_ENV:-production}
@@ -211,7 +213,6 @@ services:
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://bumpabestie.localhost:8080}
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api.bumpabestie.localhost:8080}
       API_BASE_URL: ${API_BASE_URL:-http://api:8000}
-      NEXT_PUBLIC_DEMO_MODE: ${NEXT_PUBLIC_DEMO_MODE:-true}
     depends_on:
       api:
         condition: service_healthy
@@ -219,7 +220,77 @@ services:
       - app
       - egress
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  admin-web:
+    image: bumpabestie-admin-web:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/admin-web/Dockerfile
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: ${ADMIN_ORIGIN:-http://admin.bumpabestie.localhost:8080}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api.bumpabestie.localhost:8080}
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - app
+      - egress
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  research-web:
+    image: bumpabestie-research-web:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/research-web/Dockerfile
+    init: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_APP_URL: ${RESEARCH_ORIGIN:-http://research.bumpabestie.localhost:8080}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://api.bumpabestie.localhost:8080}
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - app
+      - egress
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -228,9 +299,27 @@ services:
 
   api:
     <<: *api-service
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7", "--no-access-log"]
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--proxy-headers",
+        "--forwarded-allow-ips",
+        "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+        "--no-access-log",
+      ]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -299,7 +388,17 @@ services:
   redis:
     image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     init: true
-    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1000"]
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--appendfsync",
+        "everysec",
+        "--save",
+        "60",
+        "1000",
+      ]
     volumes:
       - redis_data:/data
     networks:

@@ -1,141 +1,65 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { apiRequest, demoFallbackEnabled } from "@/lib/api";
-import {
-  adminNav,
-  researchNav,
-  userNav,
-  type NavGroup,
-} from "@/lib/navigation";
+import { focusableElements, trapTabKey } from "@bumpabestie/web-foundation";
+
+import { apiRequest } from "@/lib/api";
+import { replaceLocation } from "@/lib/browser-navigation";
+import { userNav } from "@/lib/navigation";
 import { AppIcon } from "./app-icon";
 import { Brand } from "./ui";
 
-type Surface = "user" | "admin" | "research";
-
 type SessionView = {
-  user: {
-    id: string;
-    name: string;
-    email: string | null;
-    phone_e164: string;
-  };
-  platform_roles: string[];
+  user: { name: string };
+  current_tenant_id: string | null;
   memberships: Array<{
-    id: string;
     tenant_id: string;
     role: string;
     status: string;
   }>;
-  current_tenant_id: string | null;
 };
 
-function navFor(surface: Surface): NavGroup[] {
-  return surface === "admin"
-    ? adminNav
-    : surface === "research"
-      ? researchNav
-      : userNav;
-}
-
-export function crossSurfaceHref(
-  target: "tenant" | "admin" | "research",
-  currentHref: string,
-): string {
-  const path =
-    target === "tenant" ? "/chat" : target === "admin" ? "/admin" : "/research";
-  try {
-    const url = new URL(currentHref);
-    const baseHostname = url.hostname.replace(/^(admin|research|www)\./, "");
-    if (
-      baseHostname === "localhost" ||
-      baseHostname === "127.0.0.1" ||
-      baseHostname === "::1"
-    ) {
-      return path;
-    }
-    url.hostname =
-      target === "admin"
-        ? `admin.${baseHostname}`
-        : target === "research"
-          ? `research.${baseHostname}`
-          : baseHostname;
-    url.pathname = path;
-    url.search = "";
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return path;
-  }
-}
-
 export function AppShell({
-  surface,
   title,
   children,
   fullBleed = false,
 }: {
-  surface: Surface;
   title: string;
   children: React.ReactNode;
   fullBleed?: boolean;
 }) {
   const pathname = usePathname();
-  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const sidebarRef = useRef<HTMLElement>(null);
-  const appMainRef = useRef<HTMLDivElement>(null);
   const [ready, setReady] = useState(false);
-  const [dataSource, setDataSource] = useState<"checking" | "live" | "demo">(
-    "checking",
-  );
   const [session, setSession] = useState<SessionView | null>(null);
   const [logoutPending, setLogoutPending] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [workspaceLinks, setWorkspaceLinks] = useState({
-    tenant: "/chat",
-    admin: "/admin",
-    research: "/research",
-  });
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     void apiRequest<SessionView>("/auth/me")
       .then((result) => {
         setSession(result);
-        setDataSource("live");
         setReady(true);
       })
       .catch(() => {
-        if (demoFallbackEnabled) {
-          setDataSource("demo");
-          setReady(true);
-        } else {
-          router.replace(`/login?next=${encodeURIComponent(pathname)}`);
-        }
+        replaceLocation(`/login?next=${encodeURIComponent(pathname)}`);
       });
-  }, [pathname, router]);
-  useEffect(() => {
-    setWorkspaceLinks({
-      tenant: crossSurfaceHref("tenant", window.location.href),
-      admin: crossSurfaceHref("admin", window.location.href),
-      research: crossSurfaceHref("research", window.location.href),
-    });
-  }, []);
+  }, [pathname]);
+
   useEffect(() => {
     if (!menuOpen) return;
+    const restoreFocusTo = menuButtonRef.current;
     const sidebar = sidebarRef.current;
-    const appMain = appMainRef.current;
-    const menuButton = menuButtonRef.current;
+    const content = contentRef.current;
     const previousOverflow = document.body.style.overflow;
-    appMain?.setAttribute("inert", "");
+    const focusable = focusableElements(sidebar);
+    content?.setAttribute("inert", "");
     document.body.style.overflow = "hidden";
-    const focusable = Array.from(
-      sidebar?.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-      ) ?? [],
-    );
     focusable[0]?.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -144,97 +68,50 @@ export function AppShell({
         setMenuOpen(false);
         return;
       }
-      if (event.key !== "Tab" || focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      trapTabKey(event, sidebar);
     };
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      appMain?.removeAttribute("inert");
+      content?.removeAttribute("inert");
       document.body.style.overflow = previousOverflow;
-      menuButton?.focus();
+      restoreFocusTo?.focus();
     };
   }, [menuOpen]);
-  const canManagePlatformAdmins = Boolean(
-    session?.platform_roles.includes("superadmin") ||
-      (!session && dataSource === "demo"),
+
+  const membership = session?.memberships.find(
+    (item) => item.tenant_id === session.current_tenant_id,
   );
-  const nav = navFor(surface).map((group) => ({
-    ...group,
-    items: group.items.filter(
-      (item) => item.href !== "/admin/users" || canManagePlatformAdmins,
-    ),
-  }));
-  const demoName =
-    surface === "admin"
-      ? "Demo platform admin"
-      : surface === "research"
-        ? "Demo researcher"
-        : "Demo SME owner";
-  const displayName = session?.user.name ?? demoName;
-  const currentMembership = session?.memberships.find(
-    (membership) => membership.tenant_id === session.current_tenant_id,
-  );
-  const displayRole = session
-    ? surface === "admin"
-      ? session.platform_roles.includes("superadmin")
-        ? "Platform superadmin"
-        : "Platform operator"
-      : surface === "research"
-        ? "Researcher · redacted access"
-        : `${currentMembership?.role ?? "member"} · current workspace`
-    : surface === "admin"
-      ? "Demo preview · administrator"
-      : surface === "research"
-        ? "Demo preview · researcher"
-        : "Demo preview · owner";
-  const hasPlatformAdminAccess = Boolean(
-    session?.platform_roles.some((role) =>
-      ["operator", "superadmin"].includes(role),
-    ),
-  );
-  const hasResearchAccess = Boolean(
-    session?.platform_roles.some((role) =>
-      ["researcher", "superadmin"].includes(role),
-    ),
-  );
-  const hasActiveWorkspace = currentMembership?.status === "active";
-  async function handleLogout() {
+  const displayName = session?.user.name ?? "SME owner";
+
+  const logout = async () => {
     if (logoutPending) return;
     setLogoutPending(true);
     setLogoutError(null);
     try {
-      await apiRequest<{ message: string }>("/auth/logout", {
-        method: "POST",
-      });
-      router.replace("/login");
-    } catch (error) {
+      await apiRequest("/auth/logout", { method: "POST" });
+      replaceLocation("/login");
+    } catch (reason) {
       setLogoutError(
-        error instanceof Error
-          ? error.message
-          : "We could not log you out. Please try again.",
+        reason instanceof Error ? reason.message : "We could not log you out.",
       );
       setLogoutPending(false);
     }
-  }
-  if (!ready && process.env.NODE_ENV !== "development")
+  };
+
+  if (!ready) {
     return (
-      <main className="page">
+      <main className="page" aria-busy="true">
         <div className="skeleton" style={{ height: 400 }} />
       </main>
     );
+  }
+
   return (
     <div className="app-layout">
       {menuOpen && (
         <button
+          type="button"
           className="sidebar-scrim"
           aria-label="Close navigation"
           tabIndex={-1}
@@ -243,13 +120,14 @@ export function AppShell({
       )}
       <aside
         ref={sidebarRef}
-        id="workspace-navigation"
+        id="account-navigation"
         className={`sidebar ${menuOpen ? "open" : ""}`}
-        aria-label="Primary navigation"
+        aria-label="Account navigation"
       >
         <div className="sidebar-head">
           <Brand />
           <button
+            type="button"
             className="icon-button sidebar-close"
             aria-label="Close navigation panel"
             onClick={() => setMenuOpen(false)}
@@ -257,15 +135,14 @@ export function AppShell({
             <AppIcon name="close" />
           </button>
         </div>
-        {nav.map((group) => (
+        {userNav.map((group) => (
           <div key={group.label}>
             <div className="nav-label">{group.label}</div>
             <nav className="side-nav" aria-label={`${group.label} navigation`}>
               {group.items.map((item) => {
                 const active =
                   item.href === pathname ||
-                  (item.href !== `/${surface}` &&
-                    pathname.startsWith(`${item.href}/`));
+                  pathname.startsWith(`${item.href}/`);
                 return (
                   <Link
                     key={item.href}
@@ -285,97 +162,17 @@ export function AppShell({
           </div>
         ))}
         <div className="sidebar-bottom">
-          {surface === "admin" && hasActiveWorkspace && (
-            <Link
-              className="workspace-switch"
-              href={workspaceLinks.tenant}
-              aria-label="Switch to your tenant workspace"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="workspace-switch-icon" aria-hidden="true">
-                <AppIcon name="external" />
-              </span>
-              <span>
-                <strong>My tenant workspace</strong>
-                <small>Open your store membership</small>
-              </span>
-            </Link>
-          )}
-          {surface === "user" && hasPlatformAdminAccess && (
-            <Link
-              className="workspace-switch"
-              href={workspaceLinks.admin}
-              aria-label="Switch to platform administration"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="workspace-switch-icon" aria-hidden="true">
-                <AppIcon name="external" />
-              </span>
-              <span>
-                <strong>Platform administration</strong>
-                <small>Manage tenant mappings</small>
-              </span>
-            </Link>
-          )}
-          {surface !== "research" && hasResearchAccess && (
-            <Link
-              className="workspace-switch"
-              href={workspaceLinks.research}
-              aria-label="Switch to research workspace"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="workspace-switch-icon" aria-hidden="true">
-                <AppIcon name="external" />
-              </span>
-              <span>
-                <strong>Research workspace</strong>
-                <small>Open redacted research tools</small>
-              </span>
-            </Link>
-          )}
-          {surface === "research" && hasPlatformAdminAccess && (
-            <Link
-              className="workspace-switch"
-              href={workspaceLinks.admin}
-              aria-label="Switch to platform administration"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="workspace-switch-icon" aria-hidden="true">
-                <AppIcon name="external" />
-              </span>
-              <span>
-                <strong>Platform administration</strong>
-                <small>Manage tenant mappings</small>
-              </span>
-            </Link>
-          )}
-          {surface === "research" && hasActiveWorkspace && (
-            <Link
-              className="workspace-switch"
-              href={workspaceLinks.tenant}
-              aria-label="Switch to your tenant workspace"
-              onClick={() => setMenuOpen(false)}
-            >
-              <span className="workspace-switch-icon" aria-hidden="true">
-                <AppIcon name="external" />
-              </span>
-              <span>
-                <strong>My tenant workspace</strong>
-                <small>Open your store membership</small>
-              </span>
-            </Link>
-          )}
           <div className="user-chip">
             <span className="avatar">
               {displayName
                 .split(" ")
-                .map((v) => v[0])
+                .map((part) => part[0])
                 .slice(0, 2)
                 .join("")}
             </span>
             <div className="user-meta">
               <strong>{displayName}</strong>
-              <span>{displayRole}</span>
+              <span>{membership?.role ?? "Workspace member"}</span>
             </div>
           </div>
           {logoutError && (
@@ -384,11 +181,11 @@ export function AppShell({
             </p>
           )}
           <button
-            className="side-link side-action"
             type="button"
+            className="side-link side-action"
             disabled={logoutPending}
             aria-busy={logoutPending}
-            onClick={() => void handleLogout()}
+            onClick={() => void logout()}
           >
             <span className="nav-icon" aria-hidden="true">
               <AppIcon name="logout" />
@@ -397,14 +194,15 @@ export function AppShell({
           </button>
         </div>
       </aside>
-      <div ref={appMainRef} className="app-main">
+      <div ref={contentRef} className="app-main">
         <header className="topbar">
           <div className="topbar-heading">
             <button
               ref={menuButtonRef}
+              type="button"
               className="icon-button mobile-menu-button"
               aria-label="Open navigation"
-              aria-controls="workspace-navigation"
+              aria-controls="account-navigation"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen(true)}
             >
@@ -412,27 +210,11 @@ export function AppShell({
             </button>
             <span className="topbar-title">{title}</span>
           </div>
-          <div className="topbar-actions">
-            <span className="environment">
-              {dataSource === "live"
-                ? "LIVE API"
-                : dataSource === "checking"
-                  ? "CHECKING API"
-                  : "DEMO DATA"}
-            </span>
-            <button className="icon-button" aria-label="Notifications">
-              <AppIcon name="bell" />
-            </button>
-            <span className="avatar">
-              {displayName
-                .split(" ")
-                .map((v) => v[0])
-                .slice(0, 2)
-                .join("")}
-            </span>
-          </div>
+          <Link className="button button-secondary" href="/chat">
+            Back to chat
+          </Link>
         </header>
-        <main id="main-content" className={fullBleed ? "" : "page"}>
+        <main className={fullBleed ? "page page-full" : "page"}>
           {children}
         </main>
       </div>

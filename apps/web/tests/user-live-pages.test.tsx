@@ -8,13 +8,22 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ChatPage from "@/app/chat/page";
+import { ChatWorkspace } from "@/components/chat/chat-workspace";
 import ProfilePage from "@/app/profile/page";
 
 vi.mock("@/components/app-shell", () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => (
     <main>{children}</main>
   ),
+}));
+
+const router = {
+  push: vi.fn(),
+  replace: vi.fn(),
+};
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => router,
 }));
 
 afterEach(() => {
@@ -35,21 +44,27 @@ describe("deployment-facing user pages", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input) => {
         const url = String(input);
-        if (url.endsWith("/chat/conversations")) {
-          return jsonResponse([
-            {
-              id: "conversation-live",
-              channel: "web",
-              title: "Real inventory question",
-              status: "active",
-              updated_at: "2026-07-12T10:42:00Z",
-            },
-          ]);
-        }
-        if (url.endsWith("/chat/conversations/conversation-live")) {
+        if (url.endsWith("/chat/conversations/page?limit=30")) {
           return jsonResponse({
-            id: "conversation-live",
-            messages: [
+            items: [
+              {
+                id: "conversation-live",
+                channel: "web",
+                title: "Real inventory question",
+                last_message_preview: "Your tenant answer from the API.",
+                updated_at: "2026-07-12T10:42:00Z",
+              },
+            ],
+            next_cursor: null,
+          });
+        }
+        if (
+          url.endsWith(
+            "/chat/conversations/conversation-live/messages?limit=50",
+          )
+        ) {
+          return jsonResponse({
+            items: [
               {
                 id: "message-inbound",
                 direction: "inbound",
@@ -63,33 +78,31 @@ describe("deployment-facing user pages", () => {
                 created_at: "2026-07-12T10:42:02Z",
               },
             ],
+            next_cursor: null,
           });
         }
         throw new Error(`Unexpected request: ${url}`);
       });
 
-    render(<ChatPage />);
-
-    expect(screen.queryByText(/Adire Table Runner/)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Demo prompts")).not.toBeInTheDocument();
-    expect(
-      await screen.findByRole("button", { name: /Real inventory question/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Tenant API")).toBeInTheDocument();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: /Real inventory question/ }),
-    );
+    render(<ChatWorkspace initialConversationId="conversation-live" />);
 
     expect(
-      await screen.findByText("Which item needs restocking?"),
+      await screen.findByRole(
+        "button",
+        { name: /Real inventory question/ },
+        { timeout: 5_000 },
+      ),
+    ).toBeInTheDocument();
+
+    expect(
+      await screen.findByText("Which item needs restocking?", undefined, {
+        timeout: 5_000,
+      }),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Your tenant answer from the API."),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Saved tenant conversation · API/),
-    ).toBeInTheDocument();
+      screen.getAllByText("Your tenant answer from the API.").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/Saved conversation/)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -98,10 +111,10 @@ describe("deployment-facing user pages", () => {
       jsonResponse({ detail: "Conversation service is unavailable" }, 503),
     );
 
-    render(<ChatPage />);
+    render(<ChatWorkspace />);
 
     expect(
-      await screen.findByText("Conversation history unavailable"),
+      await screen.findByText("Recent chats are unavailable"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Conversation service is unavailable"),

@@ -338,6 +338,11 @@ class Settings(BaseSettings):
         if self.system_error_retention_days * 24 < self.ops_alert_scan_lookback_hours:
             raise ValueError("SYSTEM_ERROR_RETENTION_DAYS must cover OPS_ALERT_SCAN_LOOKBACK_HOURS")
         if self.app_env == "production":
+            if self.cookie_domain is not None:
+                raise ValueError(
+                    "Production session cookies must remain host-only; "
+                    "SESSION_COOKIE_DOMAIN cannot be configured"
+                )
             insecure = (
                 self.jwt_secret.startswith("local-only"),
                 self.otp_secret.startswith("local-only"),

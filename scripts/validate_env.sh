@@ -72,7 +72,7 @@ fi
 if [[ "$expected_environment" == "production" ]]; then
   release_keys=(
     GHCR_OWNER DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG
-    API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE
+    API_IMAGE WEB_IMAGE ADMIN_WEB_IMAGE RESEARCH_WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE
   )
   for key in "${release_keys[@]}"; do
     if [[ -z "$(value_for "$key")" ]]; then
@@ -121,6 +121,8 @@ if [[ "$expected_environment" == "production" ]]; then
   }
   validate_image_ref API_IMAGE bumpabestie-api
   validate_image_ref WEB_IMAGE bumpabestie-web
+  validate_image_ref ADMIN_WEB_IMAGE bumpabestie-admin-web
+  validate_image_ref RESEARCH_WEB_IMAGE bumpabestie-research-web
   validate_image_ref CADDY_IMAGE bumpabestie-caddy
   validate_image_ref POSTGRES_IMAGE bumpabestie-postgres
   validate_image_ref BACKUP_IMAGE bumpabestie-backup
@@ -212,10 +214,6 @@ for old_id, secret in old_keys.items():
   fi
   if [[ "$(value_for EXPOSE_LOCAL_OTP)" != "false" || "$(value_for SEED_DEMO_DATA)" != "false" ]]; then
     echo "EXPOSE_LOCAL_OTP and SEED_DEMO_DATA must be false in production" >&2
-    failed=1
-  fi
-  if [[ "$(value_for NEXT_PUBLIC_DEMO_MODE)" != "false" ]]; then
-    echo "NEXT_PUBLIC_DEMO_MODE must be false in production" >&2
     failed=1
   fi
   if [[ "$(value_for CADDY_SITE_SCHEME)" != "https" ]]; then

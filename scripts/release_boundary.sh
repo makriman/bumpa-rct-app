@@ -79,6 +79,8 @@ load_release_boundary() {
     (.images | type == "object") and
     ([
       .images.api, .images.worker, .images.scheduler, .images.web,
+      (.images.admin_web // .images.web),
+      (.images.research_web // .images.web),
       .images.caddy, .images.postgres, .images.backup, .images.hermes
     ] | all(type == "string" and
       test("^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$"))) and
@@ -136,6 +138,10 @@ load_release_boundary() {
   # shellcheck disable=SC2034
   RELEASE_WEB_IMAGE="$(jq --raw-output '.images.web' "$release_file")"
   # shellcheck disable=SC2034
+  RELEASE_ADMIN_WEB_IMAGE="$(jq --raw-output '.images.admin_web // .images.web' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_RESEARCH_WEB_IMAGE="$(jq --raw-output '.images.research_web // .images.web' "$release_file")"
+  # shellcheck disable=SC2034
   RELEASE_CADDY_IMAGE="$(jq --raw-output '.images.caddy' "$release_file")"
   # shellcheck disable=SC2034
   RELEASE_POSTGRES_IMAGE="$(jq --raw-output '.images.postgres' "$release_file")"
@@ -161,7 +167,8 @@ load_release_boundary() {
 
   validate_release_pointer_values \
     "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" \
-    "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" \
+    "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_ADMIN_WEB_IMAGE" \
+    "$RELEASE_RESEARCH_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" \
     "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" \
     && validate_auth_boundary_values \
       "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" \
@@ -178,15 +185,17 @@ _rewrite_release_environment() (
   local infra_image_tag="$4"
   local api_image="$5"
   local web_image="$6"
-  local caddy_image="$7"
-  local postgres_image="$8"
-  local backup_image="$9"
-  local hermes_image="${10}"
-  local auth_login_mode="${11:-}"
-  local verifier_file="${12:-}"
-  local verifier_host="${13:-}"
-  local expires_at="${14:-}"
-  local whatsapp_backend="${15:-}"
+  local admin_web_image="$7"
+  local research_web_image="$8"
+  local caddy_image="$9"
+  local postgres_image="${10}"
+  local backup_image="${11}"
+  local hermes_image="${12}"
+  local auth_login_mode="${13:-}"
+  local verifier_file="${14:-}"
+  local verifier_host="${15:-}"
+  local expires_at="${16:-}"
+  local whatsapp_backend="${17:-}"
   local canonicalize_whatsapp_cadences=0
   local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
   local env_tmp env_uid env_gid
@@ -199,7 +208,8 @@ _rewrite_release_environment() (
   fi
   validate_release_pointer_values \
     "$revision" "$image_tag" "$infra_image_tag" \
-    "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
+    "$api_image" "$web_image" "$admin_web_image" "$research_web_image" \
+    "$caddy_image" "$postgres_image" \
     "$backup_image" "$hermes_image" || return 1
   if [[ "$include_auth" == "1" ]]; then
     validate_auth_boundary_values \
@@ -229,6 +239,8 @@ _rewrite_release_environment() (
     -v infra_image_tag="$infra_image_tag" \
     -v api_image="$api_image" \
     -v web_image="$web_image" \
+    -v admin_web_image="$admin_web_image" \
+    -v research_web_image="$research_web_image" \
     -v caddy_image="$caddy_image" \
     -v postgres_image="$postgres_image" \
     -v backup_image="$backup_image" \
@@ -248,6 +260,8 @@ _rewrite_release_environment() (
         replacement["INFRA_IMAGE_TAG"] = infra_image_tag
         replacement["API_IMAGE"] = api_image
         replacement["WEB_IMAGE"] = web_image
+        replacement["ADMIN_WEB_IMAGE"] = admin_web_image
+        replacement["RESEARCH_WEB_IMAGE"] = research_web_image
         replacement["CADDY_IMAGE"] = caddy_image
         replacement["POSTGRES_IMAGE"] = postgres_image
         replacement["BACKUP_IMAGE"] = backup_image
@@ -302,11 +316,11 @@ _rewrite_release_environment() (
 )
 
 rewrite_release_pointers() {
-  (($# == 10)) || return 1
+  (($# == 12)) || return 1
   _rewrite_release_environment 0 "$@"
 }
 
 rewrite_release_boundary() {
-  (($# == 15)) || return 1
+  (($# == 17)) || return 1
   _rewrite_release_environment 1 "$@"
 }

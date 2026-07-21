@@ -6,7 +6,7 @@ export const metadata: Metadata = publicPageMetadata({
   path: "/privacy",
   pageTitle: "Privacy notice",
   pageDescription:
-    "How Bumpa Bestie processes, protects, and governs business and research data.",
+    "How Bumpa Bestie processes, protects, and governs your business data.",
 });
 
 export default function PrivacyPage() {
@@ -25,9 +25,8 @@ export default function PrivacyPage() {
         <h2>Information we process</h2>
         <p>
           We process account details, approved WhatsApp identifiers, chat
-          content, Bumpa commerce summaries, system activity, and research
-          classifications. Raw order and message payloads are sensitive and
-          protected with stricter access.
+          content, Bumpa commerce summaries, and system activity. Raw order and
+          message payloads are sensitive and protected with stricter access.
         </p>
         <h2>How information is used</h2>
         <ul>
@@ -36,16 +35,11 @@ export default function PrivacyPage() {
           </li>
           <li>To answer business questions using authorised data.</li>
           <li>To operate, secure, and improve the service.</li>
-          <li>
-            For consented research using redaction and pseudonymisation by
-            default.
-          </li>
         </ul>
         <h2>Your choices</h2>
         <p>
-          You may ask your workspace owner to update access, opt out of WhatsApp
-          messages using STOP, or withdraw research consent through the
-          documented research process.
+          You may ask your workspace owner to update access or opt out of
+          WhatsApp messages using STOP.
         </p>
         <h2>Security</h2>
         <p>

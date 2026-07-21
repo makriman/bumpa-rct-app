@@ -39,6 +39,8 @@ fi
   uv sync --all-extras --locked
 )
 npm --prefix apps/web ci
+npm --prefix apps/admin-web ci
+npm --prefix apps/research-web ci
 docker compose config --quiet
 
 echo "Local dependencies are ready. Run: make dev"

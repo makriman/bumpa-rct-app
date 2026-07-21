@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
-import { DELETE, GET, POST, PUT } from "@/app/api/backend/[...path]/route";
+import { GET, POST, PUT } from "@/app/api/backend/[...path]/route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -127,93 +127,19 @@ describe("same-origin backend proxy", () => {
     expect(headers.has("x-internal-secret")).toBe(false);
   });
 
-  it("forwards audited platform access grants as PUT requests", async () => {
-    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          user_id: "target-user",
-          platform_roles: ["operator"],
-          has_active_mapping: true,
-        }),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
-    const request = new NextRequest(
-      "https://admin.bumpabestie.example/api/backend/admin/platform-access/target-user/operator",
-      {
-        method: "PUT",
-        headers: {
-          cookie: "bb_session=signed",
-          origin: "https://admin.bumpabestie.example",
-          "x-access-reason": "Approved pilot collaborator access",
-        },
-      },
-    );
-
-    const response = await PUT(
-      request,
-      context("admin", "platform-access", "target-user", "operator"),
-    );
-
-    expect(response.status).toBe(200);
-    const [url, init] = upstream.mock.calls[0];
-    expect(String(url)).toBe(
-      "http://127.0.0.1:8000/v1/admin/platform-access/target-user/operator",
-    );
-    expect(init?.method).toBe("PUT");
-    const headers = new Headers(init?.headers);
-    expect(headers.get("cookie")).toBe("bb_session=signed");
-    expect(headers.get("origin")).toBe("https://admin.bumpabestie.example");
-    expect(headers.get("x-access-reason")).toBe(
-      "Approved pilot collaborator access",
-    );
-  });
-
-  it("passes a committed no-content access revocation through exactly once", async () => {
-    const correlationId = "4f182cc8-79dd-4ac2-bd62-3519a3c27ac8";
-    const upstream = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(null, {
-        status: 204,
-        headers: {
-          "content-type": "application/json",
-          "x-correlation-id": correlationId,
-        },
-      }),
-    );
-    const request = new NextRequest(
-      "https://admin.bumpabestie.example/api/backend/admin/platform-access/target-user/operator",
-      {
-        method: "DELETE",
-        headers: {
-          cookie: "bb_session=signed",
-          origin: "https://admin.bumpabestie.example",
-          "x-access-reason": "Approved collaborator access revocation",
-        },
-      },
-    );
-
-    const response = await DELETE(
-      request,
-      context("admin", "platform-access", "target-user", "operator"),
-    );
-
-    expect(upstream).toHaveBeenCalledTimes(1);
-    expect(response.status).toBe(204);
-    expect(response.headers.get("content-type")).toBe("application/json");
-    expect(response.headers.get("x-correlation-id")).toBe(correlationId);
-    expect((await response.arrayBuffer()).byteLength).toBe(0);
-    const [url, init] = upstream.mock.calls[0];
-    expect(String(url)).toBe(
-      "http://127.0.0.1:8000/v1/admin/platform-access/target-user/operator",
-    );
-    expect(init?.method).toBe("DELETE");
-    expect(new Headers(init?.headers).get("x-access-reason")).toBe(
-      "Approved collaborator access revocation",
-    );
-  });
+  it.each(["admin", "research"])(
+    "rejects the %s API root from the consumer BFF",
+    async (root) => {
+      const upstream = vi.spyOn(globalThis, "fetch");
+      const request = new NextRequest(
+        `https://bumpabestie.example/api/backend/${root}/private`,
+        { method: "PUT" },
+      );
+      const response = await PUT(request, context(root, "private"));
+      expect(response.status).toBe(404);
+      expect(upstream).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([205, 304])(
     "does not attach a response body to status %i",

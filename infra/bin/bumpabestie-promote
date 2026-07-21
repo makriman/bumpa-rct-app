@@ -196,6 +196,8 @@ render_previous_environment() {
     -v infra_image_tag="$previous_infra_image_tag" \
     -v api_image="$previous_api_image" \
     -v web_image="$previous_web_image" \
+    -v admin_web_image="$previous_admin_web_image" \
+    -v research_web_image="$previous_research_web_image" \
     -v caddy_image="$previous_caddy_image" \
     -v postgres_image="$previous_postgres_image" \
     -v backup_image="$previous_backup_image" \
@@ -216,6 +218,8 @@ render_previous_environment() {
         replacement["INFRA_IMAGE_TAG"] = infra_image_tag
         replacement["API_IMAGE"] = api_image
         replacement["WEB_IMAGE"] = web_image
+        replacement["ADMIN_WEB_IMAGE"] = admin_web_image
+        replacement["RESEARCH_WEB_IMAGE"] = research_web_image
         replacement["CADDY_IMAGE"] = caddy_image
         replacement["POSTGRES_IMAGE"] = postgres_image
         replacement["BACKUP_IMAGE"] = backup_image
@@ -307,6 +311,8 @@ record_matches_env() {
     --arg image_tag "$(env_value IMAGE_TAG)" \
     --arg infra_tag "$(env_value INFRA_IMAGE_TAG)" \
     --arg api "$(env_value API_IMAGE)" --arg web "$(env_value WEB_IMAGE)" \
+    --arg admin_web "$(env_value ADMIN_WEB_IMAGE)" \
+    --arg research_web "$(env_value RESEARCH_WEB_IMAGE)" \
     --arg caddy "$(env_value CADDY_IMAGE)" --arg postgres "$(env_value POSTGRES_IMAGE)" \
     --arg backup "$(env_value BACKUP_IMAGE)" --arg hermes "$(env_value HERMES_IMAGE)" \
     --arg auth_login_mode "$auth_login_mode" \
@@ -318,7 +324,8 @@ record_matches_env() {
      .revision == $deploy_ref and .image_tag == $image_tag and
      .infra_image_tag == $infra_tag and .images.api == $api and
      .images.worker == $api and .images.scheduler == $api and
-     .images.web == $web and .images.caddy == $caddy and
+     .images.web == $web and .images.admin_web == $admin_web and
+     .images.research_web == $research_web and .images.caddy == $caddy and
      .images.postgres == $postgres and .images.backup == $backup and
      .images.hermes == $hermes and
      .auth.login_mode == $auth_login_mode and
@@ -336,6 +343,8 @@ validate_committed() {
     [[ "$(env_value INFRA_IMAGE_TAG)" == "$infra_image_tag" ]] &&
     [[ "$(env_value API_IMAGE)" == "$api_image" ]] &&
     [[ "$(env_value WEB_IMAGE)" == "$web_image" ]] &&
+    [[ "$(env_value ADMIN_WEB_IMAGE)" == "$admin_web_image" ]] &&
+    [[ "$(env_value RESEARCH_WEB_IMAGE)" == "$research_web_image" ]] &&
     [[ "$(env_value CADDY_IMAGE)" == "$caddy_image" ]] &&
     [[ "$(env_value POSTGRES_IMAGE)" == "$postgres_image" ]] &&
     [[ "$(env_value BACKUP_IMAGE)" == "$backup_image" ]] &&
@@ -350,15 +359,17 @@ validate_previous_restored() {
     [[ "$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')" == "$previous_deployed_sha256" ]]
 }
 
-if (($# != 8)); then
-  fail "usage: bumpabestie-promote REVISION INFRA_IMAGE_TAG API WEB CADDY POSTGRES BACKUP HERMES"
+if (($# != 10)); then
+  fail "usage: bumpabestie-promote REVISION INFRA_IMAGE_TAG API WEB ADMIN_WEB RESEARCH_WEB CADDY POSTGRES BACKUP HERMES"
 fi
 revision="$1"; infra_image_tag="$2"; api_image="$3"; web_image="$4"
-caddy_image="$5"; postgres_image="$6"; backup_image="$7"; hermes_image="$8"
+admin_web_image="$5"; research_web_image="$6"; caddy_image="$7"
+postgres_image="$8"; backup_image="$9"; hermes_image="${10}"
 [[ "$revision" =~ ^[a-f0-9]{40}$ ]] || fail "revision must be a full lowercase commit SHA"
 [[ "$infra_image_tag" =~ ^sha-[a-f0-9]{40}$ ]] || fail "infrastructure tag is invalid"
 for image_reference in \
-  "$api_image" "$web_image" "$caddy_image" "$postgres_image" "$backup_image" "$hermes_image"; do
+  "$api_image" "$web_image" "$admin_web_image" "$research_web_image" \
+  "$caddy_image" "$postgres_image" "$backup_image" "$hermes_image"; do
   validate_image_reference "$image_reference" || fail "an immutable image reference is invalid"
 done
 [[ "$lock_wait" =~ ^[0-9]+$ ]] || fail "lock wait must be a non-negative integer"
@@ -410,6 +421,8 @@ previous_image_tag="$(jq -er '.image_tag' "$repo/.deployed-release.json")"
 previous_infra_image_tag="$(jq -er '.infra_image_tag' "$repo/.deployed-release.json")"
 previous_api_image="$(jq -er '.images.api' "$repo/.deployed-release.json")"
 previous_web_image="$(jq -er '.images.web' "$repo/.deployed-release.json")"
+previous_admin_web_image="$(jq -er '.images.admin_web // .images.web' "$repo/.deployed-release.json")"
+previous_research_web_image="$(jq -er '.images.research_web // .images.web' "$repo/.deployed-release.json")"
 previous_caddy_image="$(jq -er '.images.caddy' "$repo/.deployed-release.json")"
 previous_postgres_image="$(jq -er '.images.postgres' "$repo/.deployed-release.json")"
 previous_backup_image="$(jq -er '.images.backup' "$repo/.deployed-release.json")"

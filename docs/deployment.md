@@ -2,8 +2,9 @@
 
 ## Current release boundary
 
-The deployable target is a six-image production stack: API, web, Caddy, PostgreSQL,
-backup and the pinned Hermes runtime. Redis remains an upstream digest-pinned
+The deployable target is an eight-image production stack: API, consumer web,
+admin web, research web, Caddy, PostgreSQL, backup and the pinned Hermes runtime.
+Redis remains an upstream digest-pinned
 service. Worker and scheduler run from the API image and use Postgres jobs/outbox as
 the source of truth with Redis wake-ups and heartbeats. Production always requires
 `ASYNC_RUNTIME_ENABLED=true`; provider selectors may be disabled for containment or
@@ -28,8 +29,8 @@ revision. The redacted production transcript is
 documentation commit is evidence only and is not a separately promoted application
 release.
 
-Production runs all eight intended services at schema
-`0015_bumpa_store_context`; all seven configured healthchecks pass, and the
+Production runs all ten intended services at schema
+`0016_chat_pagination`; all nine configured healthchecks pass, and the
 accepted runtime samples have zero restarts and zero OOM kills. The complete
 mapped-login matrix covered all five collaborators on public chat, administration
 and research: 15 host-scoped sign-ins passed. Generic unmapped denial, host-only
@@ -442,7 +443,7 @@ are in [`docs/temporary-web-login.md`](temporary-web-login.md).
 
 The first production rollout used the required two-phase sequence: it promoted
 and verified the exact successor with authentication disabled and WhatsApp parked,
-then staged temporary mode and promoted the same revision and six digests again.
+then staged temporary mode and promoted the same revision and eight digests again.
 Future first-time deployments must preserve this ordering. Planned verifier
 rotations on the already compatible release use the guarded setter and coordinator
 without restaging the introduction phase.
@@ -452,13 +453,16 @@ and HTTPS origins, independent high-entropy application/database secrets, intern
 database URLs, `GHCR_OWNER`, immutable `DEPLOY_REF`,
 `IMAGE_TAG=sha-<full-commit-sha>` and a separately promoted
 `INFRA_IMAGE_TAG=sha-<full-infrastructure-commit-sha>`. `latest` is forbidden.
-Set `API_IMAGE`, `WEB_IMAGE`, `CADDY_IMAGE`, `POSTGRES_IMAGE`, `BACKUP_IMAGE` and `HERMES_IMAGE`
+Set `API_IMAGE`, `WEB_IMAGE`, `ADMIN_WEB_IMAGE`, `RESEARCH_WEB_IMAGE`,
+`CADDY_IMAGE`, `POSTGRES_IMAGE`, `BACKUP_IMAGE` and `HERMES_IMAGE`
 to exact `ghcr.io/<owner>/<repository>@sha256:<64-hex-digest>` references. Tags
 identify releases; production Compose consumes digests.
 
 ```dotenv
 API_IMAGE=ghcr.io/<owner>/bumpabestie-api@sha256:<index-digest>
 WEB_IMAGE=ghcr.io/<owner>/bumpabestie-web@sha256:<index-digest>
+ADMIN_WEB_IMAGE=ghcr.io/<owner>/bumpabestie-admin-web@sha256:<index-digest>
+RESEARCH_WEB_IMAGE=ghcr.io/<owner>/bumpabestie-research-web@sha256:<index-digest>
 CADDY_IMAGE=ghcr.io/<owner>/bumpabestie-caddy@sha256:<index-digest>
 POSTGRES_IMAGE=ghcr.io/<owner>/bumpabestie-postgres@sha256:<index-digest>
 BACKUP_IMAGE=ghcr.io/<owner>/bumpabestie-backup@sha256:<index-digest>
@@ -506,17 +510,18 @@ the rendered environment into a ticket or evidence artifact.
 
 ## Image release
 
-Pull-request CI builds `linux/amd64` API, web, Caddy, PostgreSQL, backup and Hermes images
+Pull-request CI builds `linux/amd64` API, consumer web, admin web, research web,
+Caddy, PostgreSQL, backup and Hermes images
 without publishing them. It also boots the infrastructure images, adopts a 16.9
 data volume with 16.14, creates a backup and restores it into an isolated database.
-`.github/workflows/publish-images.yml` publishes all six images to GHCR after it
+`.github/workflows/publish-images.yml` publishes all eight images to GHCR after it
 finds a successful CI run for the exact commit. The deployable tag is
 `sha-<full-commit-sha>`; a release tag is an alias, and `latest` is never emitted.
 The build requests provenance and SBOM attestations. CI scans every locally built
 runtime, and publication scans each exact registry digest for fixable critical/high
 findings; JSON reports are retained as workflow artifacts.
 
-Before deploy, put the exact published index digests in the six image-reference
+Before deploy, put the exact published index digests in the eight image-reference
 settings, record the platform manifests and scan those exact images. A successful
 build or SBOM is not a vulnerability scan. If GHCR packages remain
 private, log in on the host using a dedicated pull-only credential and ensure the
@@ -606,7 +611,8 @@ only on operator request as root with a separate narrow capability set, includin
    rm -f "$launcher_tmp" "$validator_tmp" "$sudoers_tmp"
    sudo -u bumpabestie -H /usr/local/sbin/bumpabestie-promote \
      "$target_revision" "sha-<infra-commit>" \
-     '<api-digest-ref>' '<web-digest-ref>' '<caddy-digest-ref>' \
+     '<api-digest-ref>' '<web-digest-ref>' '<admin-web-digest-ref>' \
+     '<research-web-digest-ref>' '<caddy-digest-ref>' \
      '<postgres-digest-ref>' '<backup-digest-ref>' '<hermes-digest-ref>'
    ```
 

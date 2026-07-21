@@ -12,7 +12,7 @@ import { createPhoneCountries } from "@/lib/phone";
 const phoneCountries = createPhoneCountries((iso) => iso);
 
 function LoginPage() {
-  return <LoginPageClient phoneCountries={phoneCountries} />;
+  return <LoginPageClient phoneCountries={phoneCountries} nextPath={null} />;
 }
 
 const accepted = (delivery: "web_pin" | "whatsapp") =>
@@ -182,68 +182,56 @@ describe("pilot web sign-in", () => {
     ).toBeDisabled();
   });
 
-  it.each([
-    ["/admin", "You don’t have admin access."],
-    ["/research", "You don’t have research access."],
-  ])(
-    "keeps an owner signed in and explains denied access to %s",
-    async (next, heading) => {
-      window.history.replaceState(
-        {},
-        "",
-        `/login?next=${encodeURIComponent(next)}`,
-      );
-      const fetchMock = vi
-        .spyOn(globalThis, "fetch")
-        .mockResolvedValueOnce(accepted("web_pin"))
-        .mockResolvedValueOnce(
-          new Response(JSON.stringify({ message: "Verified" }), {
+  it("keeps a user signed in while explaining missing workspace access", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(accepted("web_pin"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: "Verified" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            memberships: [{ role: "owner", status: "suspended" }],
+          }),
+          {
             status: 200,
             headers: { "content-type": "application/json" },
-          }),
-        )
-        .mockResolvedValueOnce(
-          new Response(
-            JSON.stringify({
-              platform_roles: [],
-              memberships: [{ role: "owner", status: "active" }],
-            }),
-            {
-              status: 200,
-              headers: { "content-type": "application/json" },
-            },
-          ),
-        );
-      render(<LoginPage />);
-
-      fireEvent.change(screen.getByLabelText("Mobile number"), {
-        target: { value: "07400 123456" },
-      });
-      fireEvent.click(
-        screen.getByRole("button", { name: "Continue securely" }),
-      );
-      await screen.findByRole("heading", { name: "Enter your web PIN." });
-      fireEvent.change(screen.getByLabelText("Six-digit web PIN"), {
-        target: { value: "123456" },
-      });
-      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-
-      expect(
-        await screen.findByRole("heading", { name: heading }),
-      ).toBeVisible();
-      expect(screen.getByText("Your session is active")).toBeVisible();
-      expect(
-        screen.getByRole("button", { name: "Check access again" }),
-      ).toBeEnabled();
-      expect(window.location.pathname).toBe("/login");
-      expect(fetchMock).toHaveBeenCalledTimes(3);
-      expect(
-        fetchMock.mock.calls.filter(([input]) =>
-          String(input).endsWith("/auth/verify-otp"),
+          },
         ),
-      ).toHaveLength(1);
-    },
-  );
+      );
+    render(<LoginPage />);
+
+    fireEvent.change(screen.getByLabelText("Mobile number"), {
+      target: { value: "07400 123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue securely" }));
+    await screen.findByRole("heading", { name: "Enter your web PIN." });
+    fireEvent.change(screen.getByLabelText("Six-digit web PIN"), {
+      target: { value: "123456" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "You don’t have workspace access.",
+      }),
+    ).toBeVisible();
+    expect(screen.getByText("Your session is active")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Check access again" }),
+    ).toBeEnabled();
+    expect(window.location.pathname).toBe("/login");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/auth/verify-otp"),
+      ),
+    ).toHaveLength(1);
+  });
 
   it("normalizes an India number and presents WhatsApp delivery when configured", async () => {
     const fetchMock = vi

@@ -16,8 +16,8 @@ export default function AboutPage() {
         <span className="eyebrow">About us</span>
         <h1>A better thinking partner for small businesses.</h1>
         <p className="hero-copy">
-          Bumpa Bestie is a research-instrumented AI assistant created to help
-          SMEs make stronger decisions from the commerce data they already own.
+          Bumpa Bestie is an AI business assistant created to help SMEs make
+          stronger decisions from the commerce data they already own.
         </p>
         <h2>Why we built it</h2>
         <p>
@@ -33,11 +33,12 @@ export default function AboutPage() {
           tenant-scoped context supplied by the control plane, and the assistant
           says plainly when data is stale or unavailable.
         </p>
-        <h2>Research with respect</h2>
+        <h2>Built around your business</h2>
         <p>
-          The project also studies how SMEs use AI in real decisions. Research
-          views are redacted by default, raw visibility is tightly permissioned,
-          and consent is a continuing choice — not a one-time trap.
+          Your conversations stay connected to your own workspace, with clear
+          data freshness and access controls. Bestie is designed to make useful
+          business context easier to understand without exposing it to another
+          business.
         </p>
       </div>
     </PublicShell>

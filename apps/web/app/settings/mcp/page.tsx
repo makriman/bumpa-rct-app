@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
+import { AppIcon } from "@/components/app-icon";
 import { LiveDataBanner } from "@/components/live-data-banner";
 import {
   Badge,
@@ -19,10 +20,6 @@ import {
   type McpRegistryTool,
   type McpToolPermission,
 } from "@/lib/platform-data";
-import {
-  previewMcpConnections,
-  previewMcpRegistry,
-} from "@/lib/preview-fixtures";
 import { useApiResource } from "@/lib/use-api-resource";
 
 const descriptions: Record<string, string> = {
@@ -45,13 +42,9 @@ type WriteRequest = {
 };
 
 export default function McpPage() {
-  const registry = useApiResource<McpRegistryItem[]>(
-    "/mcp/registry",
-    previewMcpRegistry,
-  );
+  const registry = useApiResource<McpRegistryItem[]>("/mcp/registry");
   const connections = useApiResource<McpConnection[]>(
     "/settings/mcp-connections",
-    previewMcpConnections,
   );
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -109,7 +102,7 @@ export default function McpPage() {
       await connections.reload();
       setRequest(null);
       setToast(
-        `${request.item.name} request recorded. A platform operator must approve it before authorization.`,
+        `${request.item.name} request recorded. A security review is required before authorization.`,
       );
     } catch (reason) {
       setError(
@@ -202,7 +195,7 @@ export default function McpPage() {
 
   const isLive = registry.source === "live" && connections.source === "live";
   return (
-    <AppShell surface="user" title="Connections">
+    <AppShell title="Connections">
       <PageHeader
         title="Business connections"
         description="Bring approved business context into Bestie through a controlled, auditable connection."
@@ -216,9 +209,9 @@ export default function McpPage() {
       />
       <div className="alert alert-info">
         Bumpa Bestie never accepts arbitrary MCP server addresses. Every
-        connector comes from the platform registry, starts read-only, requires
-        operator approval, and stores OAuth tokens encrypted. A permitted write
-        still requires fresh confirmation at the moment it runs.
+        connector comes from the curated connection catalogue, starts read-only,
+        requires a security review, and stores OAuth tokens encrypted. A
+        permitted write still requires fresh confirmation at the moment it runs.
       </div>
       {error && (
         <div className="alert alert-danger" role="alert">
@@ -233,6 +226,7 @@ export default function McpPage() {
           description={registry.error ?? connections.error ?? undefined}
           action={
             <button
+              type="button"
               className="button button-secondary"
               onClick={() =>
                 void Promise.all([registry.reload(), connections.reload()])
@@ -268,22 +262,74 @@ export default function McpPage() {
           })}
         </div>
       )}
+      <McpDialogs
+        busy={busy}
+        onCloseRequest={() => setRequest(null)}
+        onCloseRevoke={() => setRevoke(null)}
+        onCloseWrite={() => setWriteRequest(null)}
+        onCreate={createConnection}
+        onEnableWrite={() =>
+          writeRequest
+            ? setPermission(
+                writeRequest.connection,
+                writeRequest.tool,
+                "write_with_confirmation",
+              )
+            : Promise.resolve()
+        }
+        onRevoke={revokeConnection}
+        request={request}
+        revoke={revoke}
+        writeRequest={writeRequest}
+      />
+      {toast && <Toast message={toast} onClose={() => setToast("")} />}
+    </AppShell>
+  );
+}
+
+function McpDialogs({
+  busy,
+  onCloseRequest,
+  onCloseRevoke,
+  onCloseWrite,
+  onCreate,
+  onEnableWrite,
+  onRevoke,
+  request,
+  revoke,
+  writeRequest,
+}: {
+  busy: string;
+  onCloseRequest: () => void;
+  onCloseRevoke: () => void;
+  onCloseWrite: () => void;
+  onCreate: () => Promise<void>;
+  onEnableWrite: () => Promise<void>;
+  onRevoke: () => Promise<void>;
+  request: ConnectionRequest | null;
+  revoke: McpConnection | null;
+  writeRequest: WriteRequest | null;
+}) {
+  return (
+    <>
       {request && (
         <Modal
           title={`Request ${request.item.name}`}
-          onClose={() => !busy && setRequest(null)}
+          onClose={() => !busy && onCloseRequest()}
           actions={
             <>
               <button
+                type="button"
                 className="button button-secondary"
-                onClick={() => setRequest(null)}
+                onClick={onCloseRequest}
                 disabled={Boolean(busy)}
               >
                 Cancel
               </button>
               <button
+                type="button"
                 className="button button-primary"
-                onClick={() => void createConnection()}
+                onClick={() => void onCreate()}
                 disabled={Boolean(busy)}
                 aria-busy={Boolean(busy)}
               >
@@ -297,8 +343,8 @@ export default function McpPage() {
             <strong>
               {request.readOnly ? "read-only" : "controlled-write"}
             </strong>{" "}
-            mode. It does not open an OAuth window until a platform operator has
-            approved the request.
+            mode. It does not open an OAuth window until the security review is
+            complete.
           </p>
           {!request.readOnly && (
             <div className="alert alert-warning">
@@ -312,25 +358,21 @@ export default function McpPage() {
       {writeRequest && (
         <Modal
           title="Enable a confirmed-write tool"
-          onClose={() => !busy && setWriteRequest(null)}
+          onClose={() => !busy && onCloseWrite()}
           actions={
             <>
               <button
+                type="button"
                 className="button button-secondary"
-                onClick={() => setWriteRequest(null)}
+                onClick={onCloseWrite}
                 disabled={Boolean(busy)}
               >
                 Cancel
               </button>
               <button
+                type="button"
                 className="button button-primary"
-                onClick={() =>
-                  void setPermission(
-                    writeRequest.connection,
-                    writeRequest.tool,
-                    "write_with_confirmation",
-                  )
-                }
+                onClick={() => void onEnableWrite()}
                 disabled={Boolean(busy)}
               >
                 {busy ? "Saving…" : "Enable with confirmation"}
@@ -349,19 +391,21 @@ export default function McpPage() {
       {revoke && (
         <Modal
           title={`Revoke ${titleCase(revoke.provider)}`}
-          onClose={() => !busy && setRevoke(null)}
+          onClose={() => !busy && onCloseRevoke()}
           actions={
             <>
               <button
+                type="button"
                 className="button button-secondary"
-                onClick={() => setRevoke(null)}
+                onClick={onCloseRevoke}
                 disabled={Boolean(busy)}
               >
                 Keep connection
               </button>
               <button
+                type="button"
                 className="button button-danger"
-                onClick={() => void revokeConnection()}
+                onClick={() => void onRevoke()}
                 disabled={Boolean(busy)}
               >
                 {busy ? "Revoking…" : "Revoke and remove credentials"}
@@ -375,8 +419,7 @@ export default function McpPage() {
           </p>
         </Modal>
       )}
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
-    </AppShell>
+    </>
   );
 }
 
@@ -410,7 +453,7 @@ function ConnectionCard({
   return (
     <Card className="connection-card">
       <div className="connection-icon" aria-hidden="true">
-        ◇
+        <AppIcon name="plug" size={22} />
       </div>
       <div className="connection-body" style={{ minWidth: 0 }}>
         <div
@@ -440,7 +483,7 @@ function ConnectionCard({
               </span>
             </div>
             <div className="detail-row">
-              <span className="detail-label">Operator approval</span>
+              <span className="detail-label">Security review</span>
               <span>{connection.admin_approved ? "Approved" : "Pending"}</span>
             </div>
             <div style={{ marginTop: 16 }}>
@@ -471,6 +514,7 @@ function ConnectionCard({
                           </p>
                         </div>
                         <button
+                          type="button"
                           className="button button-ghost button-small"
                           disabled={
                             !canChange ||
@@ -513,6 +557,7 @@ function ConnectionCard({
             >
               {canAuthorize && (
                 <button
+                  type="button"
                   className="button button-primary button-small"
                   disabled={!live || Boolean(busy)}
                   aria-busy={busy === `oauth:${connection.id}`}
@@ -526,6 +571,7 @@ function ConnectionCard({
                 </button>
               )}
               <button
+                type="button"
                 className="button button-secondary button-small"
                 disabled={!live || Boolean(busy)}
                 onClick={() => onRevoke(connection)}
@@ -539,6 +585,7 @@ function ConnectionCard({
             style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}
           >
             <button
+              type="button"
               className="button button-primary button-small"
               disabled={!live || Boolean(busy)}
               onClick={() => onRequest(true)}
@@ -547,6 +594,7 @@ function ConnectionCard({
             </button>
             {item.tools.some((tool) => tool.kind === "write") && (
               <button
+                type="button"
                 className="button button-secondary button-small"
                 disabled={!live || Boolean(busy)}
                 onClick={() => onRequest(false)}

@@ -102,7 +102,6 @@ describe("public site discovery metadata", () => {
       "https://bumpabestie.com/about",
       "https://bumpabestie.com/privacy",
       "https://bumpabestie.com/terms",
-      "https://bumpabestie.com/research-consent",
     ]);
   });
 
@@ -110,16 +109,8 @@ describe("public site discovery metadata", () => {
     expect(buildRobots()).toEqual({
       rules: {
         userAgent: "*",
-        allow: ["/", "/research-consent"],
-        disallow: [
-          "/admin",
-          "/api/",
-          "/chat",
-          "/login",
-          "/profile",
-          "/research",
-          "/settings",
-        ],
+        allow: ["/"],
+        disallow: ["/api/", "/chat", "/login", "/profile", "/settings"],
       },
       sitemap: "https://bumpabestie.com/sitemap.xml",
       host: "https://bumpabestie.com",

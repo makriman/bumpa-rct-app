@@ -537,7 +537,16 @@ class TenantOnboarding(IdMixin, TimestampMixin, Base):
 
 class Conversation(IdMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
-    __table_args__ = (Index("ix_conversation_tenant_updated", "tenant_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_conversation_tenant_updated", "tenant_id", "updated_at"),
+        Index(
+            "ix_conversation_tenant_user_updated_id",
+            "tenant_id",
+            "user_id",
+            "updated_at",
+            "id",
+        ),
+    )
 
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))

@@ -3,22 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { AppIcon } from "@/components/app-icon";
 import { AppShell } from "@/components/app-shell";
+import { BumpaConnectionContent } from "@/components/bumpa-connection-content";
 import { LiveDataBanner } from "@/components/live-data-banner";
-import { Badge, Card, PageHeader, StatePanel, Toast } from "@/components/ui";
-import { apiRequest, demoFallbackEnabled } from "@/lib/api";
-import {
-  durationBetween,
-  formatDate,
-  titleCase,
-  type BumpaStatus,
-  type SyncRun,
-} from "@/lib/platform-data";
-import { previewBumpaStatus, previewSyncRuns } from "@/lib/preview-fixtures";
+import { PageHeader, Toast } from "@/components/ui";
+import { apiRequest } from "@/lib/api";
+import { type BumpaStatus, type SyncRun } from "@/lib/platform-data";
 import { useApiResource } from "@/lib/use-api-resource";
-
-const previewTenantRuns = previewSyncRuns.filter(
-  (run) => run.tenant_id === "demo-kaia-home",
-);
 type TerminalSyncStatus = "success" | "partial" | "failed";
 type TerminalSyncRun = Omit<SyncRun, "status"> & {
   status: TerminalSyncStatus;
@@ -69,16 +59,17 @@ function isUsableAcceptedPartial(
 function unavailableProfitLabel(
   run: Pick<SyncRun, "dataset_results"> | undefined,
 ): string {
-  const unavailableDatasets = Object.entries(run?.dataset_results ?? {})
-    .filter(([, availability]) => availability === "unavailable")
-    .map(([dataset]) => dataset);
-  const grossUnavailable = unavailableDatasets.some(
-    (dataset) =>
-      dataset === "gross_profit" || dataset.endsWith(".gross_profit"),
-  );
-  const netUnavailable = unavailableDatasets.some(
-    (dataset) => dataset === "net_profit" || dataset.endsWith(".net_profit"),
-  );
+  let grossUnavailable = false;
+  let netUnavailable = false;
+  for (const [dataset, availability] of Object.entries(
+    run?.dataset_results ?? {},
+  )) {
+    if (availability !== "unavailable") continue;
+    if (dataset === "gross_profit" || dataset.endsWith(".gross_profit"))
+      grossUnavailable = true;
+    if (dataset === "net_profit" || dataset.endsWith(".net_profit"))
+      netUnavailable = true;
+  }
   if (grossUnavailable && netUnavailable) return "Gross and net profit";
   if (grossUnavailable) return "Gross profit";
   if (netUnavailable) return "Net profit";
@@ -130,11 +121,8 @@ function waitForPoll(delayMs: number, signal: AbortSignal): Promise<void> {
 }
 
 export default function BumpaPage() {
-  const connection = useApiResource<BumpaStatus>(
-    "/settings/bumpa",
-    previewBumpaStatus,
-  );
-  const runs = useApiResource<SyncRun[]>("/bumpa/sync-runs", previewTenantRuns);
+  const connection = useApiResource<BumpaStatus>("/settings/bumpa");
+  const runs = useApiResource<SyncRun[]>("/bumpa/sync-runs");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -153,18 +141,12 @@ export default function BumpaPage() {
         ? "loading"
         : "ready";
   const combinedSource =
-    connection.source === "demo" || runs.source === "demo"
-      ? "demo"
-      : connection.source === "live" && runs.source === "live"
-        ? "live"
-        : null;
-  const localSimulator =
-    demoFallbackEnabled && connection.data?.provider === "local";
+    connection.source === "live" && runs.source === "live" ? "live" : null;
   const refreshAvailable =
     connection.source === "live" &&
     connection.data?.status === "active" &&
     runs.status === "ready" &&
-    (connection.data.provider === "bumpa" || localSimulator);
+    connection.data.provider === "bumpa";
 
   const pollForTerminalRun = async (
     jobId: string,
@@ -313,8 +295,8 @@ export default function BumpaPage() {
     } finally {
       if (activePoll.current === controller) {
         activePoll.current = null;
-        setBusy(false);
       }
+      setBusy(false);
     }
   };
   const latest = runs.data?.[0];
@@ -328,12 +310,13 @@ export default function BumpaPage() {
     isTerminalSyncStatus(latest.status) &&
     latest.completion_quality === "legacy";
   return (
-    <AppShell surface="user" title="Bumpa connection">
+    <AppShell title="Bumpa connection">
       <PageHeader
         title="Bumpa data connection"
         description="Connection state and sync evidence returned by the workspace APIs."
         actions={
           <button
+            type="button"
             className="button button-secondary"
             disabled={!refreshAvailable || busy}
             title={
@@ -361,20 +344,13 @@ export default function BumpaPage() {
       />
       {connection.source === "live" &&
         connection.data &&
-        connection.data.provider !== "bumpa" &&
-        !localSimulator && (
+        connection.data.provider !== "bumpa" && (
           <div className="alert alert-warning">
             Live Bumpa synchronisation has not been activated on this
             deployment. Refresh remains disabled until the provider is
             configured.
           </div>
         )}
-      {connection.source === "live" && localSimulator && (
-        <div className="alert alert-info">
-          Local simulator active. Refreshes exercise the full API, database, and
-          sync workflow without contacting a live Bumpa account.
-        </div>
-      )}
       {error && (
         <div className="alert alert-danger" role="alert">
           {error}
@@ -383,186 +359,20 @@ export default function BumpaPage() {
       <span className="sr-only" role="status" aria-live="polite">
         {busy ? "Bumpa refresh is in progress." : ""}
       </span>
-      {connection.status === "loading" ? (
-        <StatePanel type="loading" />
-      ) : connection.status === "error" || !connection.data ? (
-        <StatePanel
-          type="error"
-          description={connection.error ?? undefined}
-          action={
-            <button
-              className="button button-secondary"
-              onClick={() => void connection.reload()}
-            >
-              Try again
-            </button>
-          }
-        />
-      ) : connection.data.status === "not_connected" ? (
-        <StatePanel
-          type="empty"
-          title="Bumpa is not connected"
-          description="A platform operator must add the encrypted business credentials before data can be synchronised."
-          action={
-            <button className="button button-secondary" disabled>
-              Connect unavailable in workspace settings
-            </button>
-          }
-        />
-      ) : (
-        <>
-          <div className="grid grid-2">
-            <Card padded>
-              <div className="card-head">
-                <div>
-                  <h2>Connection health</h2>
-                  <p>Credential values remain write-only.</p>
-                </div>
-                <Badge>{titleCase(connection.data.status)}</Badge>
-              </div>
-              {[
-                ["Provider", titleCase(connection.data.provider)],
-                [
-                  "Scope",
-                  `${titleCase(connection.data.scope_type)} · •••• ${connection.data.scope_id_last4 ?? "unknown"}`,
-                ],
-                [
-                  "Last data refresh",
-                  formatDate(connection.data.last_successful_sync_at),
-                ],
-                ...(connection.data.last_error
-                  ? [["Last error", connection.data.last_error]]
-                  : []),
-              ].map(([label, value]) => (
-                <div className="detail-row" key={label}>
-                  <span className="detail-label">{label}</span>
-                  <span className="detail-value">{value}</span>
-                </div>
-              ))}
-            </Card>
-            <Card padded>
-              <div className="card-head">
-                <div>
-                  <h2>Latest run</h2>
-                  <p>
-                    Dataset availability is read from the latest recorded sync.
-                  </p>
-                </div>
-                {latest && <Badge>{titleCase(latest.status)}</Badge>}
-              </div>
-              {latest ? (
-                <>
-                  {usableAcceptedPartial && (
-                    <div
-                      className="alert alert-info sync-quality-notice"
-                      role="status"
-                      aria-label="Bumpa data limitation"
-                    >
-                      <span aria-hidden="true">ⓘ</span>
-                      <div>
-                        <strong>Most data is current</strong>
-                        <p>{acceptedLimitationMessage}</p>
-                      </div>
-                    </div>
-                  )}
-                  {degradedPartial && (
-                    <div
-                      className="alert alert-warning sync-quality-notice"
-                      role="status"
-                      aria-label="Bumpa data warning"
-                    >
-                      <span aria-hidden="true">!</span>
-                      <div>
-                        <strong>Some data needs attention</strong>
-                        <p>
-                          This refresh could not update every required dataset.
-                          Review dataset availability before relying on these
-                          figures.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {unverifiedLegacyRun && (
-                    <div
-                      className="alert alert-warning sync-quality-notice"
-                      role="status"
-                      aria-label="Bumpa data verification warning"
-                    >
-                      <span aria-hidden="true">!</span>
-                      <div>
-                        <strong>Latest refresh is unverified</strong>
-                        <p>
-                          This run was completed by an earlier app version
-                          without the evidence required to mark its data as
-                          current. Request a new refresh before relying on it.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                  {Object.entries(latest.dataset_results ?? {}).map(
-                    ([dataset, result]) => (
-                      <div className="detail-row" key={dataset}>
-                        <span className="detail-value">
-                          {titleCase(dataset)}
-                        </span>
-                        <Badge>
-                          {typeof result === "string"
-                            ? titleCase(result)
-                            : "Recorded"}
-                        </Badge>
-                      </div>
-                    ),
-                  )}
-                  {!Object.keys(latest.dataset_results ?? {}).length && (
-                    <p className="table-secondary">
-                      No dataset-level results were recorded.
-                    </p>
-                  )}
-                </>
-              ) : (
-                <p className="table-secondary">
-                  No sync run has been recorded.
-                </p>
-              )}
-            </Card>
-          </div>
-          <Card padded>
-            <div className="card-head">
-              <div>
-                <h2>Recent sync activity</h2>
-                <p>Newest runs returned by the workspace API.</p>
-              </div>
-            </div>
-            {runs.status === "loading" ? (
-              <StatePanel type="loading" />
-            ) : runs.status === "error" ? (
-              <p className="table-secondary">
-                Sync history could not be loaded: {runs.error}
-              </p>
-            ) : runs.data?.length ? (
-              <div className="timeline">
-                {runs.data.map((run) => (
-                  <div className="timeline-item" key={run.id}>
-                    <strong>{titleCase(run.status)} sync</strong>
-                    <p>
-                      {run.requested_from && run.requested_to
-                        ? `${run.requested_from} – ${run.requested_to}`
-                        : "Date range not recorded"}{" "}
-                      · {durationBetween(run.started_at, run.finished_at)}
-                    </p>
-                    <span className="tag">{formatDate(run.started_at)}</span>
-                    {run.error && <p className="field-error">{run.error}</p>}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="table-secondary">
-                No sync runs have been recorded.
-              </p>
-            )}
-          </Card>
-        </>
-      )}
+      <BumpaConnectionContent
+        acceptedLimitationMessage={acceptedLimitationMessage}
+        connection={connection.data}
+        connectionError={connection.error}
+        connectionStatus={connection.status}
+        degradedPartial={degradedPartial}
+        latest={latest}
+        onReloadConnection={connection.reload}
+        runs={runs.data}
+        runsError={runs.error}
+        runsStatus={runs.status}
+        unverifiedLegacyRun={unverifiedLegacyRun}
+        usableAcceptedPartial={usableAcceptedPartial}
+      />
       {toast && (
         <Toast message={toast} tone={toastTone} onClose={() => setToast("")} />
       )}

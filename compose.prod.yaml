@@ -83,7 +83,48 @@ services:
     build: !reset null
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_DEMO_MODE: "false"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  admin-web:
+    image: ${ADMIN_WEB_IMAGE:?Set immutable ADMIN_WEB_IMAGE}
+    build: !reset null
+    environment:
+      NODE_ENV: production
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+  research-web:
+    image: ${RESEARCH_WEB_IMAGE:?Set immutable RESEARCH_WEB_IMAGE}
+    build: !reset null
+    environment:
+      NODE_ENV: production
     read_only: true
     tmpfs:
       - /tmp

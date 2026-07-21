@@ -33,6 +33,18 @@ export const liveSession = {
   current_tenant_id: "tenant-e2e",
 };
 
+export async function grantTestSession(page: Page) {
+  await page.context().addCookies([
+    {
+      name: "bb_session",
+      value: "e2e-session-fixture",
+      url: "http://localhost:3010",
+      httpOnly: true,
+      sameSite: "Lax",
+    },
+  ]);
+}
+
 export async function fulfillSession(route: Route): Promise<boolean> {
   if (apiPath(route) !== "/api/backend/auth/me") return false;
   await json(route, liveSession);

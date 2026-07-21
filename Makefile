@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap install lint format-check typecheck test test-api test-web test-ops e2e e2e-linux temporary-auth-e2e integration load-failure \
+.PHONY: help bootstrap install lint format-check typecheck build bundle-isolation test test-api test-web test-ops react-doctor lighthouse e2e e2e-linux temporary-auth-e2e integration load-failure \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
 	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract \
 	api-contract api-contract-check clean
@@ -17,19 +17,35 @@ bootstrap: ## Validate tools and install locked local dependencies
 install: ## Install Python and web development dependencies
 	cd apps/api && uv sync --all-extras --locked
 	npm --prefix apps/web ci
+	npm --prefix apps/admin-web ci
+	npm --prefix apps/research-web ci
 
 lint: ## Run backend and frontend linters
 	cd apps/api && uv run ruff check app tests
 	npm --prefix apps/web run lint
+	npm --prefix apps/admin-web run lint
+	npm --prefix apps/research-web run lint
 	$(MAKE) shellcheck
 
 format-check: ## Check formatting without changing files
 	cd apps/api && uv run ruff format --check app tests
 	npm --prefix apps/web run format:check
+	npm --prefix apps/admin-web run format:check
+	npm --prefix apps/research-web run format:check
 
 typecheck: ## Run strict backend and frontend type checking
 	cd apps/api && uv run mypy app
 	npm --prefix apps/web run typecheck
+	npm --prefix apps/admin-web run typecheck
+	npm --prefix apps/research-web run typecheck
+
+build: ## Build all three production frontends
+	npm --prefix apps/web run build
+	npm --prefix apps/admin-web run build
+	npm --prefix apps/research-web run build
+
+bundle-isolation: build ## Prove emitted client bundles and route manifests stay surface-isolated
+	node scripts/check_frontend_bundle_isolation.mjs
 
 test: test-api test-web test-ops ## Run unit and integration tests
 
@@ -38,19 +54,32 @@ test-api: ## Run backend tests with branch coverage
 
 test-web: ## Run frontend unit tests with coverage
 	npm --prefix apps/web run test:coverage
+	npm --prefix apps/admin-web run test:coverage
+	npm --prefix apps/research-web run test:coverage
 
 test-ops: ## Run host operational-control unit tests
 	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
-e2e: ## Run the current desktop/mobile Playwright browser checks
+react-doctor: ## Require zero React Doctor errors or warnings across all frontends
+	npx --yes react-doctor@0.8.3 . --project apps/web,apps/admin-web,apps/research-web --yes --blocking warning --no-telemetry
+
+lighthouse: build ## Enforce representative consumer Lighthouse budgets
+	npm --prefix apps/web run test:lighthouse
+
+e2e: ## Run desktop/mobile Playwright checks for all three products
 	npm --prefix apps/web run test:e2e
+	npm --prefix apps/admin-web run test:e2e
+	npm --prefix apps/research-web run test:e2e
 
 e2e-linux: ## Run production-build browser checks in the pinned Linux Playwright image
 	docker run --rm --init --platform linux/amd64 \
-		-v "$(CURDIR)/apps/web:/work" \
-		-v bumpabestie-playwright-node-modules:/work/node_modules \
+		-e CI=1 \
+		-v "$(CURDIR):/work" \
+		-v bumpabestie-playwright-web-node-modules:/work/apps/web/node_modules \
+		-v bumpabestie-playwright-admin-node-modules:/work/apps/admin-web/node_modules \
+		-v bumpabestie-playwright-research-node-modules:/work/apps/research-web/node_modules \
 		-w /work mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48 \
-		bash -lc 'npm ci && npm run test:e2e'
+		bash -lc 'set -Eeuo pipefail; for app in web admin-web research-web; do cd "/work/apps/$$app"; npm ci; npm run test:e2e; done'
 
 temporary-auth-e2e: ## Exercise the real provider-free browser auth path in disposable Compose
 	@test -n "$(TEMPORARY_AUTH_E2E_PIN)" || (echo "Set TEMPORARY_AUTH_E2E_PIN" >&2; exit 2)
@@ -62,7 +91,7 @@ integration: ## Exercise Postgres-backed OTP, sync, chat, research, and report f
 load-failure: ## Run sealed chat/sync pressure, disk alert, webhook load, and restart drills
 	python3 tests/load_failure/run.py
 
-quality: format-check lint typecheck test api-contract-check compose-config production-contract ## Run the local merge gate
+quality: format-check lint typecheck test api-contract-check compose-config react-doctor lighthouse bundle-isolation production-contract ## Run the local merge gate
 
 api-contract: ## Regenerate the redacted OpenAPI and TypeScript API contracts
 	cd apps/api && uv run python -m app.openapi_contract generate
@@ -76,7 +105,7 @@ dev: ## Build and start the credential-free local stack
 	$(COMPOSE) up -d --build postgres redis
 	$(COMPOSE) build api
 	$(COMPOSE) --profile tools run --rm migrate
-	$(COMPOSE) up -d --build api worker scheduler web caddy
+	$(COMPOSE) up -d --build api worker scheduler web admin-web research-web caddy
 
 down: ## Stop the local stack without deleting durable volumes
 	$(COMPOSE) --profile async --profile tools down --remove-orphans
@@ -86,7 +115,7 @@ compose-up: dev ## Build and start the credential-free local stack
 compose-down: down ## Stop the local stack without deleting durable volumes
 
 logs: ## Follow application logs
-	$(COMPOSE) logs -f --tail=200 caddy web api worker scheduler
+	$(COMPOSE) logs -f --tail=200 caddy web admin-web research-web api worker scheduler
 
 migrate: ## Apply migrations in a one-shot container
 	$(COMPOSE) --profile tools run --rm migrate
@@ -125,15 +154,20 @@ restore: ## Restore BACKUP_PATH after explicit confirmation
 
 deploy: ## Promote an immutable production release through the installed stable coordinator
 	@test -n "$(REVISION)" -a -n "$(INFRA_IMAGE_TAG)" -a -n "$(API_IMAGE)" \
-		-a -n "$(WEB_IMAGE)" -a -n "$(CADDY_IMAGE)" -a -n "$(POSTGRES_IMAGE)" \
+		-a -n "$(WEB_IMAGE)" -a -n "$(ADMIN_WEB_IMAGE)" -a -n "$(RESEARCH_WEB_IMAGE)" \
+		-a -n "$(CADDY_IMAGE)" -a -n "$(POSTGRES_IMAGE)" \
 		-a -n "$(BACKUP_IMAGE)" -a -n "$(HERMES_IMAGE)" || \
-		(echo "Set REVISION, INFRA_IMAGE_TAG and all six immutable image references" >&2; exit 2)
+		(echo "Set REVISION, INFRA_IMAGE_TAG and all eight immutable image references" >&2; exit 2)
 	/usr/local/sbin/bumpabestie-promote \
-		"$(REVISION)" "$(INFRA_IMAGE_TAG)" "$(API_IMAGE)" "$(WEB_IMAGE)" \
+		"$(REVISION)" "$(INFRA_IMAGE_TAG)" "$(API_IMAGE)" "$(WEB_IMAGE)" "$(ADMIN_WEB_IMAGE)" "$(RESEARCH_WEB_IMAGE)" \
 		"$(CADDY_IMAGE)" "$(POSTGRES_IMAGE)" "$(BACKUP_IMAGE)" "$(HERMES_IMAGE)"
 
 shellcheck: ## Validate shell syntax and run shellcheck when installed
 	./scripts/validate_shell.sh
 
 clean: ## Remove generated local test artifacts, not volumes
-	rm -rf apps/web/.next apps/web/coverage apps/web/playwright-report apps/web/test-results apps/api/.coverage apps/api/coverage.xml
+	rm -rf apps/web/.next apps/web/coverage apps/web/playwright-report apps/web/test-results \
+		apps/web/lighthouse-reports apps/admin-web/.next apps/admin-web/coverage \
+		apps/admin-web/playwright-report apps/admin-web/test-results apps/research-web/.next \
+		apps/research-web/coverage apps/research-web/playwright-report apps/research-web/test-results \
+		apps/api/.coverage apps/api/coverage.xml

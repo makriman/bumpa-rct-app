@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { ChatsTeardrop } from "@phosphor-icons/react";
 import { useEffect, useId, useRef } from "react";
-import { statusTone, type Tone } from "@/lib/demo-data";
+import { focusableElements } from "@bumpabestie/web-foundation";
+import { statusTone, type Tone } from "@/lib/consumer-data";
 import { AppIcon } from "./app-icon";
 
 export function Brand({
@@ -178,7 +179,7 @@ export function StatePanel({
     <Card className="empty-state">
       <div className="empty-inner">
         <div className="empty-icon" aria-hidden="true">
-          {type === "error" ? "!" : <AppIcon name="sparkles" size={22} />}
+          <AppIcon name={type === "error" ? "alert" : "sparkles"} size={22} />
         </div>
         <h2>
           {title ??
@@ -208,86 +209,53 @@ export function Modal({
   actions?: React.ReactNode;
 }) {
   const titleId = useId();
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
   useEffect(() => {
     const previousFocus =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     const dialog = dialogRef.current;
-    const focusable = () =>
-      Array.from(
-        dialog?.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      ).filter((element) => !element.hasAttribute("hidden"));
-    (focusable()[0] ?? dialog)?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const items = focusable();
-      if (!items.length) {
-        event.preventDefault();
-        dialog?.focus();
-        return;
-      }
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    focusableElements(dialog)[0]?.focus();
     return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = previousOverflow;
+      if (typeof dialog.close === "function" && dialog.open) dialog.close();
+      else dialog.removeAttribute("open");
       window.setTimeout(() => {
         if (previousFocus?.isConnected) previousFocus.focus();
       }, 0);
     };
   }, []);
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(e) => {
-        if (e.currentTarget === e.target) onClose();
+    <dialog
+      ref={dialogRef}
+      className="modal"
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        onCloseRef.current();
       }}
     >
-      <div
-        ref={dialogRef}
-        className="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        tabIndex={-1}
-      >
-        <div className="modal-head">
-          <h2 id={titleId}>{title}</h2>
-          <button
-            className="icon-button"
-            onClick={onClose}
-            aria-label="Close dialog"
-          >
-            <AppIcon name="close" />
-          </button>
-        </div>
-        <div className="modal-body">{children}</div>
-        {actions && <div className="modal-actions">{actions}</div>}
+      <div className="modal-head">
+        <h2 id={titleId}>{title}</h2>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={onClose}
+          aria-label="Close dialog"
+        >
+          <AppIcon name="close" />
+        </button>
       </div>
-    </div>
+      <div className="modal-body">{children}</div>
+      {actions && <div className="modal-actions">{actions}</div>}
+    </dialog>
   );
 }
 
@@ -306,9 +274,10 @@ export function Toast({
   }, [onClose]);
   return (
     <div className={`toast toast-${tone}`} role="status">
-      <span aria-hidden="true">{tone === "warning" ? "!" : "✓"}</span>
+      <AppIcon name={tone === "warning" ? "alert" : "check"} />
       <span>{message}</span>
       <button
+        type="button"
         className="button button-ghost button-small"
         style={{ color: "white" }}
         onClick={onClose}
@@ -341,56 +310,5 @@ export function Filters({
       </label>
       {children}
     </div>
-  );
-}
-
-export function Chart({
-  values,
-  labels,
-  alt = false,
-}: {
-  values: number[];
-  labels: string[];
-  alt?: boolean;
-}) {
-  return (
-    <div
-      className="chart"
-      role="img"
-      aria-label={`Bar chart: ${values.map((value, i) => `${labels[i]} ${value}`).join(", ")}`}
-    >
-      {values.map((value, i) => (
-        <div className="chart-col" key={`${labels[i]}-${i}`}>
-          <div
-            className={`chart-bar ${alt && i % 3 === 2 ? "alt" : ""}`}
-            style={{ height: `${value}%` }}
-            title={`${labels[i]}: ${value}`}
-          />
-          <span className="chart-label">{labels[i]}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function DemoStateToggle({
-  state,
-  setState,
-}: {
-  state: "ready" | "loading" | "empty" | "error";
-  setState: (state: "ready" | "loading" | "empty" | "error") => void;
-}) {
-  return (
-    <select
-      className="filter-select"
-      aria-label="Preview page state"
-      value={state}
-      onChange={(e) => setState(e.target.value as typeof state)}
-    >
-      <option value="ready">Demo: ready</option>
-      <option value="loading">Demo: loading</option>
-      <option value="empty">Demo: empty</option>
-      <option value="error">Demo: error</option>
-    </select>
   );
 }

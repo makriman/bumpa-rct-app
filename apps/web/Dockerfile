@@ -6,10 +6,9 @@ RUN npm ci
 FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
+COPY packages/web-foundation /packages/web-foundation
 COPY apps/web .
-ARG NEXT_PUBLIC_DEMO_MODE=false
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV NEXT_PUBLIC_DEMO_MODE=${NEXT_PUBLIC_DEMO_MODE}
 RUN npm run build
 
 FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2 AS runner
