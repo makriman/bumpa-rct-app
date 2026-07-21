@@ -84,6 +84,8 @@ load_release_boundary "$release_file"
 test "$RELEASE_REVISION" = "$old_revision"
 test "$RELEASE_OPERATIONS_REVISION" = "$old_revision"
 test "$RELEASE_API_IMAGE" = "$old_api"
+test "$RELEASE_ADMIN_WEB_WAS_RECORDED" = true
+test "$RELEASE_RESEARCH_WEB_WAS_RECORDED" = true
 test "$RELEASE_ADMIN_WEB_IMAGE" = "$old_admin_web"
 test "$RELEASE_RESEARCH_WEB_IMAGE" = "$old_research_web"
 test "$RELEASE_BACKUP_IMAGE" = "$old_backup"
@@ -299,6 +301,40 @@ test -z "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE"
 test -z "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"
 test -z "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT"
 test "$RELEASE_WHATSAPP_BACKEND" = disabled
+
+# Missing surface keys mean the legacy topology had no independent containers;
+# their fallback pointers are only for deterministic environment restoration.
+legacy_surface_release="$test_dir/legacy-surface-release.json"
+jq 'del(.images.admin_web, .images.research_web)' \
+  "$release_file" >"$legacy_surface_release"
+chmod 0600 "$legacy_surface_release"
+load_release_boundary "$legacy_surface_release"
+test "$RELEASE_ADMIN_WEB_WAS_RECORDED" = false
+test "$RELEASE_RESEARCH_WEB_WAS_RECORDED" = false
+test "$RELEASE_ADMIN_WEB_IMAGE" = "$old_web"
+test "$RELEASE_RESEARCH_WEB_IMAGE" = "$old_web"
+running_service_matches_recorded_topology false '' "$old_web"
+if running_service_matches_recorded_topology false "$old_web" "$old_web"; then
+  echo "An unrecorded legacy surface container was accepted" >&2
+  exit 1
+fi
+running_service_matches_recorded_topology true "$old_admin_web" "$old_admin_web"
+if running_service_matches_recorded_topology true '' "$old_admin_web"; then
+  echo "A missing recorded surface container was accepted" >&2
+  exit 1
+fi
+if running_service_matches_recorded_topology true "$old_web" "$old_admin_web"; then
+  echo "A mismatched recorded surface container was accepted" >&2
+  exit 1
+fi
+test "$(select_surface_rollback_image false "$old_web" "$new_admin_web")" = \
+  "$new_admin_web"
+test "$(select_surface_rollback_image true "$old_admin_web" "$new_admin_web")" = \
+  "$old_admin_web"
+if select_surface_rollback_image invalid "$old_admin_web" "$new_admin_web" >/dev/null; then
+  echo "An invalid surface topology selector was accepted" >&2
+  exit 1
+fi
 
 # The one-time compatibility promotion must still load the historical fixed
 # host path without PIN re-entry. New setter output uses the versioned form.

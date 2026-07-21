@@ -561,6 +561,11 @@ only on operator request as root with a separate narrow capability set, includin
    of each legacy release key, permits only the two new surface pointers to be
    absent during this compatibility migration, then writes exactly eleven release
    keys with mode `0600` and renames atomically.
+   A legacy release record without admin/research image fields also proves those
+   independent containers are absent before promotion. If a post-migration
+   rollback is needed, the prior API and consumer app are combined with the
+   reviewed target admin/research images and target edge image; this preserves the
+   new hostname topology without pretending those services existed previously.
    Never source `.env.production` or print it into a generated file. Before the
    forward boundary, failures restore both the recorded prior pointers and recorded
    operations checkout. A post-migration hybrid rollback deliberately retains the

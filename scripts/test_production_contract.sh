@@ -1151,6 +1151,10 @@ if grep -Fq './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh; the
   exit 1
 fi
 grep -Fq 'for service in api worker scheduler web admin-web research-web hermes caddy postgres redis' scripts/deploy.sh
+grep -Fq 'running_service_matches_recorded_topology' scripts/deploy.sh
+grep -Fq 'select_surface_rollback_image' scripts/deploy.sh
+grep -Fq '"$hybrid_admin_web" == "$rollback_admin_web_image"' scripts/deploy.sh
+grep -Fq '"$hybrid_research_web" == "$rollback_research_web_image"' scripts/deploy.sh
 grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
 grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh

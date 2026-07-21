@@ -42,6 +42,48 @@ validate_release_pointer_values() {
   done
 }
 
+# A legacy release record can predate the independently deployed admin and
+# research services. The fallback image values keep pointer restoration
+# deterministic, but they must not imply that those containers existed in the
+# recorded topology.
+running_service_matches_recorded_topology() {
+  local was_recorded="$1"
+  local actual_image="$2"
+  local recorded_image="$3"
+
+  case "$was_recorded" in
+    true)
+      [[ -n "$actual_image" && "$actual_image" == "$recorded_image" ]]
+      ;;
+    false)
+      [[ -z "$actual_image" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+select_surface_rollback_image() {
+  local was_recorded="$1"
+  local recorded_image="$2"
+  local target_image="$3"
+
+  case "$was_recorded" in
+    true)
+      [[ -n "$recorded_image" ]] || return 1
+      printf '%s\n' "$recorded_image"
+      ;;
+    false)
+      [[ -n "$target_image" ]] || return 1
+      printf '%s\n' "$target_image"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 validate_auth_boundary_values() {
   local login_mode="$1"
   local verifier_file="$2"
@@ -137,6 +179,12 @@ load_release_boundary() {
   RELEASE_SCHEDULER_IMAGE="$(jq --raw-output '.images.scheduler' "$release_file")"
   # shellcheck disable=SC2034
   RELEASE_WEB_IMAGE="$(jq --raw-output '.images.web' "$release_file")"
+  # Presence is distinct from the compatibility fallback below: it records
+  # whether the independently deployed service existed at this boundary.
+  # shellcheck disable=SC2034
+  RELEASE_ADMIN_WEB_WAS_RECORDED="$(jq --raw-output '.images | has("admin_web")' "$release_file")"
+  # shellcheck disable=SC2034
+  RELEASE_RESEARCH_WEB_WAS_RECORDED="$(jq --raw-output '.images | has("research_web")' "$release_file")"
   # shellcheck disable=SC2034
   RELEASE_ADMIN_WEB_IMAGE="$(jq --raw-output '.images.admin_web // .images.web' "$release_file")"
   # shellcheck disable=SC2034
