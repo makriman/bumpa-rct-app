@@ -53,7 +53,6 @@ validate_auth_boundary_values() {
   [[ "$login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]] || return 1
   [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || return 1
   if [[ "$login_mode" == "temporary_static_pin" ]]; then
-    [[ "$whatsapp_backend" == "disabled" ]] || return 1
     [[ "$verifier_file" == "/run/auth-secret/temporary_web_pin_verifier" ]] || return 1
     validate_temporary_verifier_host_path "$verifier_host" || return 1
     expiry_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
@@ -102,7 +101,6 @@ load_release_boundary() {
         (.temporary_web_pin_verifier_file_host | type == "string") and
         (.temporary_web_pin_expires_at | type == "string") and
         (if .login_mode == "temporary_static_pin" then
-          .whatsapp_backend == "disabled" and
           .temporary_web_pin_verifier_file ==
             "/run/auth-secret/temporary_web_pin_verifier" and
           (.temporary_web_pin_verifier_file_host |
@@ -189,6 +187,8 @@ _rewrite_release_environment() (
   local verifier_host="${13:-}"
   local expires_at="${14:-}"
   local whatsapp_backend="${15:-}"
+  local canonicalize_whatsapp_cadences=0
+  local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
   local env_tmp env_uid env_gid
   env_tmp=""
   trap 'if [[ -n "$env_tmp" ]]; then rm -f -- "$env_tmp"; fi' EXIT
@@ -205,6 +205,15 @@ _rewrite_release_environment() (
     validate_auth_boundary_values \
       "$auth_login_mode" "$verifier_file" "$verifier_host" "$expires_at" \
       "$whatsapp_backend" || return 1
+    if [[ "$auth_login_mode" == "temporary_static_pin" \
+      && "$whatsapp_backend" == "meta" ]]; then
+      meta_primary_sender_enabled=false
+      meta_test_sender_mode=inbound_replies_only
+    fi
+    if [[ "$auth_login_mode" == "temporary_static_pin" \
+      || "$whatsapp_backend" == "disabled" ]]; then
+      canonicalize_whatsapp_cadences=1
+    fi
   fi
 
   env_uid="$(stat -c '%u' "$env_file" 2>/dev/null || stat -f '%u' "$env_file")"
@@ -229,7 +238,10 @@ _rewrite_release_environment() (
     -v verifier_file="$verifier_file" \
     -v verifier_host="$verifier_host" \
     -v expires_at="$expires_at" \
-    -v whatsapp_backend="$whatsapp_backend" '
+    -v whatsapp_backend="$whatsapp_backend" \
+    -v canonicalize_whatsapp_cadences="$canonicalize_whatsapp_cadences" \
+    -v meta_primary_sender_enabled="$meta_primary_sender_enabled" \
+    -v meta_test_sender_mode="$meta_test_sender_mode" '
       BEGIN {
         replacement["DEPLOY_REF"] = deploy_ref
         replacement["IMAGE_TAG"] = image_tag
@@ -247,6 +259,13 @@ _rewrite_release_environment() (
           replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"] = verifier_host
           replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
           replacement["WHATSAPP_BACKEND"] = whatsapp_backend
+          replacement["META_PRIMARY_SENDER_ENABLED"] = meta_primary_sender_enabled
+          replacement["META_TEST_SENDER_VERIFICATION_MODE"] = meta_test_sender_mode
+          if (canonicalize_whatsapp_cadences == 1) {
+            replacement["PROACTIVE_INSIGHTS_ENABLED"] = "false"
+            replacement["DAILY_INSIGHTS_ENABLED"] = "false"
+            replacement["WEEKLY_INSIGHTS_ENABLED"] = "false"
+          }
         }
       }
       {

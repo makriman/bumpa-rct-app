@@ -22,10 +22,20 @@ class FakeUfw:
         self.fail_delete = False
 
     def _numbered(self) -> tuple[object, ...]:
-        return tuple(
-            firewall.Rule(index, target, source, comment)
-            for index, (target, source, comment) in enumerate(self.rules, start=1)
-        )
+        global_ssh_count = 0
+        numbered: list[object] = []
+        for index, (target, source, comment) in enumerate(self.rules, start=1):
+            is_global_ssh = target == "22/tcp" and source == "Anywhere"
+            if is_global_ssh:
+                global_ssh_count += 1
+            if ":" in source or (is_global_ssh and global_ssh_count >= 2):
+                family = 6
+            else:
+                family = 4
+            numbered.append(
+                firewall.Rule(index, target, source, comment, address_family=family)
+            )
+        return tuple(numbered)
 
     def numbered_status(self) -> str:
         lines = [
@@ -35,8 +45,10 @@ class FakeUfw:
         ]
         for rule in self._numbered():
             comment = f" # {rule.comment}" if rule.comment else ""
+            target = f"{rule.target} (v6)" if rule.address_family == 6 else rule.target
+            source = f"{rule.source} (v6)" if rule.address_family == 6 else rule.source
             lines.append(
-                f"[{rule.number:2d}] {rule.target:<26} ALLOW IN    {rule.source}{comment}"
+                f"[{rule.number:2d}] {target:<26} ALLOW IN    {source}{comment}"
             )
         return "\n".join(lines) + "\n"
 
@@ -49,10 +61,26 @@ class FakeUfw:
     def preflight_allow(self, source: str, port: int, comment: str) -> None:
         self.events.append(("preflight", port, source, comment))
 
+    def preflight_global_ssh(self, comment: str) -> None:
+        self.events.append(("preflight-global-ssh", comment))
+
     def allow(self, source: str, port: int, comment: str) -> None:
         self.events.append(("allow", port, source, comment))
         key = (f"{port}/tcp", source, comment)
         if key not in self.rules:
+            self.rules.append(key)
+
+    def allow_global_ssh(self, comment: str) -> None:
+        self.events.append(("allow-global-ssh", comment))
+        key = ("22/tcp", "Anywhere", comment)
+        present_families = {
+            rule.address_family
+            for rule in self._numbered()
+            if rule.target == "22/tcp"
+            and rule.source == "Anywhere"
+            and rule.action == "ALLOW IN"
+        }
+        for _family in sorted({4, 6} - present_families):
             self.rules.append(key)
 
     def delete_number(self, number: int) -> None:
@@ -138,6 +166,7 @@ class RuleTests(unittest.TestCase):
                     "443/tcp",
                     "2606:4700::/32",
                     firewall.MANAGED_COMMENT,
+                    address_family=6,
                 ),
                 firewall.Rule(3, "22/tcp", "203.0.113.8", ""),
                 firewall.Rule(4, "443/tcp", "Anywhere", "", "DENY IN"),
@@ -216,6 +245,34 @@ class RuleTests(unittest.TestCase):
             (2, 3),
         )
 
+    def test_global_mode_requires_exact_ipv4_and_ipv6_anywhere_rules(self) -> None:
+        exact = (
+            firewall.Rule(1, "22/tcp", "Anywhere", "key only", address_family=4),
+            firewall.Rule(2, "22/tcp", "Anywhere", "key only", address_family=6),
+        )
+        self.assertTrue(firewall.ssh_rule_present(exact, None))
+        self.assertEqual(firewall.unexpected_ssh_rules(exact, None), ())
+
+        incomplete = exact[:1]
+        self.assertFalse(firewall.ssh_rule_present(incomplete, None))
+        self.assertEqual(firewall.unexpected_ssh_rules(incomplete, None), ())
+
+    def test_global_mode_rejects_duplicate_restricted_and_limit_ssh_rules(
+        self,
+    ) -> None:
+        rules = (
+            firewall.Rule(1, "22/tcp", "Anywhere", "", address_family=4),
+            firewall.Rule(2, "22/tcp", "Anywhere", "", address_family=6),
+            firewall.Rule(3, "22/tcp", "Anywhere", "duplicate", address_family=6),
+            firewall.Rule(4, "22/tcp", "8.8.8.8", ""),
+            firewall.Rule(5, "22/tcp", "Anywhere", "", "LIMIT IN"),
+        )
+        self.assertFalse(firewall.ssh_rule_present(rules, None))
+        self.assertEqual(
+            tuple(rule.number for rule in firewall.unexpected_ssh_rules(rules, None)),
+            (3, 4, 5),
+        )
+
     def test_limit_rules_are_treated_as_inbound_authorization(self) -> None:
         nominated = "8.8.8.8/32"
         output = """Status: active
@@ -228,14 +285,35 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(tuple(rule.action for rule in rules), ("LIMIT IN",) * 3)
         self.assertEqual(
             tuple(
-                rule.number
-                for rule in firewall.unexpected_ssh_rules(rules, nominated)
+                rule.number for rule in firewall.unexpected_ssh_rules(rules, nominated)
             ),
             (1, 2),
         )
         assessment = firewall.assess_rules(rules, firewall.desired_rule_keys(()))
         self.assertEqual(
             tuple(rule.number for rule in assessment.unexpected_web_rules), (3,)
+        )
+
+
+class UfwClientTests(unittest.TestCase):
+    def test_global_ssh_uses_the_native_ufw_allow_22_tcp_form(self) -> None:
+        class RecordingUfw(firewall.UfwClient):
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, ...]] = []
+
+            def _run(self, *arguments: str) -> str:
+                self.calls.append(arguments)
+                return ""
+
+        ufw = RecordingUfw()
+        ufw.preflight_global_ssh(firewall.SSH_COMMENT)
+        ufw.allow_global_ssh(firewall.SSH_COMMENT)
+        self.assertEqual(
+            ufw.calls,
+            [
+                ("--dry-run", "allow", "22/tcp", "comment", firewall.SSH_COMMENT),
+                ("allow", "22/tcp", "comment", firewall.SSH_COMMENT),
+            ],
         )
 
 
@@ -250,6 +328,18 @@ class ApplyTests(unittest.TestCase):
             ranges=self.ranges,
             source_hashes={"ipv4_sha256": "a" * 64, "ipv6_sha256": "b" * 64},
             ssh_cidr=self.ssh_cidr,
+            plan_only=plan_only,
+        )
+
+    def apply_global(
+        self, ufw: FakeUfw, backups: FakeBackups, *, plan_only: bool = False
+    ):
+        return firewall.apply_hardening(
+            ufw,
+            backups,
+            ranges=self.ranges,
+            source_hashes={"ipv4_sha256": "a" * 64, "ipv6_sha256": "b" * 64},
+            ssh_cidr=None,
             plan_only=plan_only,
         )
 
@@ -291,6 +381,57 @@ class ApplyTests(unittest.TestCase):
         self.assertTrue(backups.restored)
         self.assertEqual(ufw.rules, prior)
 
+    def test_global_mode_adds_both_ssh_families_before_web_deletion(self) -> None:
+        prior = [("80/tcp", "Anywhere", ""), ("443/tcp", "Anywhere", "")]
+        ufw = FakeUfw(prior)
+        backups = FakeBackups(ufw)
+
+        message, backup = self.apply_global(ufw, backups)
+
+        self.assertIn("SSH mode: global key-only", message)
+        self.assertEqual(backup, Path("/validated/backup"))
+        global_allow = next(
+            index
+            for index, event in enumerate(ufw.events)
+            if event[0] == "allow-global-ssh"
+        )
+        first_delete = next(
+            index for index, event in enumerate(ufw.events) if event[0] == "delete"
+        )
+        self.assertLess(global_allow, first_delete)
+        rules = firewall.parse_numbered_rules(ufw.numbered_status())
+        self.assertTrue(firewall.ssh_rule_present(rules, None))
+        self.assertEqual(firewall.unexpected_ssh_rules(rules, None), ())
+        firewall._verify_compliant(ufw, firewall.desired_rule_keys(self.ranges), None)
+
+    def test_global_mode_repairs_an_incomplete_address_family_pair(self) -> None:
+        rules = [("22/tcp", "Anywhere", "existing key-only rule")]
+        rules.extend(
+            (f"{port}/tcp", source, firewall.MANAGED_COMMENT)
+            for source in self.ranges
+            for port in firewall.WEB_PORTS
+        )
+        ufw = FakeUfw(rules)
+        backups = FakeBackups(ufw)
+        message, backup = self.apply_global(ufw, backups)
+        self.assertIn("SSH mode: global key-only", message)
+        self.assertEqual(backup, Path("/validated/backup"))
+        final_rules = firewall.parse_numbered_rules(ufw.numbered_status())
+        self.assertTrue(firewall.ssh_rule_present(final_rules, None))
+        self.assertEqual(firewall.unexpected_ssh_rules(final_rules, None), ())
+
+    def test_global_mode_failure_after_mutation_restores_exact_prior_rules(
+        self,
+    ) -> None:
+        prior = [("80/tcp", "Anywhere", ""), ("443/tcp", "Anywhere", "")]
+        ufw = FakeUfw(prior)
+        ufw.fail_delete = True
+        backups = FakeBackups(ufw)
+        with self.assertRaises(firewall.FirewallError):
+            self.apply_global(ufw, backups)
+        self.assertTrue(backups.restored)
+        self.assertEqual(ufw.rules, prior)
+
     def test_keyboard_interrupt_after_mutation_also_restores_prior_rules(self) -> None:
         prior = [
             ("22/tcp", self.ssh_cidr, ""),
@@ -325,6 +466,29 @@ class ApplyTests(unittest.TestCase):
         self.assertFalse(backups.created)
         self.assertFalse(any(event[0] in {"allow", "delete"} for event in ufw.events))
 
+    def test_global_mode_compliant_rerun_is_idempotent(self) -> None:
+        rules = [
+            ("22/tcp", "Anywhere", firewall.SSH_COMMENT),
+            ("22/tcp", "Anywhere", firewall.SSH_COMMENT),
+        ]
+        rules.extend(
+            (f"{port}/tcp", source, firewall.MANAGED_COMMENT)
+            for source in self.ranges
+            for port in firewall.WEB_PORTS
+        )
+        ufw = FakeUfw(rules)
+        backups = FakeBackups(ufw)
+        message, backup = self.apply_global(ufw, backups)
+        self.assertIn("already compliant", message)
+        self.assertIsNone(backup)
+        self.assertFalse(backups.created)
+        self.assertFalse(
+            any(
+                event[0] in {"allow", "allow-global-ssh", "delete"}
+                for event in ufw.events
+            )
+        )
+
     def test_plan_preflights_but_does_not_mutate(self) -> None:
         prior = [("80/tcp", "Anywhere", ""), ("443/tcp", "Anywhere", "")]
         ufw = FakeUfw(prior)
@@ -333,6 +497,17 @@ class ApplyTests(unittest.TestCase):
         self.assertIn("ssh_add=1", message)
         self.assertIn("cloudflare_add=4", message)
         self.assertIn("web_delete=2", message)
+        self.assertIsNone(backup)
+        self.assertEqual(ufw.rules, prior)
+        self.assertFalse(backups.created)
+
+    def test_global_plan_preflights_but_does_not_mutate(self) -> None:
+        prior = [("80/tcp", "Anywhere", ""), ("443/tcp", "Anywhere", "")]
+        ufw = FakeUfw(prior)
+        backups = FakeBackups(ufw)
+        message, backup = self.apply_global(ufw, backups, plan_only=True)
+        self.assertIn("ssh_add=1", message)
+        self.assertIn(("preflight-global-ssh", firewall.SSH_COMMENT), ufw.events)
         self.assertIsNone(backup)
         self.assertEqual(ufw.rules, prior)
         self.assertFalse(backups.created)
@@ -363,6 +538,41 @@ class ApplyTests(unittest.TestCase):
         self.assertFalse(
             any(event[0] in {"allow", "delete", "reload"} for event in ufw.events)
         )
+
+    def test_global_mode_extra_ssh_rule_fails_before_backup_or_mutation(self) -> None:
+        ufw = FakeUfw(
+            [
+                ("22/tcp", "Anywhere", firewall.SSH_COMMENT),
+                ("22/tcp", "Anywhere", firewall.SSH_COMMENT),
+                ("22/tcp", "8.8.8.8/32", "stale restriction"),
+                ("80/tcp", "Anywhere", ""),
+                ("443/tcp", "Anywhere", ""),
+            ]
+        )
+        backups = FakeBackups(ufw)
+        with self.assertRaises(firewall.FirewallError):
+            self.apply_global(ufw, backups)
+        self.assertFalse(backups.created)
+        self.assertFalse(
+            any(
+                event[0] in {"allow", "allow-global-ssh", "delete", "reload"}
+                for event in ufw.events
+            )
+        )
+
+
+class ParserTests(unittest.TestCase):
+    def test_ssh_cidr_is_optional_for_plan_and_apply(self) -> None:
+        parser = firewall.build_parser()
+        self.assertIsNone(parser.parse_args(["plan"]).ssh_cidr)
+        self.assertIsNone(
+            parser.parse_args(["apply", "--confirm", firewall.CONFIRMATION]).ssh_cidr
+        )
+
+    def test_ssh_cidr_restricted_mode_is_preserved(self) -> None:
+        parser = firewall.build_parser()
+        arguments = parser.parse_args(["plan", "--ssh-cidr", "8.8.8.8/32"])
+        self.assertEqual(arguments.ssh_cidr, "8.8.8.8/32")
 
 
 if __name__ == "__main__":

@@ -118,6 +118,11 @@ messages and OTPs continue to use the primary production sender. The test lane h
 code was sent, or substitute for an approved production authentication template.
 Keep the mode `disabled` when any identifier or subscription is uncertain.
 
+For a test-only rollout, set `META_PRIMARY_SENDER_ENABLED=false`. That excludes the
+configured production WABA/phone pair in every API and worker process, requires the
+reply-only test lane, and rejects WhatsApp OTP or proactive delivery. This is the
+only Meta configuration allowed to coexist with temporary static-PIN web login.
+
 Historical predecessor read-only Graph checks confirmed that the then-configured
 test WABA and phone-number ID paired with the display number and that its app
 subscription list was non-empty. They were not rerun for the current application

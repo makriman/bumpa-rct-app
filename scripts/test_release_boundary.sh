@@ -40,6 +40,12 @@ for invalid_verifier_path in \
 done
 validate_temporary_verifier_host_path "$legacy_verifier_path"
 validate_temporary_verifier_host_path "$versioned_verifier_path"
+validate_auth_boundary_values \
+  temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
+  "$versioned_verifier_path" 2099-01-01T00:00:00Z disabled
+validate_auth_boundary_values \
+  temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
+  "$versioned_verifier_path" 2099-01-01T00:00:00Z meta
 
 release_file="$test_dir/.deployed-release.json"
 jq --null-input \
@@ -100,6 +106,11 @@ printf '%s\n' \
   'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=' \
   'TEMPORARY_WEB_PIN_EXPIRES_AT=' \
   'WHATSAPP_BACKEND=disabled' \
+  'META_PRIMARY_SENDER_ENABLED=true' \
+  'META_TEST_SENDER_VERIFICATION_MODE=disabled' \
+  'PROACTIVE_INSIGHTS_ENABLED=false' \
+  'DAILY_INSIGHTS_ENABLED=false' \
+  'WEEKLY_INSIGHTS_ENABLED=false' \
   'UNRELATED_SETTING=preserved' > "$env_file"
 chmod 0600 "$env_file"
 env_uid_before="$(stat -c '%u' "$env_file" 2>/dev/null || stat -f '%u' "$env_file")"
@@ -141,6 +152,24 @@ grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER_FILE=/run/auth-secret/temporary_web_pin_ve
 grep -Fxq "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=$versioned_verifier_path" "$env_file"
 grep -Fxq 'TEMPORARY_WEB_PIN_EXPIRES_AT=2099-01-01T00:00:00Z' "$env_file"
 grep -Fxq 'WHATSAPP_BACKEND=disabled' "$env_file"
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=true' "$env_file"
+grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=disabled' "$env_file"
+grep -Fxq 'PROACTIVE_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'DAILY_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
+
+rewrite_release_boundary "$env_file" \
+  "$new_revision" "sha-$new_revision" "$new_infra" \
+  "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+  temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
+  "$versioned_verifier_path" \
+  2099-01-01T00:00:00Z meta
+grep -Fxq 'WHATSAPP_BACKEND=meta' "$env_file"
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=false' "$env_file"
+grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only' "$env_file"
+grep -Fxq 'PROACTIVE_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'DAILY_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
 
 boundary_before="$(shasum -a 256 "$env_file")"
 if rewrite_release_boundary "$env_file" \
@@ -162,6 +191,12 @@ grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER=' "$env_file"
 grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER_FILE=' "$env_file"
 grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=' "$env_file"
 grep -Fxq 'TEMPORARY_WEB_PIN_EXPIRES_AT=' "$env_file"
+grep -Fxq 'WHATSAPP_BACKEND=disabled' "$env_file"
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=true' "$env_file"
+grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=disabled' "$env_file"
+grep -Fxq 'PROACTIVE_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'DAILY_INSIGHTS_ENABLED=false' "$env_file"
+grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
 
 duplicate_env="$test_dir/duplicate.env"
 cp "$env_file" "$duplicate_env"

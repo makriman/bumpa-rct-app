@@ -13,6 +13,7 @@ from app.db.session import SessionLocal
 from app.jobs.runtime import AsyncRuntimeConfig, RedisHealthProbe
 
 DatabaseStatus = Literal["ok", "unavailable"]
+WhatsappSelector = Literal["mock", "disabled", "meta", "meta_test_reply_only"]
 
 
 class HealthSnapshotProbe(Protocol):
@@ -25,7 +26,7 @@ DatabaseProbe = Callable[[], None]
 
 @dataclass(frozen=True)
 class ProviderSelectors:
-    whatsapp: Literal["mock", "disabled", "meta"]
+    whatsapp: WhatsappSelector
     bumpa: Literal["mock", "disabled", "bumpa"]
     agent: Literal["mock", "disabled", "hermes"]
 
@@ -66,8 +67,11 @@ class ProductionReadiness:
 
 
 def provider_selectors(settings: Settings) -> ProviderSelectors:
+    whatsapp: WhatsappSelector = settings.whatsapp_backend
+    if settings.whatsapp_backend == "meta" and not settings.meta_primary_sender_enabled:
+        whatsapp = "meta_test_reply_only"
     return ProviderSelectors(
-        whatsapp=settings.whatsapp_backend,
+        whatsapp=whatsapp,
         bumpa=settings.bumpa_backend,
         agent=settings.agent_backend,
     )

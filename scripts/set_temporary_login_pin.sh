@@ -52,17 +52,41 @@ env_value() {
 for key in \
   AUTH_LOGIN_MODE OTP_SECRET TEMPORARY_WEB_PIN_VERIFIER \
   TEMPORARY_WEB_PIN_VERIFIER_FILE TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST \
-  TEMPORARY_WEB_PIN_EXPIRES_AT WHATSAPP_BACKEND; do
+  TEMPORARY_WEB_PIN_EXPIRES_AT WHATSAPP_BACKEND \
+  META_PRIMARY_SENDER_ENABLED META_TEST_SENDER_VERIFICATION_MODE \
+  PROACTIVE_INSIGHTS_ENABLED DAILY_INSIGHTS_ENABLED WEEKLY_INSIGHTS_ENABLED; do
   if ! env_value "$key" >/dev/null; then
     echo "Production authentication settings are incomplete or duplicated" >&2
     exit 2
   fi
 done
 
+whatsapp_backend="$(env_value WHATSAPP_BACKEND)"
+meta_primary_sender_enabled="$(env_value META_PRIMARY_SENDER_ENABLED)"
+meta_test_sender_mode="$(env_value META_TEST_SENDER_VERIFICATION_MODE)"
+cadences_disabled=0
+if [[ "$(env_value PROACTIVE_INSIGHTS_ENABLED)" == "false" \
+  && "$(env_value DAILY_INSIGHTS_ENABLED)" == "false" \
+  && "$(env_value WEEKLY_INSIGHTS_ENABLED)" == "false" ]]; then
+  cadences_disabled=1
+fi
+whatsapp_boundary_safe=0
+if [[ "$whatsapp_backend" == "disabled" \
+  && "$meta_primary_sender_enabled" =~ ^(true|false)$ \
+  && "$meta_test_sender_mode" == "disabled" \
+  && "$cadences_disabled" == "1" ]]; then
+  whatsapp_boundary_safe=1
+elif [[ "$whatsapp_backend" == "meta" \
+  && "$meta_primary_sender_enabled" == "false" \
+  && "$meta_test_sender_mode" == "inbound_replies_only" \
+  && "$cadences_disabled" == "1" ]]; then
+  whatsapp_boundary_safe=1
+fi
+
 if [[ "$(env_value AUTH_LOGIN_MODE)" != "temporary_static_pin" \
   || -n "$(env_value TEMPORARY_WEB_PIN_VERIFIER)" \
   || "$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE)" != "/run/auth-secret/temporary_web_pin_verifier" \
-  || "$(env_value WHATSAPP_BACKEND)" != "disabled" ]]; then
+  || "$whatsapp_boundary_safe" != "1" ]]; then
   echo "Stage the fail-closed temporary authentication selectors before setting a PIN" >&2
   exit 2
 fi

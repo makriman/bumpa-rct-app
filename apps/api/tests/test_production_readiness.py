@@ -60,6 +60,25 @@ def test_live_provider_selectors_are_typed_for_onboarding() -> None:
     assert production_provider_selectors_ready(live) is True
     assert production_provider_selectors_ready(Settings(app_env="test")) is False
 
+    test_only = Settings(
+        app_env="test",
+        auth_login_mode="disabled",
+        whatsapp_backend="meta",
+        meta_waba_id="2234567890",
+        meta_phone_number_id="3234567890",
+        meta_primary_sender_enabled=False,
+        meta_test_sender_verification_mode="inbound_replies_only",
+        meta_test_sender_waba_id="423456789012345",
+        meta_test_sender_phone_number_id="523456789012345",
+        meta_test_sender_display_phone_e164="+15550102030",
+        bumpa_backend="bumpa",
+        agent_backend="hermes",
+    )
+    test_only_selectors = provider_selectors(test_only)
+    assert test_only_selectors.ready is False
+    assert test_only_selectors.payload()["whatsapp"] == "meta_test_reply_only"
+    assert production_provider_selectors_ready(test_only) is False
+
 
 def test_readiness_reports_healthy_database_queue_and_live_selectors() -> None:
     database_calls = 0

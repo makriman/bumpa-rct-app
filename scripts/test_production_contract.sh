@@ -28,6 +28,7 @@ invalid_env="$(mktemp)"
 duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 verification_env="$(mktemp)"
+temporary_verification_env="$(mktemp)"
 disabled_auth_env="$(mktemp)"
 whatsapp_auth_env="$(mktemp)"
 versioned_auth_env="$(mktemp)"
@@ -74,7 +75,7 @@ cleanup() {
       >/dev/null 2>&1 || true
   fi
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
-    "$verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
+    "$verification_env" "$temporary_verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
     "$versioned_auth_env" \
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
@@ -1196,8 +1197,18 @@ grep -Fq 'install -m 0755 -o root -g root' scripts/bootstrap_server.sh
 grep -Fq '/usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/bootstrap_server.sh
 grep -Fq '/etc/sudoers.d/bumpabestie-temporary-auth-secret' scripts/bootstrap_server.sh
 grep -Fq 'visudo -cf' scripts/bootstrap_server.sh
-grep -Fq 'apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 sudo' \
+grep -Fq 'apt-get install -y ca-certificates curl git gnupg jq python3 sudo' \
   scripts/bootstrap_server.sh
+if grep -Fqi 'fail2ban' scripts/bootstrap_server.sh; then
+  echo "Bootstrap reintroduces the removed Fail2ban package or service" >&2
+  exit 1
+fi
+grep -Fq 'if [[ -n "${ADMIN_SSH_CIDR:-}" ]]; then' scripts/bootstrap_server.sh
+grep -Fq "ufw allow 22/tcp comment 'BumpaBestie key-only SSH'" scripts/bootstrap_server.sh
+if grep -Fq 'Set ADMIN_SSH_CIDR' scripts/bootstrap_server.sh; then
+  echo "Bootstrap still requires a transient administrator CIDR" >&2
+  exit 1
+fi
 test -f infra/sudoers/bumpabestie-temporary-auth-secret
 grep -Fxq 'Defaults!/usr/local/sbin/bumpabestie-validate-temporary-auth-secret env_reset,!setenv,secure_path=/usr/sbin\:/usr/bin\:/sbin\:/bin' \
   infra/sudoers/bumpabestie-temporary-auth-secret
@@ -1644,6 +1655,52 @@ awk '
 chmod 0600 "$verification_env"
 ./scripts/validate_env.sh "$verification_env" production >/dev/null
 
+awk '
+  /^WHATSAPP_BACKEND=/ { print "WHATSAPP_BACKEND=meta"; next }
+  /^META_PRIMARY_SENDER_ENABLED=/ { print "META_PRIMARY_SENDER_ENABLED=false"; next }
+  /^META_TEST_SENDER_VERIFICATION_MODE=/ {
+    print "META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only"; next
+  }
+  /^META_TEST_SENDER_WABA_ID=/ { print "META_TEST_SENDER_WABA_ID=567890123456789"; next }
+  /^META_TEST_SENDER_PHONE_NUMBER_ID=/ {
+    print "META_TEST_SENDER_PHONE_NUMBER_ID=678901234567890"; next
+  }
+  /^META_TEST_SENDER_DISPLAY_PHONE_E164=/ {
+    print "META_TEST_SENDER_DISPLAY_PHONE_E164=+15550102030"; next
+  }
+  { print }
+' "$contract_env" > "$temporary_verification_env"
+chmod 0600 "$temporary_verification_env"
+./scripts/validate_env.sh "$temporary_verification_env" production >/dev/null
+
+temporary_verification_rendered="$(docker compose --env-file "$temporary_verification_env" \
+  -f compose.yaml -f compose.prod.yaml --profile async --profile tools config --format json)"
+if ! jq --exit-status '
+  .services.api.environment.AUTH_LOGIN_MODE == "temporary_static_pin" and
+  .services.api.environment.WHATSAPP_BACKEND == "meta" and
+  .services.api.environment.META_PRIMARY_SENDER_ENABLED == "false" and
+  .services.api.environment.META_TEST_SENDER_VERIFICATION_MODE == "inbound_replies_only" and
+  .services.worker.environment.AUTH_LOGIN_MODE == "disabled" and
+  .services.worker.environment.WHATSAPP_BACKEND == "meta" and
+  .services.worker.environment.META_PRIMARY_SENDER_ENABLED == "false" and
+  .services.worker.environment.META_TEST_SENDER_VERIFICATION_MODE == "inbound_replies_only" and
+  .services.migrate.environment.WHATSAPP_BACKEND == "disabled" and
+  .services.migrate.environment.META_TEST_SENDER_VERIFICATION_MODE == "disabled"
+' <<<"$temporary_verification_rendered" >/dev/null; then
+  echo "Production Compose did not preserve the temporary-PIN reply-only Meta test lane" >&2
+  exit 1
+fi
+
+awk '
+  /^META_PRIMARY_SENDER_ENABLED=/ { print "META_PRIMARY_SENDER_ENABLED=true"; next }
+  { print }
+' "$temporary_verification_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted temporary-PIN Meta mode with the primary sender enabled" >&2
+  exit 1
+fi
+
 # The one-shot migration process intentionally disables provider backends. A
 # live Meta test-sender setting must therefore remain available to the API while
 # being neutralized for migrations, whose settings are loaded before Alembic
@@ -1709,5 +1766,11 @@ grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
 grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
 grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
+grep -Fq 'mcp==1.28.1' infra/hermes/Dockerfile
+grep -Fq 'pillow==12.3.0' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion' infra/hermes/Dockerfile
+grep -Fq 'npm ls --prefix /opt/hermes --omit=dev --depth=0' infra/hermes/Dockerfile
+grep -Fq 'from PIL import Image' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/.venv/bin/hermes --help' infra/hermes/Dockerfile
 
 echo "Production environment and immutable Compose contracts passed"

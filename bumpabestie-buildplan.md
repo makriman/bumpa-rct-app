@@ -2306,7 +2306,7 @@ Allow:
 ```text
 TCP 80 from all
 TCP 443 from all
-TCP 22 only from trusted admin IPs
+TCP 22 from a durable trusted CIDR where available; otherwise key-only SSH
 ```
 
 Deny everything else.
@@ -2319,7 +2319,7 @@ set -euo pipefail
 
 sudo apt-get update
 sudo apt-get upgrade -y
-sudo apt-get install -y ca-certificates curl git ufw fail2ban
+sudo apt-get install -y ca-certificates curl git ufw
 
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER
@@ -2328,7 +2328,11 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
-sudo ufw allow from YOUR_ADMIN_IP to any port 22 proto tcp
+if [[ -n "${ADMIN_SSH_CIDR:-}" ]]; then
+  sudo ufw allow from "$ADMIN_SSH_CIDR" to any port 22 proto tcp
+else
+  sudo ufw allow 22/tcp
+fi
 sudo ufw --force enable
 
 sudo mkdir -p /opt/bumpabestie

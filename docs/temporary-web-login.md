@@ -49,17 +49,20 @@ Meta send, OTP or delivery receipt.
 
 Production temporary-PIN mode is valid only when all of the following are true:
 
-- `WHATSAPP_BACKEND=disabled`;
-- `META_TEST_SENDER_VERIFICATION_MODE=disabled`;
+- WhatsApp is either fully parked (`WHATSAPP_BACKEND=disabled` and
+  `META_TEST_SENDER_VERIFICATION_MODE=disabled`) or limited to the signed,
+  `inbound_replies_only` Meta test-sender lane with
+  `META_PRIMARY_SENDER_ENABLED=false`;
 - proactive, daily and weekly WhatsApp insights are disabled;
 - `TEMPORARY_WEB_PIN_EXPIRES_AT` is a future timezone-aware timestamp; and
 - the verifier is supplied through the scoped Compose secret, never an inline
   environment variable.
 
-Meta credentials remain in their existing scoped host secret boundary for a later
-reviewed activation. Parking the provider does not authorize deleting, copying or
-exposing those credentials. The disabled selector prevents the application from
-using Meta for login, the test-sender lane or proactive delivery.
+Meta credentials remain in their scoped host secret boundary. Parking the provider
+does not authorize deleting, copying or exposing those credentials. When the
+reply-only test lane is enabled alongside the temporary PIN, its exact test WABA
+and phone-number pair is the sole accepted WhatsApp sender: it cannot send OTPs,
+initiate proactive messages or activate the configured production sender.
 
 ## Mapped-only invariant
 

@@ -2,10 +2,12 @@
 """Restrict a UFW-protected origin to Cloudflare's current proxy ranges.
 
 The apply path is deliberately additive before it is subtractive: it validates
-Cloudflare's live lists, preflights every UFW command, verifies the nominated SSH
-allow rule, adds and verifies all current Cloudflare rules, and only then removes
-public or stale managed web rules.  A complete /etc/ufw snapshot is restored and
-reloaded automatically if any post-backup step fails.
+Cloudflare's live lists, preflights every UFW command, verifies the selected SSH
+allow mode, adds and verifies all current Cloudflare rules, and only then removes
+public or stale managed web rules.  SSH may be restricted to a stable CIDR, or
+left globally reachable for key-only authentication when admin addresses are
+dynamic.  A complete /etc/ufw snapshot is restored and reloaded automatically if
+any post-backup step fails.
 """
 
 from __future__ import annotations
@@ -78,6 +80,7 @@ class Rule:
     source: str
     comment: str
     action: str = "ALLOW IN"
+    address_family: int = 4
 
     @property
     def port(self) -> int | None:
@@ -252,13 +255,18 @@ def parse_numbered_rules(output: str) -> tuple[Rule, ...]:
         if not match:
             continue
         number = int(match.group(1))
-        target = re.sub(r"\s+\(v6\)$", "", match.group(2).strip())
+        raw_target = match.group(2).strip()
+        target = re.sub(r"\s+\(v6\)$", "", raw_target)
         action = match.group(3)
         right = match.group(4).strip()
         source_part, separator, comment_part = right.partition("#")
-        source = re.sub(r"\s+\(v6\)$", "", source_part.strip())
+        raw_source = source_part.strip()
+        source = re.sub(r"\s+\(v6\)$", "", raw_source)
         comment = comment_part.strip().strip("'\"") if separator else ""
-        rules.append(Rule(number, target, source, comment, action))
+        address_family = (
+            6 if raw_target.endswith("(v6)") or raw_source.endswith("(v6)") else 4
+        )
+        rules.append(Rule(number, target, source, comment, action, address_family))
     return tuple(rules)
 
 
@@ -308,25 +316,63 @@ def assess_rules(
     )
 
 
-def ssh_rule_present(rules: Sequence[Rule], ssh_cidr: str) -> bool:
-    return any(
-        rule.port == 22
-        and rule.action == "ALLOW IN"
-        and rule.normalized_source == ssh_cidr
-        for rule in rules
-    )
-
-
-def unexpected_ssh_rules(rules: Sequence[Rule], ssh_cidr: str) -> tuple[Rule, ...]:
+def _ssh_authorization_rules(rules: Sequence[Rule]) -> tuple[Rule, ...]:
     return tuple(
         rule
         for rule in rules
-        if rule.action in INBOUND_AUTH_ACTIONS
-        and rule.port == 22
-        and (
-            rule.action != "ALLOW IN" or rule.normalized_source != ssh_cidr
-        )
+        if rule.action in INBOUND_AUTH_ACTIONS and rule.port == 22
     )
+
+
+def _global_ssh_family(rule: Rule) -> int | None:
+    if rule.address_family in {4, 6}:
+        return rule.address_family
+    return None
+
+
+def ssh_rule_present(rules: Sequence[Rule], ssh_cidr: str | None) -> bool:
+    authorizations = _ssh_authorization_rules(rules)
+    if ssh_cidr is not None:
+        return any(
+            rule.action == "ALLOW IN" and rule.normalized_source == ssh_cidr
+            for rule in authorizations
+        )
+
+    global_rules = [
+        rule
+        for rule in authorizations
+        if rule.action == "ALLOW IN" and rule.normalized_source == "Anywhere"
+    ]
+    return len(global_rules) == 2 and {
+        _global_ssh_family(rule) for rule in global_rules
+    } == {4, 6}
+
+
+def unexpected_ssh_rules(
+    rules: Sequence[Rule], ssh_cidr: str | None
+) -> tuple[Rule, ...]:
+    authorizations = _ssh_authorization_rules(rules)
+    if ssh_cidr is not None:
+        return tuple(
+            rule
+            for rule in authorizations
+            if rule.action != "ALLOW IN" or rule.normalized_source != ssh_cidr
+        )
+
+    unexpected: list[Rule] = []
+    seen_families: set[int] = set()
+    for rule in authorizations:
+        family = _global_ssh_family(rule)
+        if (
+            rule.action != "ALLOW IN"
+            or rule.normalized_source != "Anywhere"
+            or family not in {4, 6}
+            or family in seen_families
+        ):
+            unexpected.append(rule)
+            continue
+        seen_families.add(family)
+    return tuple(unexpected)
 
 
 class UfwClient:
@@ -393,6 +439,9 @@ class UfwClient:
             comment,
         )
 
+    def preflight_global_ssh(self, comment: str) -> None:
+        self._run("--dry-run", "allow", "22/tcp", "comment", comment)
+
     def allow(self, source: str, port: int, comment: str) -> None:
         self._run(
             "allow",
@@ -407,6 +456,9 @@ class UfwClient:
             "comment",
             comment,
         )
+
+    def allow_global_ssh(self, comment: str) -> None:
+        self._run("allow", "22/tcp", "comment", comment)
 
     def delete_number(self, number: int) -> None:
         self._run("--force", "delete", str(number))
@@ -456,7 +508,7 @@ class BackupManager:
         *,
         numbered_status: str,
         verbose_status: str,
-        ssh_cidr: str,
+        ssh_cidr: str | None,
         ranges: Sequence[str],
         source_hashes: dict[str, str],
     ) -> Path:
@@ -479,6 +531,7 @@ class BackupManager:
         manifest = {
             "schema_version": 1,
             "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "ssh_mode": "restricted_cidr" if ssh_cidr else "global_key_only",
             "ssh_cidr": ssh_cidr,
             "range_sources": [IPV4_URL, IPV6_URL],
             "range_count": len(ranges),
@@ -555,14 +608,14 @@ def _current_rules(ufw: UfwClient) -> tuple[Rule, ...]:
 
 
 def _verify_compliant(
-    ufw: UfwClient, desired: frozenset[tuple[int, str]], ssh_cidr: str
+    ufw: UfwClient, desired: frozenset[tuple[int, str]], ssh_cidr: str | None
 ) -> None:
     rules = _current_rules(ufw)
     assessment = assess_rules(rules, desired)
     if not ssh_rule_present(rules, ssh_cidr):
-        raise FirewallError("nominated SSH allow rule is absent")
+        raise FirewallError("selected SSH allow rule set is incomplete")
     if unexpected_ssh_rules(rules, ssh_cidr):
-        raise FirewallError("a broad or unmanaged SSH allow rule remains")
+        raise FirewallError("an extra or unmanaged SSH allow rule remains")
     if assessment.missing:
         raise FirewallError("one or more current Cloudflare allow rules are absent")
     if assessment.broad_rule_numbers:
@@ -580,7 +633,7 @@ def apply_hardening(
     *,
     ranges: Sequence[str],
     source_hashes: dict[str, str],
-    ssh_cidr: str,
+    ssh_cidr: str | None,
     plan_only: bool,
 ) -> tuple[str, Path | None]:
     desired = desired_rule_keys(ranges)
@@ -596,12 +649,15 @@ def apply_hardening(
         )
     if unexpected_ssh_rules(rules, ssh_cidr):
         raise FirewallError(
-            "broad or unmanaged SSH allow rules require operator review"
+            "extra or unmanaged SSH allow rules require operator review"
         )
     needs_ssh = not ssh_rule_present(rules, ssh_cidr)
 
     if needs_ssh:
-        ufw.preflight_allow(ssh_cidr, 22, SSH_COMMENT)
+        if ssh_cidr is None:
+            ufw.preflight_global_ssh(SSH_COMMENT)
+        else:
+            ufw.preflight_allow(ssh_cidr, 22, SSH_COMMENT)
     for port, source in assessment.missing:
         ufw.preflight_allow(source, port, MANAGED_COMMENT)
 
@@ -629,9 +685,12 @@ def apply_hardening(
     try:
         if needs_ssh:
             mutation_started = True
-            ufw.allow(ssh_cidr, 22, SSH_COMMENT)
+            if ssh_cidr is None:
+                ufw.allow_global_ssh(SSH_COMMENT)
+            else:
+                ufw.allow(ssh_cidr, 22, SSH_COMMENT)
             if not ssh_rule_present(_current_rules(ufw), ssh_cidr):
-                raise FirewallError("SSH allow rule did not become active")
+                raise FirewallError("SSH allow rule set did not become active")
 
         for port, source in assessment.missing:
             mutation_started = True
@@ -651,7 +710,11 @@ def apply_hardening(
 
         ufw.reload()
         _verify_compliant(ufw, desired, ssh_cidr)
-        return "firewall restricted to current Cloudflare ranges", backup
+        ssh_mode = "restricted CIDR" if ssh_cidr else "global key-only"
+        return (
+            f"firewall restricted to current Cloudflare ranges; SSH mode: {ssh_mode}",
+            backup,
+        )
     except BaseException as exc:
         if mutation_started:
             try:
@@ -703,7 +766,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("plan", "apply"):
         child = subparsers.add_parser(command)
-        child.add_argument("--ssh-cidr", required=True)
+        child.add_argument(
+            "--ssh-cidr",
+            help=(
+                "restrict SSH to this stable CIDR; omit for globally reachable "
+                "key-only SSH"
+            ),
+        )
         child.add_argument(
             "--backup-root", type=_backup_root, default=DEFAULT_BACKUP_ROOT
         )
@@ -743,7 +812,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Restored the validated UFW snapshot and reloaded the firewall.")
             return 0
 
-        ssh_cidr = normalize_cidr(arguments.ssh_cidr)
+        ssh_cidr = normalize_cidr(arguments.ssh_cidr) if arguments.ssh_cidr else None
         ipv4, ipv6, source_hashes = fetch_cloudflare_ranges()
         if arguments.command == "apply" and arguments.confirm != CONFIRMATION:
             raise FirewallError("apply confirmation phrase is invalid")
