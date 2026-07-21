@@ -837,6 +837,8 @@ for service in postgres redis api web worker scheduler hermes; do
 done
 
 ready_payload="$(curl --fail --silent --show-error "https://${API_DOMAIN}/health/ready")"
+# Assigned dynamically by the validated environment-key loop above.
+# shellcheck disable=SC2153
 expected_whatsapp="$(
   expected_whatsapp_readiness_selector \
     "$WHATSAPP_BACKEND" "$META_PRIMARY_SENDER_ENABLED"
