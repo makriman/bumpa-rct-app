@@ -649,12 +649,18 @@ Expected readiness shape:
     "queued_wakeups": 0
   },
   "providers": {
-    "whatsapp": "meta-or-disabled",
+    "whatsapp": "disabled-or-meta-or-meta_test_reply_only",
     "bumpa": "bumpa-or-disabled",
     "agent": "hermes-or-disabled"
   }
 }
 ```
+
+The WhatsApp readiness selector is semantic rather than a copy of the backend
+setting: a disabled backend reports `disabled`, a full Meta primary sender
+reports `meta`, and `WHATSAPP_BACKEND=meta` with the primary sender excluded
+reports `meta_test_reply_only`. The promotion gate derives and verifies this
+exact value before committing the release.
 
 An unexpected `mock` or any public Hermes port is a failed production verification.
 Worker and scheduler must be healthy. A configured provider mode is not by itself a

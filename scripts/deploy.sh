@@ -166,6 +166,13 @@ for key in \
   printf -v "$key" '%s' "$value"
   export "${key?}"
 done
+# The validated environment-key loop above assigns this uppercase selector
+# dynamically before the semantic readiness value is derived.
+# shellcheck disable=SC2153
+expected_whatsapp="$(
+  expected_whatsapp_readiness_selector \
+    "$WHATSAPP_BACKEND" "$META_PRIMARY_SENDER_ENABLED"
+)"
 
 if [[ "$(value_for OPS_ALERTS_ENABLED)" == "true" ]]; then
   host_alert_config="/etc/bumpabestie/alerts.json"
@@ -836,21 +843,13 @@ for service in postgres redis api web worker scheduler hermes; do
   fi
 done
 
-ready_payload="$(curl --fail --silent --show-error "https://${API_DOMAIN}/health/ready")"
-# Assigned dynamically by the validated environment-key loop above.
-# shellcheck disable=SC2153
-expected_whatsapp="$(
-  expected_whatsapp_readiness_selector \
-    "$WHATSAPP_BACKEND" "$META_PRIMARY_SENDER_ENABLED"
+ready_payload="$(
+  curl --fail --silent --show-error \
+    --connect-timeout 10 --max-time 20 \
+    "https://${API_DOMAIN}/health/ready"
 )"
-jq --exit-status \
-  --arg whatsapp "$expected_whatsapp" \
-  --arg bumpa "$BUMPA_BACKEND" \
-  --arg agent "$AGENT_BACKEND" \
-  '.status == "ready" and .database == "ok" and
-   .providers.whatsapp == $whatsapp and
-   .providers.bumpa == $bumpa and
-   .providers.agent == $agent' <<<"$ready_payload" >/dev/null
+provider_readiness_matches \
+  "$ready_payload" "$expected_whatsapp" "$BUMPA_BACKEND" "$AGENT_BACKEND"
 
 persist_release_metadata \
   "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
