@@ -5,7 +5,8 @@ Production releases start through the root-owned launcher installed by
 
 ```bash
 sudo -u bumpabestie /usr/local/sbin/bumpabestie-promote \
-  <revision> <infra-image-tag> <api-digest> <web-digest> <caddy-digest> \
+  <revision> <infra-image-tag> <api-digest> <web-digest> \
+  <admin-web-digest> <research-web-digest> <caddy-digest> \
   <postgres-digest> <backup-digest> <hermes-digest>
 ```
 

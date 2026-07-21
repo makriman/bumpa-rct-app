@@ -296,6 +296,17 @@ _rewrite_release_environment() (
         print
       }
       END {
+        # Releases created before the three-surface split have neither web
+        # pointer. Add only those two compatibility keys; every other missing
+        # or duplicate boundary field remains a hard failure.
+        if (seen["ADMIN_WEB_IMAGE"] == 0) {
+          print "ADMIN_WEB_IMAGE=" replacement["ADMIN_WEB_IMAGE"]
+          seen["ADMIN_WEB_IMAGE"] = 1
+        }
+        if (seen["RESEARCH_WEB_IMAGE"] == 0) {
+          print "RESEARCH_WEB_IMAGE=" replacement["RESEARCH_WEB_IMAGE"]
+          seen["RESEARCH_WEB_IMAGE"] = 1
+        }
         for (key in replacement) {
           if (seen[key] != 1) {
             exit 43
