@@ -122,6 +122,9 @@ For a test-only rollout, set `META_PRIMARY_SENDER_ENABLED=false`. That excludes 
 configured production WABA/phone pair in every API and worker process, requires the
 reply-only test lane, and rejects WhatsApp OTP or proactive delivery. This is the
 only Meta configuration allowed to coexist with temporary static-PIN web login.
+The readiness endpoint identifies this restricted state explicitly as
+`providers.whatsapp=meta_test_reply_only`; it does not report the unrestricted
+`meta` selector.
 
 Historical predecessor read-only Graph checks confirmed that the then-configured
 test WABA and phone-number ID paired with the display number and that its app

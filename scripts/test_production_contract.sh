@@ -1152,6 +1152,11 @@ grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=180' scripts/deploy.sh
 grep -Fq 'if ! SMOKE_SCHEME=https' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=' scripts/deploy.sh
 grep -Fq 'SMOKE_OVERALL_TIMEOUT_SECONDS=60' scripts/deploy.sh
+grep -Fq 'source "$ROOT_DIR/scripts/provider_readiness.sh"' scripts/deploy.sh
+grep -Fq 'WHATSAPP_BACKEND META_PRIMARY_SENDER_ENABLED BUMPA_BACKEND AGENT_BACKEND' scripts/deploy.sh
+grep -Fq 'expected_whatsapp_readiness_selector' scripts/deploy.sh
+grep -Fq 'provider_readiness_matches' scripts/deploy.sh
+grep -Fq -- '--connect-timeout 10 --max-time 20' scripts/deploy.sh
 test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke' scripts/deploy.sh)" = 2

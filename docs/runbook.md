@@ -526,9 +526,13 @@ mismatch, or any auth/range/currency failure.
 
 ## WhatsApp/Meta failure
 
-If readiness reports `WHATSAPP_BACKEND=disabled`, callback verification, inbound
+If readiness reports `providers.whatsapp=disabled`, callback verification, inbound
 processing and OTP delivery must be unavailable; do not point Meta at that state or
-tell users an OTP was sent. When the selector is `meta`, use the procedure below.
+tell users an OTP was sent. A `meta` selector is the unrestricted primary-sender
+configuration. A `meta_test_reply_only` selector is the restricted test-number lane:
+signed inbound events and replies are allowed only for its exact WABA/phone pair,
+while OTP and proactive delivery must remain unavailable. Use the procedure below
+for either Meta selector and preserve that distinction throughout containment.
 
 For the test lane, historical predecessor read-only Graph checks confirmed the
 then-configured account/phone pair and a non-empty subscription list. The sender
