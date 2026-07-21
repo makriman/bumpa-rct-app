@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import lighthouse, { desktopConfig } from "lighthouse";
 import * as chromeLauncher from "chrome-launcher";
 
@@ -74,7 +75,10 @@ function validate(routeName, values) {
 }
 
 await mkdir(outputDirectory, { recursive: true });
-const server = spawn("npm", ["run", "start", "--", "-H", "127.0.0.1"], {
+const nextCli = fileURLToPath(
+  new URL("../node_modules/next/dist/bin/next", import.meta.url),
+);
+const server = spawn(process.execPath, [nextCli, "start", "-H", "127.0.0.1"], {
   cwd: new URL("../", import.meta.url),
   env: {
     ...process.env,
@@ -95,7 +99,12 @@ let chrome;
 try {
   await waitForServer(server);
   chrome = await chromeLauncher.launch({
-    chromeFlags: ["--headless=new", "--no-sandbox", "--disable-gpu"],
+    chromeFlags: [
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+    ],
   });
   const summary = {};
   const failures = [];
