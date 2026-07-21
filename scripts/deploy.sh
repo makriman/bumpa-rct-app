@@ -25,6 +25,7 @@ if [[ "$(read_promotion_state "$promotion_state_file")" != "PRE_BOUNDARY" ]]; th
 fi
 source "$ROOT_DIR/scripts/release_boundary.sh"
 source "$ROOT_DIR/scripts/rollback_containment.sh"
+source "$ROOT_DIR/scripts/provider_readiness.sh"
 
 previous_boundary_valid=0
 automatic_rollback_available=0
@@ -160,7 +161,7 @@ for key in \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
   AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE \
   TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST TEMPORARY_WEB_PIN_EXPIRES_AT \
-  WHATSAPP_BACKEND BUMPA_BACKEND AGENT_BACKEND; do
+  WHATSAPP_BACKEND META_PRIMARY_SENDER_ENABLED BUMPA_BACKEND AGENT_BACKEND; do
   value="$(value_for "$key")"
   printf -v "$key" '%s' "$value"
   export "${key?}"
@@ -836,8 +837,12 @@ for service in postgres redis api web worker scheduler hermes; do
 done
 
 ready_payload="$(curl --fail --silent --show-error "https://${API_DOMAIN}/health/ready")"
+expected_whatsapp="$(
+  expected_whatsapp_readiness_selector \
+    "$WHATSAPP_BACKEND" "$META_PRIMARY_SENDER_ENABLED"
+)"
 jq --exit-status \
-  --arg whatsapp "$WHATSAPP_BACKEND" \
+  --arg whatsapp "$expected_whatsapp" \
   --arg bumpa "$BUMPA_BACKEND" \
   --arg agent "$AGENT_BACKEND" \
   '.status == "ready" and .database == "ok" and
