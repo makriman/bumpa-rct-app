@@ -1,103 +1,72 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { type FormEvent, useEffect, useReducer, useRef } from "react";
+import {
+  LoginCard,
+  type LoginAction,
+  type LoginDelivery,
+  type LoginState,
+} from "@/components/login-card";
 import { Brand } from "@/components/ui";
-import CountryCodeSelect from "@/components/country-code-select";
-import {
-  homeForRole,
-  resolvePostLoginDestination,
-  safeNextPath,
-  type AccessSurface,
-} from "@/lib/navigation";
-import type { Role } from "@/lib/demo-data";
-import { apiRequest, demoFallbackEnabled } from "@/lib/api";
-import {
-  assembleE164,
-  countryByIso,
-  maskedPhone,
-  type PhoneCountry,
-} from "@/lib/phone";
-
-type LoginStep = "phone" | "pin" | "session" | "unauthorized";
-type PendingAction = "request" | "verify" | "session" | null;
-type LoginDelivery = "web_pin" | "whatsapp";
+import { apiRequest } from "@/lib/api";
+import { assembleE164, countryByIso, type PhoneCountry } from "@/lib/phone";
+import { useHydrated } from "@/lib/use-hydrated";
 
 type AccessRequestResponse = {
   delivery: LoginDelivery;
   expires_in_seconds: number;
-  dev_code?: string | null;
 };
 
 type SessionResponse = {
-  platform_roles: string[];
   memberships: Array<{ role: string; status: string }>;
 };
 
-const ACCESS_DENIED_COPY: Record<
-  AccessSurface,
-  { heading: string; description: string; guidance: string }
-> = {
-  workspace: {
-    heading: "You don’t have workspace access.",
-    description:
-      "Your sign-in succeeded, but this account does not have an active Bumpa Bestie workspace membership.",
-    guidance:
-      "Ask a workspace owner or administrator to activate your membership, then check access again.",
-  },
-  admin: {
-    heading: "You don’t have admin access.",
-    description:
-      "Your sign-in succeeded, but this account is not assigned an administrator role.",
-    guidance:
-      "Ask a superadministrator to grant admin access, then check access again.",
-  },
-  research: {
-    heading: "You don’t have research access.",
-    description:
-      "Your sign-in succeeded, but this account is not assigned a researcher role.",
-    guidance:
-      "Ask a superadministrator to grant research access, then check access again.",
-  },
+const initialState: LoginState = {
+  step: "phone",
+  countryIso: "GB",
+  nationalNumber: "",
+  requestedPhone: "",
+  delivery: null,
+  expiresInSeconds: 0,
+  pin: "",
+  error: "",
+  pending: null,
 };
+
+function loginReducer(state: LoginState, action: LoginAction): LoginState {
+  return action.type === "patch" ? { ...state, ...action.value } : state;
+}
 
 export default function LoginPage({
   phoneCountries,
+  nextPath,
 }: {
   phoneCountries: readonly PhoneCountry[];
+  nextPath: string | null;
 }) {
-  const [step, setStep] = useState<LoginStep>("phone");
-  const [countryIso, setCountryIso] = useState(
-    demoFallbackEnabled ? "NG" : "GB",
-  );
-  const [nationalNumber, setNationalNumber] = useState(
-    demoFallbackEnabled ? "0801 234 5678" : "",
-  );
-  const [requestedPhone, setRequestedPhone] = useState("");
-  const [delivery, setDelivery] = useState<LoginDelivery | null>(null);
-  const [expiresInSeconds, setExpiresInSeconds] = useState(0);
-  const [pin, setPin] = useState("");
-  const [error, setError] = useState("");
-  const [pending, setPending] = useState<PendingAction>(null);
-  const [deniedSurface, setDeniedSurface] =
-    useState<AccessSurface>("workspace");
+  const [state, dispatch] = useReducer(loginReducer, initialState);
+  const interactive = useHydrated();
   const pinRef = useRef<HTMLInputElement | null>(null);
-  const country = countryByIso(phoneCountries, countryIso);
+  const country = countryByIso(phoneCountries, state.countryIso);
 
   useEffect(() => {
-    if (step === "pin") pinRef.current?.focus();
-  }, [step]);
+    if (state.step === "pin") pinRef.current?.focus();
+  }, [state.step]);
 
-  const requestAccess = async (event?: FormEvent) => {
+  const requestAccess = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
+    const submittedNumber =
+      event?.currentTarget.elements.namedItem("nationalNumber");
+    const nationalNumber =
+      submittedNumber instanceof HTMLInputElement
+        ? submittedNumber.value
+        : state.nationalNumber;
     const phone = assembleE164(country, nationalNumber);
     if (!phone.ok) {
-      setError(phone.error);
+      dispatch({ type: "patch", value: { error: phone.error } });
       return;
     }
-
-    setPending("request");
-    setError("");
+    dispatch({ type: "patch", value: { pending: "request", error: "" } });
     try {
       const result = await apiRequest<AccessRequestResponse>(
         "/auth/request-otp",
@@ -109,104 +78,111 @@ export default function LoginPage({
       if (result.delivery !== "web_pin" && result.delivery !== "whatsapp") {
         throw new Error("The configured sign-in method is unavailable.");
       }
-      setRequestedPhone(phone.e164);
-      setDelivery(result.delivery);
-      setExpiresInSeconds(result.expires_in_seconds);
-      setPin("");
-      setStep("pin");
+      dispatch({
+        type: "patch",
+        value: {
+          requestedPhone: phone.e164,
+          delivery: result.delivery,
+          expiresInSeconds: result.expires_in_seconds,
+          pin: "",
+          step: "pin",
+        },
+      });
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "We could not check this number. Try again.",
-      );
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            reason instanceof Error
+              ? reason.message
+              : "We could not check this number. Try again.",
+        },
+      });
     } finally {
-      setPending(null);
+      dispatch({ type: "patch", value: { pending: null } });
     }
-  };
-
-  const enter = (role: Role) => {
-    document.cookie = "bb_session=demo; path=/; SameSite=Lax";
-    document.cookie = `bb_demo_role=${role}; path=/; SameSite=Lax`;
-    const params = new URLSearchParams(window.location.search);
-    window.location.href =
-      safeNextPath(params.get("next")) ?? homeForRole(role);
   };
 
   const resolveSession = async () => {
     const me = await apiRequest<SessionResponse>("/auth/me");
-    const next = new URLSearchParams(window.location.search).get("next");
-    const destination = resolvePostLoginDestination({
-      hostname: window.location.hostname,
-      next,
-      platformRoles: me.platform_roles,
-      memberships: me.memberships,
-    });
-    if (!destination.authorized) {
-      setDeniedSurface(destination.surface);
-      setStep("unauthorized");
+    const hasWorkspace = me.memberships.some(
+      (membership) =>
+        membership.status === "active" &&
+        ["owner", "admin", "member"].includes(membership.role),
+    );
+    if (!hasWorkspace) {
+      dispatch({ type: "patch", value: { step: "unauthorized" } });
       return;
     }
-    window.location.href = destination.path;
+    window.location.href = nextPath ?? "/chat";
   };
 
   const retrySession = async () => {
-    setPending("session");
-    setError("");
+    dispatch({ type: "patch", value: { pending: "session", error: "" } });
     try {
       await resolveSession();
     } catch {
-      setError(
-        "You are signed in, but we could not open your workspace. Try again.",
-      );
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            "You are signed in, but we could not open your workspace. Try again.",
+        },
+      });
     } finally {
-      setPending(null);
+      dispatch({ type: "patch", value: { pending: null } });
     }
   };
 
   const verify = async (event?: FormEvent) => {
     event?.preventDefault();
-    if (!/^\d{6}$/.test(pin)) {
-      setError("Enter the complete six-digit web PIN.");
+    if (!/^\d{6}$/.test(state.pin)) {
+      dispatch({
+        type: "patch",
+        value: { error: "Enter the complete six-digit web PIN." },
+      });
       return;
     }
-
-    setPending("verify");
-    setError("");
+    dispatch({ type: "patch", value: { pending: "verify", error: "" } });
     try {
       await apiRequest("/auth/verify-otp", {
         method: "POST",
-        body: JSON.stringify({ phone_e164: requestedPhone, code: pin }),
+        body: JSON.stringify({
+          phone_e164: state.requestedPhone,
+          code: state.pin,
+        }),
       });
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "That PIN could not be verified.",
-      );
-      setPending(null);
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            reason instanceof Error
+              ? reason.message
+              : "That PIN could not be verified.",
+          pending: null,
+        },
+      });
       return;
     }
 
-    setStep("session");
-    setPin("");
-    setPending("session");
+    dispatch({
+      type: "patch",
+      value: { step: "session", pin: "", pending: "session" },
+    });
     try {
       await resolveSession();
     } catch {
-      setError(
-        "Your PIN was accepted, but we could not open your workspace. Try again without entering the PIN again.",
-      );
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            "Your PIN was accepted, but we could not open your workspace. Try again without entering the PIN again.",
+        },
+      });
     } finally {
-      setPending(null);
+      dispatch({ type: "patch", value: { pending: null } });
     }
-  };
-
-  const changeNumber = () => {
-    setStep("phone");
-    setDelivery(null);
-    setPin("");
-    setError("");
   };
 
   return (
@@ -222,295 +198,23 @@ export default function LoginPage({
         </div>
       </section>
       <section className="auth-main">
-        <div className="auth-card">
-          <Brand className="auth-brand" />
-
-          {step === "phone" ? (
-            <>
-              <span className="auth-kicker">Temporary web access</span>
-              <h1>Welcome back.</h1>
-              <p>
-                Sign in with the mobile number approved for your Bumpa Bestie
-                workspace. Only mapped team members can continue.
-              </p>
-              <div className="auth-notice" role="note">
-                <span aria-hidden="true">↗</span>
-                <div>
-                  <strong>Pilot access</strong>
-                  <span>
-                    If WhatsApp verification is paused for your workspace, you
-                    will be prompted for the temporary six-digit web PIN.
-                  </span>
-                </div>
-              </div>
-
-              <form onSubmit={requestAccess} noValidate>
-                <fieldset className="phone-fieldset">
-                  <legend>Approved mobile number</legend>
-                  <div className="phone-fields">
-                    <div className="field phone-number-field">
-                      <label htmlFor="national-number">Mobile number</label>
-                      <div
-                        className={`phone-input-control ${
-                          error ? "input-error" : ""
-                        }`}
-                      >
-                        <CountryCodeSelect
-                          countries={phoneCountries}
-                          value={countryIso}
-                          onChange={(iso) => {
-                            setCountryIso(iso);
-                            setError("");
-                          }}
-                          describedBy={
-                            error ? "phone-help login-error" : "phone-help"
-                          }
-                        />
-                        <input
-                          id="national-number"
-                          className={`input ${error ? "input-error" : ""}`}
-                          type="tel"
-                          inputMode="tel"
-                          value={nationalNumber}
-                          onChange={(event) => {
-                            setNationalNumber(event.target.value);
-                            if (error) setError("");
-                          }}
-                          autoComplete="tel-national"
-                          placeholder={country.example}
-                          aria-describedby={
-                            error ? "phone-help login-error" : "phone-help"
-                          }
-                          aria-invalid={Boolean(error)}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <span className="field-help" id="phone-help">
-                    Choose the country code, then enter the mobile number. A
-                    leading zero is fine.
-                  </span>
-                  {error && (
-                    <span className="field-error" id="login-error" role="alert">
-                      {error}
-                    </span>
-                  )}
-                </fieldset>
-                <button
-                  className="button button-primary auth-submit"
-                  type="submit"
-                  disabled={pending !== null}
-                >
-                  {pending === "request"
-                    ? "Checking number…"
-                    : "Continue securely"}
-                </button>
-              </form>
-              <p className="auth-privacy-note">
-                We check this number against approved mappings before the next
-                sign-in step.
-              </p>
-            </>
-          ) : step === "pin" ? (
-            <>
-              <button
-                className="button button-ghost button-small auth-back"
-                onClick={changeNumber}
-                disabled={pending !== null}
-              >
-                <span aria-hidden="true">←</span> Change number
-              </button>
-              <span className="auth-kicker">
-                {delivery === "web_pin"
-                  ? "Temporary web access"
-                  : "WhatsApp verification"}
-              </span>
-              <h1>
-                {delivery === "web_pin"
-                  ? "Enter your web PIN."
-                  : "Check WhatsApp."}
-              </h1>
-              <p>
-                {delivery === "web_pin"
-                  ? "WhatsApp sign-in is paused. Use the six-digit temporary PIN shared with the project team; no WhatsApp message was sent."
-                  : `We sent a six-digit code to your approved number. It expires in ${Math.max(1, Math.ceil(expiresInSeconds / 60))} minutes.`}
-              </p>
-              <div className="auth-phone-chip">
-                <span aria-hidden="true">✓</span>
-                <span>
-                  Entered number
-                  <strong>{maskedPhone(requestedPhone, country)}</strong>
-                </span>
-              </div>
-              <form onSubmit={verify} noValidate>
-                <div className="field pin-field">
-                  <label htmlFor="web-pin">
-                    {delivery === "web_pin"
-                      ? "Six-digit web PIN"
-                      : "Six-digit WhatsApp code"}
-                  </label>
-                  <input
-                    ref={pinRef}
-                    id="web-pin"
-                    className={`input pin-input ${error ? "input-error" : ""}`}
-                    type={delivery === "web_pin" ? "password" : "text"}
-                    inputMode="numeric"
-                    autoComplete={
-                      delivery === "web_pin"
-                        ? "current-password"
-                        : "one-time-code"
-                    }
-                    pattern="[0-9]{6}"
-                    maxLength={6}
-                    value={pin}
-                    onChange={(event) => {
-                      setPin(event.target.value.replace(/\D/g, "").slice(0, 6));
-                      if (error) setError("");
-                    }}
-                    aria-describedby={error ? "pin-help pin-error" : "pin-help"}
-                    aria-invalid={Boolean(error)}
-                  />
-                  <span className="field-help" id="pin-help">
-                    {delivery === "web_pin"
-                      ? "The PIN contains six numbers and is shared separately with approved team members."
-                      : "Enter the code from the WhatsApp message."}
-                  </span>
-                  {error && (
-                    <span className="field-error" id="pin-error" role="alert">
-                      {error}
-                    </span>
-                  )}
-                </div>
-                <button
-                  className="button button-primary auth-submit"
-                  type="submit"
-                  disabled={pending !== null || pin.length !== 6}
-                >
-                  {pending === "verify"
-                    ? "Signing in…"
-                    : delivery === "web_pin"
-                      ? "Sign in"
-                      : "Verify and sign in"}
-                </button>
-              </form>
-              <p className="auth-privacy-note">
-                Having trouble? Check the selected country and the mobile number
-                before trying again.
-              </p>
-            </>
-          ) : step === "session" ? (
-            <>
-              <span className="auth-kicker">Signed in</span>
-              <h1>Open your workspace.</h1>
-              <p>
-                Your PIN has already been accepted. We are resolving your
-                workspace access now; you will not need to enter it again.
-              </p>
-              {error && (
-                <div className="field-error" role="alert">
-                  {error}
-                </div>
-              )}
-              <button
-                className="button button-primary auth-submit"
-                type="button"
-                disabled={pending !== null}
-                onClick={() => void retrySession()}
-              >
-                {pending === "session"
-                  ? "Opening workspace…"
-                  : "Try opening workspace again"}
-              </button>
-              <p className="auth-privacy-note">
-                If access remains unavailable, wait a moment and try this step
-                again. Your completed sign-in is not repeated.
-              </p>
-            </>
-          ) : (
-            <>
-              <span className="auth-kicker">Signed in · Access required</span>
-              <h1>{ACCESS_DENIED_COPY[deniedSurface].heading}</h1>
-              <p>{ACCESS_DENIED_COPY[deniedSurface].description}</p>
-              <div className="auth-notice" role="status">
-                <span aria-hidden="true">✓</span>
-                <div>
-                  <strong>Your session is active</strong>
-                  <span>
-                    We kept your completed sign-in and will not ask for the PIN
-                    again while checking access.
-                  </span>
-                </div>
-              </div>
-              {error && (
-                <div className="field-error" role="alert">
-                  {error}
-                </div>
-              )}
-              <button
-                className="button button-primary auth-submit"
-                type="button"
-                disabled={pending !== null}
-                onClick={() => void retrySession()}
-              >
-                {pending === "session"
-                  ? "Checking access…"
-                  : "Check access again"}
-              </button>
-              <p className="auth-privacy-note">
-                {ACCESS_DENIED_COPY[deniedSurface].guidance}
-              </p>
-            </>
-          )}
-
-          {demoFallbackEnabled && (
-            <div className="demo-box">
-              <strong>Local demo access</strong>
-              <div>
-                Seeded API identities (local PIN <strong>246810</strong>): owner
-                +2348012345678 · operator +2348099990001 · researcher
-                +2348099990002 · superadmin +2348099990000. Or preview a role
-                without live data:
-              </div>
-              <div className="demo-actions">
-                <button
-                  className="button button-secondary button-small"
-                  onClick={() => enter("owner")}
-                >
-                  SME owner
-                </button>
-                <button
-                  className="button button-secondary button-small"
-                  onClick={() => enter("operator")}
-                >
-                  Operator
-                </button>
-                <button
-                  className="button button-secondary button-small"
-                  onClick={() => enter("researcher")}
-                >
-                  Researcher
-                </button>
-                <button
-                  className="button button-secondary button-small"
-                  onClick={() => enter("superadmin")}
-                >
-                  Superadmin
-                </button>
-              </div>
-            </div>
-          )}
-          <p className="auth-legal">
-            By continuing, you agree to our{" "}
-            <Link href="/terms" className="table-action">
-              Terms
-            </Link>{" "}
-            and{" "}
-            <Link href="/privacy" className="table-action">
-              Privacy notice
-            </Link>
-            .
-          </p>
-        </div>
+        <LoginCard
+          country={country}
+          dispatch={dispatch}
+          onChangeNumber={() =>
+            dispatch({
+              type: "patch",
+              value: { step: "phone", delivery: null, pin: "", error: "" },
+            })
+          }
+          onRequestAccess={requestAccess}
+          onRetrySession={retrySession}
+          onVerify={verify}
+          phoneCountries={phoneCountries}
+          pinRef={pinRef}
+          interactive={interactive}
+          state={state}
+        />
       </section>
     </main>
   );

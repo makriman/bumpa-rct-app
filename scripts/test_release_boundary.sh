@@ -16,6 +16,8 @@ old_infra="sha-cccccccccccccccccccccccccccccccccccccccc"
 new_infra="sha-dddddddddddddddddddddddddddddddddddddddd"
 old_api="registry.example/bumpa/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 old_web="registry.example/bumpa/web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+old_admin_web="registry.example/bumpa/admin-web@sha256:bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc"
+old_research_web="registry.example/bumpa/research-web@sha256:bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd"
 old_caddy="registry.example/bumpa/caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 old_postgres="registry.example/bumpa/postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 old_redis="redis:7-alpine@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -23,6 +25,8 @@ old_backup="registry.example/bumpa/backup@sha256:fffffffffffffffffffffffffffffff
 old_hermes="registry.example/bumpa/hermes@sha256:abababababababababababababababababababababababababababababababab"
 new_api="registry.example/bumpa/api@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 new_web="registry.example/bumpa/web@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+new_admin_web="registry.example/bumpa/admin-web@sha256:2323232323232323232323232323232323232323232323232323232323232323"
+new_research_web="registry.example/bumpa/research-web@sha256:2424242424242424242424242424242424242424242424242424242424242424"
 new_caddy="registry.example/bumpa/caddy@sha256:3333333333333333333333333333333333333333333333333333333333333333"
 new_postgres="registry.example/bumpa/postgres@sha256:4444444444444444444444444444444444444444444444444444444444444444"
 new_backup="registry.example/bumpa/backup@sha256:5555555555555555555555555555555555555555555555555555555555555555"
@@ -52,7 +56,9 @@ jq --null-input \
   --arg revision "$old_revision" \
   --arg image_tag "sha-$old_revision" \
   --arg infra_image_tag "$old_infra" \
-  --arg api "$old_api" --arg web "$old_web" --arg caddy "$old_caddy" \
+  --arg api "$old_api" --arg web "$old_web" \
+  --arg admin_web "$old_admin_web" --arg research_web "$old_research_web" \
+  --arg caddy "$old_caddy" \
   --arg postgres "$old_postgres" --arg redis "$old_redis" \
   --arg backup "$old_backup" --arg hermes "$old_hermes" \
   '{
@@ -61,6 +67,7 @@ jq --null-input \
     infra_image_tag: $infra_image_tag,
     images: {
       api: $api, worker: $api, scheduler: $api, web: $web,
+      admin_web: $admin_web, research_web: $research_web,
       caddy: $caddy, postgres: $postgres, redis: $redis,
       backup: $backup, hermes: $hermes
     },
@@ -77,6 +84,8 @@ load_release_boundary "$release_file"
 test "$RELEASE_REVISION" = "$old_revision"
 test "$RELEASE_OPERATIONS_REVISION" = "$old_revision"
 test "$RELEASE_API_IMAGE" = "$old_api"
+test "$RELEASE_ADMIN_WEB_IMAGE" = "$old_admin_web"
+test "$RELEASE_RESEARCH_WEB_IMAGE" = "$old_research_web"
 test "$RELEASE_BACKUP_IMAGE" = "$old_backup"
 test "$RELEASE_AUTH_LOGIN_MODE" = disabled
 test -z "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"
@@ -96,6 +105,8 @@ printf '%s\n' \
   "API_IMAGE=$old_api" \
   'JWT_SECRET=preserve=this=value exactly' \
   "WEB_IMAGE=$old_web" \
+  "ADMIN_WEB_IMAGE=$old_admin_web" \
+  "RESEARCH_WEB_IMAGE=$old_research_web" \
   "CADDY_IMAGE=$old_caddy" \
   "POSTGRES_IMAGE=$old_postgres" \
   "BACKUP_IMAGE=$old_backup" \
@@ -118,7 +129,8 @@ env_gid_before="$(stat -c '%g' "$env_file" 2>/dev/null || stat -f '%g' "$env_fil
 
 rewrite_release_pointers "$env_file" \
   "$new_revision" "sha-$new_revision" "$new_infra" \
-  "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes"
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes"
 
 test "$(release_file_mode "$env_file")" = 600
 test "$(stat -c '%u' "$env_file" 2>/dev/null || stat -f '%u' "$env_file")" = "$env_uid_before"
@@ -130,11 +142,13 @@ grep -Fxq "IMAGE_TAG=sha-$new_revision" "$env_file"
 grep -Fxq "INFRA_IMAGE_TAG=$new_infra" "$env_file"
 grep -Fxq "API_IMAGE=$new_api" "$env_file"
 grep -Fxq "WEB_IMAGE=$new_web" "$env_file"
+grep -Fxq "ADMIN_WEB_IMAGE=$new_admin_web" "$env_file"
+grep -Fxq "RESEARCH_WEB_IMAGE=$new_research_web" "$env_file"
 grep -Fxq "CADDY_IMAGE=$new_caddy" "$env_file"
 grep -Fxq "POSTGRES_IMAGE=$new_postgres" "$env_file"
 grep -Fxq "BACKUP_IMAGE=$new_backup" "$env_file"
 grep -Fxq "HERMES_IMAGE=$new_hermes" "$env_file"
-test "$(grep -Ec '^(DEPLOY_REF|IMAGE_TAG|INFRA_IMAGE_TAG|API_IMAGE|WEB_IMAGE|CADDY_IMAGE|POSTGRES_IMAGE|BACKUP_IMAGE|HERMES_IMAGE)=' "$env_file")" = 9
+test "$(grep -Ec '^(DEPLOY_REF|IMAGE_TAG|INFRA_IMAGE_TAG|API_IMAGE|WEB_IMAGE|ADMIN_WEB_IMAGE|RESEARCH_WEB_IMAGE|CADDY_IMAGE|POSTGRES_IMAGE|BACKUP_IMAGE|HERMES_IMAGE)=' "$env_file")" = 11
 test -z "$(find "$test_dir" -name '.env.production.release.*' -print -quit)"
 
 # A config-only activation and rollback reuse the same immutable images. The
@@ -142,7 +156,8 @@ test -z "$(find "$test_dir" -name '.env.production.release.*' -print -quit)"
 # atomic rename while always forcing the legacy inline verifier blank.
 rewrite_release_boundary "$env_file" \
   "$new_revision" "sha-$new_revision" "$new_infra" \
-  "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
   temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
   "$versioned_verifier_path" \
   2099-01-01T00:00:00Z disabled
@@ -160,7 +175,8 @@ grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
 
 rewrite_release_boundary "$env_file" \
   "$new_revision" "sha-$new_revision" "$new_infra" \
-  "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
   temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
   "$versioned_verifier_path" \
   2099-01-01T00:00:00Z meta
@@ -174,7 +190,8 @@ grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
 boundary_before="$(shasum -a 256 "$env_file")"
 if rewrite_release_boundary "$env_file" \
     "$new_revision" "sha-$new_revision" "$new_infra" \
-    "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+    "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+    "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
     temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
     "$versioned_verifier_path" invalid disabled; then
   echo "An invalid auth boundary was accepted" >&2
@@ -184,7 +201,8 @@ test "$(shasum -a 256 "$env_file")" = "$boundary_before"
 
 rewrite_release_boundary "$env_file" \
   "$new_revision" "sha-$new_revision" "$new_infra" \
-  "$new_api" "$new_web" "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
   disabled '' '' '' disabled
 grep -Fxq 'AUTH_LOGIN_MODE=disabled' "$env_file"
 grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER=' "$env_file"
@@ -205,7 +223,8 @@ chmod 0600 "$duplicate_env"
 duplicate_before="$(shasum -a 256 "$duplicate_env")"
 if rewrite_release_pointers "$duplicate_env" \
   "$old_revision" "sha-$old_revision" "$old_infra" \
-  "$old_api" "$old_web" "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes"; then
+  "$old_api" "$old_web" "$old_admin_web" "$old_research_web" \
+  "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes"; then
   echo "Duplicate release pointers were accepted" >&2
   exit 1
 fi
@@ -216,7 +235,8 @@ grep -v '^HERMES_IMAGE=' "$env_file" > "$missing_env"
 chmod 0600 "$missing_env"
 if rewrite_release_pointers "$missing_env" \
   "$old_revision" "sha-$old_revision" "$old_infra" \
-  "$old_api" "$old_web" "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes"; then
+  "$old_api" "$old_web" "$old_admin_web" "$old_research_web" \
+  "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes"; then
   echo "A missing release pointer was accepted" >&2
   exit 1
 fi
@@ -226,7 +246,8 @@ grep -v '^AUTH_LOGIN_MODE=' "$env_file" > "$missing_auth_env"
 chmod 0600 "$missing_auth_env"
 if rewrite_release_boundary "$missing_auth_env" \
     "$old_revision" "sha-$old_revision" "$old_infra" \
-    "$old_api" "$old_web" "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes" \
+    "$old_api" "$old_web" "$old_admin_web" "$old_research_web" \
+    "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes" \
     disabled '' '' '' disabled; then
   echo "A missing auth-boundary field was accepted" >&2
   exit 1

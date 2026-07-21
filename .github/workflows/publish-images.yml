@@ -66,6 +66,12 @@ jobs:
           - name: web
             dockerfile: apps/web/Dockerfile
             target: ""
+          - name: admin-web
+            dockerfile: apps/admin-web/Dockerfile
+            target: ""
+          - name: research-web
+            dockerfile: apps/research-web/Dockerfile
+            target: ""
           - name: caddy
             dockerfile: infra/caddy/Dockerfile
             target: runtime

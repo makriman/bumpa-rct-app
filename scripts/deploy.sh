@@ -36,6 +36,8 @@ previous_api_image=""
 previous_worker_image=""
 previous_scheduler_image=""
 previous_web_image=""
+previous_admin_web_image=""
+previous_research_web_image=""
 previous_caddy_image=""
 previous_postgres_image=""
 previous_redis_image=""
@@ -66,7 +68,8 @@ restore_previous_release_boundary() {
   fi
   rewrite_release_boundary .env.production \
     "$previous_revision" "$previous_image_tag" "$previous_infra_image_tag" \
-    "$previous_api_image" "$previous_web_image" "$previous_caddy_image" \
+    "$previous_api_image" "$previous_web_image" "$previous_admin_web_image" \
+    "$previous_research_web_image" "$previous_caddy_image" \
     "$previous_postgres_image" "$previous_backup_image" "$previous_hermes_image" \
     "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
     "$previous_temporary_web_pin_verifier_file_host" \
@@ -136,6 +139,8 @@ if [[ -e .deployed-release.json ]]; then
   previous_worker_image="$RELEASE_WORKER_IMAGE"
   previous_scheduler_image="$RELEASE_SCHEDULER_IMAGE"
   previous_web_image="$RELEASE_WEB_IMAGE"
+  previous_admin_web_image="$RELEASE_ADMIN_WEB_IMAGE"
+  previous_research_web_image="$RELEASE_RESEARCH_WEB_IMAGE"
   previous_caddy_image="$RELEASE_CADDY_IMAGE"
   previous_postgres_image="$RELEASE_POSTGRES_IMAGE"
   previous_redis_image="$RELEASE_REDIS_IMAGE"
@@ -157,7 +162,7 @@ value_for() {
 }
 for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
-  API_IMAGE WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
+  API_IMAGE WEB_IMAGE ADMIN_WEB_IMAGE RESEARCH_WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
   APP_DOMAIN WWW_DOMAIN ADMIN_DOMAIN RESEARCH_DOMAIN API_DOMAIN \
   AUTH_LOGIN_MODE TEMPORARY_WEB_PIN_VERIFIER_FILE \
   TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST TEMPORARY_WEB_PIN_EXPIRES_AT \
@@ -204,6 +209,8 @@ target_image_tag="$IMAGE_TAG"
 target_infra_image_tag="$INFRA_IMAGE_TAG"
 target_api_image="$API_IMAGE"
 target_web_image="$WEB_IMAGE"
+target_admin_web_image="$ADMIN_WEB_IMAGE"
+target_research_web_image="$RESEARCH_WEB_IMAGE"
 # Values are assigned dynamically by the validated environment-key loop above.
 # shellcheck disable=SC2153
 target_caddy_image="$CADDY_IMAGE"
@@ -340,12 +347,14 @@ running_image() {
 }
 
 if ((previous_boundary_valid)); then
-  for service in api worker scheduler web hermes caddy postgres redis; do
+  for service in api worker scheduler web admin-web research-web hermes caddy postgres redis; do
     case "$service" in
       api) recorded_image="$previous_api_image" ;;
       worker) recorded_image="$previous_worker_image" ;;
       scheduler) recorded_image="$previous_scheduler_image" ;;
       web) recorded_image="$previous_web_image" ;;
+      admin-web) recorded_image="$previous_admin_web_image" ;;
+      research-web) recorded_image="$previous_research_web_image" ;;
       hermes) recorded_image="$previous_hermes_image" ;;
       caddy) recorded_image="$previous_caddy_image" ;;
       postgres) recorded_image="$previous_postgres_image" ;;
@@ -363,13 +372,15 @@ fi
 if ((previous_boundary_valid == 0)); then
   previous_api_image="$(running_image api)"
   previous_web_image="$(running_image web)"
+  previous_admin_web_image="$(running_image admin-web)"
+  previous_research_web_image="$(running_image research-web)"
   previous_hermes_image="$(running_image hermes)"
 fi
 previous_worker_running=0
 previous_scheduler_running=0
 previous_hermes_running=0
 previous_writer_containers=()
-for service in api web worker scheduler hermes caddy; do
+for service in api web admin-web research-web worker scheduler hermes caddy; do
   container_id="$("${compose[@]}" ps --status running -q "$service")"
   if [[ -n "$container_id" ]]; then
     previous_writer_containers+=("$container_id")
@@ -417,22 +428,25 @@ persist_release_metadata() {
   local worker_image="$5"
   local scheduler_image="$6"
   local web_image="$7"
-  local caddy_image="$8"
-  local postgres_image="$9"
-  local redis_image="${10}"
-  local backup_image="${11}"
-  local hermes_image="${12}"
-  local operations_revision="${13}"
-  local auth_login_mode="${14}"
-  local verifier_file="${15}"
-  local verifier_host="${16}"
-  local expires_at="${17}"
-  local whatsapp_backend="${18}"
+  local admin_web_image="$8"
+  local research_web_image="$9"
+  local caddy_image="${10}"
+  local postgres_image="${11}"
+  local redis_image="${12}"
+  local backup_image="${13}"
+  local hermes_image="${14}"
+  local operations_revision="${15}"
+  local auth_login_mode="${16}"
+  local verifier_file="${17}"
+  local verifier_host="${18}"
+  local expires_at="${19}"
+  local whatsapp_backend="${20}"
   local deployed_at revision_tmp release_tmp
 
   validate_release_pointer_values \
     "$revision" "$image_tag" "$infra_image_tag" \
-    "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
+    "$api_image" "$web_image" "$admin_web_image" "$research_web_image" \
+    "$caddy_image" "$postgres_image" \
     "$backup_image" "$hermes_image" || return 1
   if [[ ! "$operations_revision" =~ ^[a-f0-9]{40}$ ]]; then
     return 1
@@ -463,6 +477,8 @@ persist_release_metadata() {
     --arg worker "$worker_image" \
     --arg scheduler "$scheduler_image" \
     --arg web "$web_image" \
+    --arg admin_web "$admin_web_image" \
+    --arg research_web "$research_web_image" \
     --arg caddy "$caddy_image" \
     --arg postgres "$postgres_image" \
     --arg redis "$redis_image" \
@@ -484,6 +500,8 @@ persist_release_metadata() {
         worker: $worker,
         scheduler: $scheduler,
         web: $web,
+        admin_web: $admin_web,
+        research_web: $research_web,
         caddy: $caddy,
         postgres: $postgres,
         redis: $redis,
@@ -515,7 +533,8 @@ rollback() {
   local result=$?
   local rollback_result=1
   local predeployment_restored=1
-  local hybrid_api hybrid_worker hybrid_scheduler hybrid_web hybrid_caddy
+  local hybrid_api hybrid_worker hybrid_scheduler hybrid_web
+  local hybrid_admin_web hybrid_research_web hybrid_caddy
   local hybrid_postgres hybrid_redis hybrid_backup hybrid_hermes
   trap - EXIT
   if ((result == 0)); then
@@ -525,7 +544,7 @@ rollback() {
   echo "Deployment of $deploy_commit failed." >&2
   rm -f .deployed-revision.tmp.* .deployed-release.json.tmp.*
   "${compose[@]}" ps >&2 || true
-  "${compose[@]}" logs --no-color --tail=200 caddy api web worker scheduler hermes postgres redis >&2 || true
+  "${compose[@]}" logs --no-color --tail=200 caddy api web admin-web research-web worker scheduler hermes postgres redis >&2 || true
 
   if ((!deployment_started)); then
     if ((previous_boundary_valid)); then
@@ -572,11 +591,12 @@ rollback() {
       mark_maintenance_required "predeployment_recovery_smoke_failed" || true
     fi
   elif ((deployment_started && automatic_rollback_available)) \
-    && [[ -n "$previous_api_image" && -n "$previous_web_image" ]]; then
+    && [[ -n "$previous_api_image" && -n "$previous_web_image" \
+      && -n "$previous_admin_web_image" && -n "$previous_research_web_image" ]]; then
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
-    rollback_services=(api web caddy)
-    rollback_images=(api web)
+    rollback_services=(api web admin-web research-web caddy)
+    rollback_images=(api web admin-web research-web)
     if ((previous_hermes_running)) && [[ -n "$previous_hermes_image" ]]; then
       rollback_services+=(hermes)
       rollback_images+=(hermes)
@@ -593,13 +613,16 @@ rollback() {
       # anything, then restore the runtime auth secret before the prior API.
       rewrite_release_boundary .env.production \
         "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
-        "$previous_api_image" "$previous_web_image" "$target_caddy_image" \
+        "$previous_api_image" "$previous_web_image" "$previous_admin_web_image" \
+        "$previous_research_web_image" "$target_caddy_image" \
         "$target_postgres_image" "$target_backup_image" "$previous_hermes_image" \
         "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
         "$previous_temporary_web_pin_verifier_file_host" \
         "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || return 1
       export API_IMAGE="$previous_api_image"
       export WEB_IMAGE="$previous_web_image"
+      export ADMIN_WEB_IMAGE="$previous_admin_web_image"
+      export RESEARCH_WEB_IMAGE="$previous_research_web_image"
       export HERMES_IMAGE="$previous_hermes_image"
       AUTH_LOGIN_MODE="$previous_auth_login_mode"
       TEMPORARY_WEB_PIN_VERIFIER=""
@@ -642,6 +665,8 @@ rollback() {
       hybrid_worker="$(running_image_ref worker)"
       hybrid_scheduler="$(running_image_ref scheduler)"
       hybrid_web="$(running_image_ref web)"
+      hybrid_admin_web="$(running_image_ref admin-web)"
+      hybrid_research_web="$(running_image_ref research-web)"
       hybrid_caddy="$(running_image_ref caddy)"
       hybrid_postgres="$(running_image_ref postgres)"
       hybrid_redis="$(running_image_ref redis)"
@@ -651,6 +676,8 @@ rollback() {
         && "$hybrid_worker" == "$previous_worker_image" \
         && "$hybrid_scheduler" == "$previous_scheduler_image" \
         && "$hybrid_web" == "$previous_web_image" \
+        && "$hybrid_admin_web" == "$previous_admin_web_image" \
+        && "$hybrid_research_web" == "$previous_research_web_image" \
         && "$hybrid_hermes" == "$previous_hermes_image" \
         && "$hybrid_caddy" == "$target_caddy_image" \
         && "$hybrid_postgres" == "$target_postgres_image" ]]; then
@@ -663,7 +690,8 @@ rollback() {
       # will fail closed on the deliberate record/live mismatch.
       if ((rollback_result == 0)) && rewrite_release_boundary .env.production \
           "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
-          "$hybrid_api" "$hybrid_web" "$hybrid_caddy" "$hybrid_postgres" \
+          "$hybrid_api" "$hybrid_web" "$hybrid_admin_web" "$hybrid_research_web" \
+          "$hybrid_caddy" "$hybrid_postgres" \
           "$hybrid_backup" "$hybrid_hermes" \
           "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
           "$previous_temporary_web_pin_verifier_file_host" \
@@ -671,6 +699,7 @@ rollback() {
         && persist_release_metadata \
           "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
           "$hybrid_api" "$hybrid_worker" "$hybrid_scheduler" "$hybrid_web" \
+          "$hybrid_admin_web" "$hybrid_research_web" \
           "$hybrid_caddy" "$hybrid_postgres" "$hybrid_redis" \
           "$hybrid_backup" "$hybrid_hermes" "$target_revision" \
           "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
@@ -705,7 +734,7 @@ rollback() {
 }
 trap rollback EXIT
 
-"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes
+"${compose[@]}" --profile tools pull caddy postgres redis web admin-web research-web api backup hermes
 
 verify_image_revision() {
   local image="$1"
@@ -722,6 +751,8 @@ verify_image_revision() {
 infra_commit="${INFRA_IMAGE_TAG#sha-}"
 verify_image_revision "$API_IMAGE" "$deploy_commit" api
 verify_image_revision "$WEB_IMAGE" "$deploy_commit" web
+verify_image_revision "$ADMIN_WEB_IMAGE" "$deploy_commit" admin-web
+verify_image_revision "$RESEARCH_WEB_IMAGE" "$deploy_commit" research-web
 verify_image_revision "$CADDY_IMAGE" "$infra_commit" caddy
 verify_image_revision "$POSTGRES_IMAGE" "$infra_commit" postgres
 verify_image_revision "$BACKUP_IMAGE" "$infra_commit" backup
@@ -754,7 +785,7 @@ fi
 
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
 writer_stop_attempted=1
-"${compose[@]}" stop --timeout 60 caddy web api worker scheduler hermes
+"${compose[@]}" stop --timeout 60 caddy web admin-web research-web api worker scheduler hermes
 assert_application_writers_stopped
 if [[ -n "$postgres_container" ]]; then
   running_pg_version_num="$(
@@ -818,10 +849,10 @@ docker exec \
 "${compose[@]}" up -d --wait --wait-timeout 180 hermes
 ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
 "${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \
-  api web worker scheduler hermes caddy
+  api web admin-web research-web worker scheduler hermes caddy
 run_production_smoke
 
-for service in caddy postgres redis api web worker scheduler hermes; do
+for service in caddy postgres redis api web admin-web research-web worker scheduler hermes; do
   container_id="$("${compose[@]}" ps -q "$service")"
   if [[ -z "$container_id" ]]; then
     echo "Required service has no container: $service" >&2
@@ -834,7 +865,7 @@ for service in caddy postgres redis api web worker scheduler hermes; do
     exit 1
   fi
 done
-for service in postgres redis api web worker scheduler hermes; do
+for service in postgres redis api web admin-web research-web worker scheduler hermes; do
   container_id="$("${compose[@]}" ps -q "$service")"
   health="$(docker inspect --format '{{.State.Health.Status}}' "$container_id")"
   if [[ "$health" != "healthy" ]]; then
@@ -855,6 +886,7 @@ persist_release_metadata \
   "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
   "$(running_image_ref api)" "$(running_image_ref worker)" \
   "$(running_image_ref scheduler)" "$(running_image_ref web)" \
+  "$(running_image_ref admin-web)" "$(running_image_ref research-web)" \
   "$(running_image_ref caddy)" "$(running_image_ref postgres)" \
   "$(running_image_ref redis)" "$target_backup_image" \
   "$(running_image_ref hermes)" "$target_revision" \
@@ -863,7 +895,8 @@ persist_release_metadata \
   "$WHATSAPP_BACKEND"
 rewrite_release_pointers .env.production \
   "$target_revision" "$target_image_tag" "$target_infra_image_tag" \
-  "$target_api_image" "$target_web_image" "$target_caddy_image" \
+  "$target_api_image" "$target_web_image" "$target_admin_web_image" \
+  "$target_research_web_image" "$target_caddy_image" \
   "$target_postgres_image" "$target_backup_image" "$target_hermes_image"
 if ! write_promotion_state "$promotion_state_file" COMMITTED; then
   mark_maintenance_required "commit_terminal_state_write_failed" || true

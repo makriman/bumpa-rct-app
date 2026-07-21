@@ -1,112 +1,170 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { PlusIcon } from "@phosphor-icons/react";
+import { useMemo, useReducer } from "react";
 import { AppShell } from "@/components/app-shell";
 import { LiveDataBanner } from "@/components/live-data-banner";
+import { TeamDialogs, type TeamFormState } from "@/components/team-dialogs";
 import {
   Badge,
   Filters,
-  Modal,
   PageHeader,
   ScrollableTable,
   StatePanel,
   Toast,
 } from "@/components/ui";
 import { apiRequest } from "@/lib/api";
+import { workspaceRoleLabel } from "@/lib/consumer-data";
 import { maskPhone, titleCase, type TeamMember } from "@/lib/platform-data";
-import { previewTeam } from "@/lib/preview-fixtures";
 import { useApiResource } from "@/lib/use-api-resource";
 
+type TeamState = {
+  busy: boolean;
+  error: string;
+  form: TeamFormState;
+  inviteOpen: boolean;
+  query: string;
+  removing: TeamMember | null;
+  status: string;
+  toast: string;
+};
+
+type TeamAction = { type: "patch"; value: Partial<TeamState> };
+
+const EMPTY_FORM: TeamFormState = {
+  email: "",
+  name: "",
+  phone: "",
+  role: "member",
+};
+
+const initialState: TeamState = {
+  busy: false,
+  error: "",
+  form: EMPTY_FORM,
+  inviteOpen: false,
+  query: "",
+  removing: null,
+  status: "all",
+  toast: "",
+};
+
+function teamReducer(state: TeamState, action: TeamAction): TeamState {
+  return action.type === "patch" ? { ...state, ...action.value } : state;
+}
+
+function memberInitials(name: string): string {
+  return name
+    .split(" ")
+    .flatMap((part) => (part[0] ? [part[0]] : []))
+    .slice(0, 2)
+    .join("");
+}
+
 export default function TeamPage() {
-  const resource = useApiResource<TeamMember[]>("/settings/team", previewTeam);
-  const [query, setQuery] = useState("");
-  const [status, setStatus] = useState("all");
-  const [modal, setModal] = useState(false);
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("member");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [toast, setToast] = useState("");
+  const resource = useApiResource<TeamMember[]>("/settings/team");
+  const [state, dispatch] = useReducer(teamReducer, initialState);
   const rows = useMemo(
     () =>
       (resource.data ?? []).filter((member) => {
         const matchesText =
           `${member.name} ${member.email ?? ""} ${member.phone_e164}`
             .toLowerCase()
-            .includes(query.toLowerCase());
-        return matchesText && (status === "all" || member.status === status);
+            .includes(state.query.toLowerCase());
+        return (
+          matchesText &&
+          (state.status === "all" || member.status === state.status)
+        );
       }),
-    [query, resource.data, status],
+    [resource.data, state.query, state.status],
   );
+
   const invite = async () => {
-    setBusy(true);
-    setError("");
+    dispatch({ type: "patch", value: { busy: true, error: "" } });
     try {
       await apiRequest("/settings/team", {
         method: "POST",
         body: JSON.stringify({
-          name,
-          phone_e164: phone,
-          email: email || null,
-          role,
+          name: state.form.name,
+          phone_e164: state.form.phone,
+          email: state.form.email || null,
+          role: state.form.role,
         }),
       });
       await resource.reload();
-      setModal(false);
-      setName("");
-      setPhone("");
-      setEmail("");
-      setRole("member");
-      setToast("Team member added to this workspace.");
+      dispatch({
+        type: "patch",
+        value: {
+          inviteOpen: false,
+          form: EMPTY_FORM,
+          toast: "Team member added to this workspace.",
+        },
+      });
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "The team member could not be added.",
-      );
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            reason instanceof Error
+              ? reason.message
+              : "The team member could not be added.",
+        },
+      });
     } finally {
-      setBusy(false);
+      dispatch({ type: "patch", value: { busy: false } });
     }
   };
-  const remove = async (member: TeamMember) => {
-    if (!window.confirm(`Remove ${member.name} from this workspace?`)) return;
-    setBusy(true);
-    setError("");
+
+  const remove = async () => {
+    if (!state.removing) return;
+    dispatch({ type: "patch", value: { busy: true, error: "" } });
     try {
-      await apiRequest(`/settings/team/${member.membership_id}`, {
+      await apiRequest(`/settings/team/${state.removing.membership_id}`, {
         method: "DELETE",
       });
       await resource.reload();
-      setToast(`${member.name} was removed.`);
+      dispatch({
+        type: "patch",
+        value: { removing: null, toast: `${state.removing.name} was removed.` },
+      });
     } catch (reason) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "The member could not be removed.",
-      );
+      dispatch({
+        type: "patch",
+        value: {
+          error:
+            reason instanceof Error
+              ? reason.message
+              : "The member could not be removed.",
+        },
+      });
     } finally {
-      setBusy(false);
+      dispatch({ type: "patch", value: { busy: false } });
     }
   };
+
   return (
-    <AppShell surface="user" title="Team">
+    <AppShell title="Team">
       <PageHeader
         title="Team access"
         description="Invite trusted people and manage persisted workspace memberships."
         actions={
           <button
+            type="button"
             className="button button-primary"
-            disabled={resource.source !== "live" || busy}
+            disabled={resource.source !== "live" || state.busy}
             title={
               resource.source !== "live"
                 ? "Team changes require a live API response."
                 : undefined
             }
-            onClick={() => setModal(true)}
+            onClick={() =>
+              dispatch({
+                type: "patch",
+                value: { inviteOpen: true, error: "" },
+              })
+            }
           >
-            ＋ Add teammate
+            <PlusIcon aria-hidden="true" /> Add teammate
           </button>
         }
       />
@@ -118,12 +176,12 @@ export default function TeamPage() {
         error={resource.error}
       />
       <div className="alert alert-info">
-        Only owners and admins can change access. The API records every
+        Only owners and managers can change access. The API records every
         membership addition and removal.
       </div>
-      {error && (
+      {state.error && !state.inviteOpen && !state.removing && (
         <div className="alert alert-danger" role="alert">
-          {error}
+          {state.error}
         </div>
       )}
       {resource.status === "loading" ? (
@@ -134,6 +192,7 @@ export default function TeamPage() {
           description={resource.error ?? undefined}
           action={
             <button
+              type="button"
               className="button button-secondary"
               onClick={() => void resource.reload()}
             >
@@ -145,177 +204,161 @@ export default function TeamPage() {
         <StatePanel
           type="empty"
           title="No team members returned"
-          description="Add the first member when authenticated as a workspace owner or admin."
+          description="Add the first member when authenticated as a workspace owner or manager."
         />
       ) : (
-        <>
-          <Filters search={query} setSearch={setQuery}>
-            <select
-              className="filter-select"
-              aria-label="Filter by status"
-              value={status}
-              onChange={(event) => setStatus(event.target.value)}
-            >
-              <option value="all">All statuses</option>
-              <option value="active">Active</option>
-              <option value="revoked">Revoked</option>
-            </select>
-          </Filters>
-          {rows.length ? (
-            <ScrollableTable className="card" label="Workspace team members">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Person</th>
-                    <th>Contact</th>
-                    <th>Role</th>
-                    <th>Status</th>
-                    <th>
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((member) => (
-                    <tr key={member.membership_id}>
-                      <td>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: 10,
-                            alignItems: "center",
-                          }}
-                        >
-                          <span className="avatar">
-                            {member.name
-                              .split(" ")
-                              .map((part) => part[0])
-                              .slice(0, 2)
-                              .join("")}
-                          </span>
-                          <span>
-                            <span className="table-primary">{member.name}</span>
-                            {member.email && (
-                              <span className="table-secondary">
-                                {member.email}
-                              </span>
-                            )}
-                          </span>
-                        </div>
-                      </td>
-                      <td>{maskPhone(member.phone_e164)}</td>
-                      <td>{titleCase(member.role)}</td>
-                      <td>
-                        <Badge>{titleCase(member.status)}</Badge>
-                      </td>
-                      <td>
-                        <button
-                          className="button button-ghost button-small"
-                          disabled={
-                            member.role === "owner" ||
-                            member.status !== "active" ||
-                            resource.source !== "live" ||
-                            busy
-                          }
-                          onClick={() => void remove(member)}
-                        >
-                          {member.role === "owner"
-                            ? "Owner protected"
-                            : "Remove"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </ScrollableTable>
-          ) : (
-            <StatePanel
-              type="empty"
-              title="No matching team members"
-              description="Clear or adjust the filters."
-            />
-          )}
-        </>
-      )}
-      {modal && (
-        <Modal
-          title="Add a teammate"
-          onClose={() => !busy && setModal(false)}
-          actions={
-            <>
-              <button
-                className="button button-secondary"
-                disabled={busy}
-                onClick={() => setModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="button button-primary"
-                disabled={busy || !name || !phone}
-                onClick={() => void invite()}
-              >
-                {busy ? "Adding…" : "Add member"}
-              </button>
-            </>
+        <TeamTable
+          busy={state.busy}
+          members={rows}
+          onRemove={(member) =>
+            dispatch({
+              type: "patch",
+              value: { removing: member, error: "" },
+            })
           }
-        >
-          <div className="field">
-            <label htmlFor="invite-name">Full name</label>
-            <input
-              id="invite-name"
-              className="input"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              autoComplete="name"
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="invite-phone">Phone in E.164 format</label>
-            <input
-              id="invite-phone"
-              type="tel"
-              className="input"
-              placeholder="+234…"
-              value={phone}
-              onChange={(event) => setPhone(event.target.value)}
-              autoComplete="tel"
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="invite-email">Email (optional)</label>
-            <input
-              id="invite-email"
-              type="email"
-              className="input"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              autoComplete="email"
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="invite-role">Workspace role</label>
-            <select
-              id="invite-role"
-              className="select"
-              value={role}
-              onChange={(event) => setRole(event.target.value)}
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
-          <div
-            className="alert alert-warning"
-            style={{ marginTop: 18, marginBottom: 0 }}
-          >
-            This records a membership immediately. WhatsApp invitation delivery
-            is not claimed until the Meta integration is active.
-          </div>
-        </Modal>
+          onQueryChange={(query) =>
+            dispatch({ type: "patch", value: { query } })
+          }
+          onStatusChange={(status) =>
+            dispatch({ type: "patch", value: { status } })
+          }
+          query={state.query}
+          source={resource.source}
+          status={state.status}
+        />
       )}
-      {toast && <Toast message={toast} onClose={() => setToast("")} />}
+      <TeamDialogs
+        busy={state.busy}
+        error={state.error}
+        form={state.form}
+        inviteOpen={state.inviteOpen}
+        onCloseInvite={() =>
+          !state.busy &&
+          dispatch({ type: "patch", value: { inviteOpen: false, error: "" } })
+        }
+        onCloseRemove={() =>
+          !state.busy &&
+          dispatch({ type: "patch", value: { removing: null, error: "" } })
+        }
+        onFormChange={(value) =>
+          dispatch({
+            type: "patch",
+            value: { form: { ...state.form, ...value } },
+          })
+        }
+        onInvite={invite}
+        onRemove={remove}
+        removing={state.removing}
+      />
+      {state.toast && (
+        <Toast
+          message={state.toast}
+          onClose={() => dispatch({ type: "patch", value: { toast: "" } })}
+        />
+      )}
     </AppShell>
+  );
+}
+
+function TeamTable({
+  busy,
+  members,
+  onQueryChange,
+  onRemove,
+  onStatusChange,
+  query,
+  source,
+  status,
+}: {
+  busy: boolean;
+  members: TeamMember[];
+  onQueryChange: (value: string) => void;
+  onRemove: (member: TeamMember) => void;
+  onStatusChange: (value: string) => void;
+  query: string;
+  source: "live" | null;
+  status: string;
+}) {
+  return (
+    <>
+      <Filters search={query} setSearch={onQueryChange}>
+        <select
+          className="filter-select"
+          aria-label="Filter by status"
+          value={status}
+          onChange={(event) => onStatusChange(event.target.value)}
+        >
+          <option value="all">All statuses</option>
+          <option value="active">Active</option>
+          <option value="revoked">Revoked</option>
+        </select>
+      </Filters>
+      {members.length ? (
+        <ScrollableTable className="card" label="Workspace team members">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Person</th>
+                <th>Contact</th>
+                <th>Role</th>
+                <th>Status</th>
+                <th>
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {members.map((member) => (
+                <tr key={member.membership_id}>
+                  <td>
+                    <div
+                      style={{ display: "flex", gap: 10, alignItems: "center" }}
+                    >
+                      <span className="avatar">
+                        {memberInitials(member.name)}
+                      </span>
+                      <span>
+                        <span className="table-primary">{member.name}</span>
+                        {member.email && (
+                          <span className="table-secondary">
+                            {member.email}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  </td>
+                  <td>{maskPhone(member.phone_e164)}</td>
+                  <td>{workspaceRoleLabel(member.role)}</td>
+                  <td>
+                    <Badge>{titleCase(member.status)}</Badge>
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="button button-ghost button-small"
+                      disabled={
+                        member.role === "owner" ||
+                        member.status !== "active" ||
+                        source !== "live" ||
+                        busy
+                      }
+                      onClick={() => onRemove(member)}
+                    >
+                      {member.role === "owner" ? "Owner protected" : "Remove"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ScrollableTable>
+      ) : (
+        <StatePanel
+          type="empty"
+          title="No matching team members"
+          description="Clear or adjust the filters."
+        />
+      )}
+    </>
   );
 }

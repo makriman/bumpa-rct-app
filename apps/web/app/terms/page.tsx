@@ -47,8 +47,8 @@ export default function TermsPage() {
         <h2>Suspension</h2>
         <p>
           Access may be suspended to protect users, investigate abuse, or
-          respond to a security concern. Material administrative actions are
-          audit logged.
+          respond to a security concern. Material account actions are audit
+          logged.
         </p>
       </article>
     </PublicShell>

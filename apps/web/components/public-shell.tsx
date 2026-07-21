@@ -10,7 +10,6 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
           <div className="public-links">
             <Link href="/#how-it-works">How it works</Link>
             <Link href="/about">About</Link>
-            <Link href="/research-consent">Research</Link>
             <Link className="button button-primary button-small" href="/login">
               Sign in
             </Link>
@@ -32,7 +31,6 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
         </div>
         <div className="footer-links">
           <Link href="/about">About</Link>
-          <Link href="/research-consent">Research consent</Link>
           <Link href="/privacy">Privacy</Link>
           <Link href="/terms">Terms</Link>
         </div>

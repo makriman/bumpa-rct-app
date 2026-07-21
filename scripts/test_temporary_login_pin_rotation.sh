@@ -45,7 +45,8 @@ write_env() {
     "DEPLOY_REF=$revision" \
     "IMAGE_TAG=sha-$revision" \
     "INFRA_IMAGE_TAG=sha-$revision" \
-    "API_IMAGE=$image" "WEB_IMAGE=$image" "CADDY_IMAGE=$image" \
+    "API_IMAGE=$image" "WEB_IMAGE=$image" \
+    "ADMIN_WEB_IMAGE=$image" "RESEARCH_WEB_IMAGE=$image" "CADDY_IMAGE=$image" \
     "POSTGRES_IMAGE=$image" "BACKUP_IMAGE=$image" "HERMES_IMAGE=$image" \
     "OTP_SECRET=$otp_secret" \
     "AUTH_LOGIN_MODE=$mode" \
@@ -75,6 +76,7 @@ write_release() {
       image_tag: ("sha-" + $revision), infra_image_tag: ("sha-" + $revision),
       images: {
         api: $image, worker: $image, scheduler: $image, web: $image,
+        admin_web: $image, research_web: $image,
         caddy: $image, postgres: $image,
         redis: ("redis@" + ($image | split("@")[1])),
         backup: $image, hermes: $image
@@ -271,7 +273,7 @@ test "$(find /var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers -maxde
 # restored exactly and its never-overwritten file still validates.
 rewrite_release_boundary "$env_file" \
   "$revision" "sha-$revision" "sha-$revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image" \
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image" \
   temporary_static_pin "$runtime_path" "$legacy_path" "$future_expiry" disabled
 test "$(selected_path)" = "$legacy_path"
 cmp -s "$legacy_path" /tmp/legacy-before
@@ -311,7 +313,7 @@ assert_private_verifier "$version_two"
 cmp -s "$version_one" /tmp/version-one-before
 rewrite_release_boundary "$env_file" \
   "$revision" "sha-$revision" "sha-$revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image" \
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image" \
   temporary_static_pin "$runtime_path" "$version_one" "$future_expiry" meta
 test "$(selected_path)" = "$version_one"
 cmp -s "$version_one" /tmp/version-one-before

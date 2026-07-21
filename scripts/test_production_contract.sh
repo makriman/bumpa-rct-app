@@ -138,7 +138,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     MIGRATION_DATABASE_URL) value=postgresql+psycopg://bumpabestie:contract-postgres-password-0000000000@postgres:5432/bumpabestie ;;
     SYNC_DATABASE_URL) value=postgresql://bumpabestie:contract-postgres-password-0000000000@postgres:5432/bumpabestie ;;
     WHATSAPP_BACKEND | AGENT_BACKEND | BUMPA_BACKEND) value=disabled ;;
-    EXPOSE_LOCAL_OTP | SEED_DEMO_DATA | NEXT_PUBLIC_DEMO_MODE) value=false ;;
+    EXPOSE_LOCAL_OTP | SEED_DEMO_DATA) value=false ;;
     ASYNC_RUNTIME_ENABLED) value=true ;;
     META_APP_ID) value=123456789012345 ;;
     META_BUSINESS_ID) value=234567890123456 ;;
@@ -150,6 +150,8 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     INFRA_IMAGE_TAG) value=sha-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
     API_IMAGE) value=ghcr.io/makriman/bumpabestie-api@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
     WEB_IMAGE) value=ghcr.io/makriman/bumpabestie-web@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
+    ADMIN_WEB_IMAGE) value=ghcr.io/makriman/bumpabestie-admin-web@sha256:1212121212121212121212121212121212121212121212121212121212121212 ;;
+    RESEARCH_WEB_IMAGE) value=ghcr.io/makriman/bumpabestie-research-web@sha256:1313131313131313131313131313131313131313131313131313131313131313 ;;
     CADDY_IMAGE) value=ghcr.io/makriman/bumpabestie-caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ;;
     POSTGRES_IMAGE) value=ghcr.io/makriman/bumpabestie-postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff ;;
     BACKUP_IMAGE) value=ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab ;;
@@ -798,6 +800,11 @@ if ! jq --exit-status '
   .services["caddy-init"].build == null and .services["caddy-init"].network_mode == "none" and
   .services.caddy.cap_drop == ["ALL"] and .services.caddy.cap_add == ["NET_BIND_SERVICE"] and
   .services.caddy.security_opt == ["no-new-privileges:true"] and
+  .services.web.image == "ghcr.io/makriman/bumpabestie-web@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" and
+  .services["admin-web"].image == "ghcr.io/makriman/bumpabestie-admin-web@sha256:1212121212121212121212121212121212121212121212121212121212121212" and
+  .services["research-web"].image == "ghcr.io/makriman/bumpabestie-research-web@sha256:1313131313131313131313131313131313131313131313131313131313131313" and
+  .services.web.build == null and .services["admin-web"].build == null and .services["research-web"].build == null and
+  .services.web.read_only == true and .services["admin-web"].read_only == true and .services["research-web"].read_only == true and
   .services.postgres.image == "ghcr.io/makriman/bumpabestie-postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" and
   .services.postgres.stop_grace_period == "1m0s" and
   .services.backup.image == "ghcr.io/makriman/bumpabestie-backup@sha256:abababababababababababababababababababababababababababababababab" and
@@ -1049,8 +1056,8 @@ docker run --rm --network none --read-only \
   --volume "$hermes_health_probe/curl-success:/stubs:ro" \
   "$health_probe_image" sh -eu -c "$hermes_healthcheck"
 
-stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
-image_pull_line="$(grep -n -F '"${compose[@]}" --profile tools pull caddy postgres redis web api backup hermes' scripts/deploy.sh | cut -d: -f1)"
+stop_line="$(grep -n -F "\"\${compose[@]}\" stop --timeout 60 caddy web admin-web research-web api worker scheduler" scripts/deploy.sh | cut -d: -f1)"
+image_pull_line="$(grep -n -F '"${compose[@]}" --profile tools pull caddy postgres redis web admin-web research-web api backup hermes' scripts/deploy.sh | cut -d: -f1)"
 target_auth_secret_preflight_line="$(grep -n -F 'sudo -n /usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/deploy.sh | cut -d: -f1)"
 auth_secret_preflight_count="$(grep -Fc 'sudo -n /usr/local/sbin/bumpabestie-validate-temporary-auth-secret' scripts/deploy.sh)"
 target_auth_secret_match_line="$(grep -n -F '|| ! cmp -s' scripts/deploy.sh | cut -d: -f1)"
@@ -1143,7 +1150,7 @@ if grep -Fq './scripts/validate_temporary_auth_secret.sh' scripts/deploy.sh; the
   echo "Deployment elevates the mutable checkout validator" >&2
   exit 1
 fi
-grep -Fq 'for service in api worker scheduler web hermes caddy postgres redis' scripts/deploy.sh
+grep -Fq 'for service in api worker scheduler web admin-web research-web hermes caddy postgres redis' scripts/deploy.sh
 grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
 grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh
@@ -1325,7 +1332,7 @@ fi
 grep -Fq '"style-src-attr '\''unsafe-inline'\''"' \
   apps/web/lib/content-security-policy.ts
 grep -Fq 'await connection();' apps/web/app/layout.tsx
-grep -Fq 'requestHeaders.set(CONTENT_SECURITY_POLICY_HEADER, contentSecurityPolicy);' \
+grep -Fq 'requestHeaders.set(CONTENT_SECURITY_POLICY_HEADER, policy);' \
   apps/web/middleware.ts
 grep -Fq 'requestHeaders.set(CSP_NONCE_REQUEST_HEADER, nonce);' \
   apps/web/middleware.ts

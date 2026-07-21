@@ -40,7 +40,7 @@ write_boundary() {
   jq -n --arg revision "$previous_revision" --arg image "$image" '{
     revision:$revision, operations_revision:$revision, image_tag:("sha-"+$revision),
     infra_image_tag:("sha-"+$revision), images:{api:$image,worker:$image,scheduler:$image,
-    web:$image,caddy:$image,postgres:$image,redis:("redis@"+($image|split("@")[1])),
+    web:$image,admin_web:$image,research_web:$image,caddy:$image,postgres:$image,redis:("redis@"+($image|split("@")[1])),
     backup:$image,hermes:$image}, auth:{login_mode:"disabled",
     temporary_web_pin_verifier_file:"",temporary_web_pin_verifier_file_host:"",
     temporary_web_pin_expires_at:"",whatsapp_backend:"disabled"}}' \
@@ -49,6 +49,7 @@ write_boundary() {
     "$previous_revision" "$previous_revision" "$previous_revision" >"$repo/.deployed-revision"
   for pair in DEPLOY_REF:$previous_revision IMAGE_TAG:sha-$previous_revision \
     INFRA_IMAGE_TAG:sha-$previous_revision API_IMAGE:$image WEB_IMAGE:$image \
+    ADMIN_WEB_IMAGE:$image RESEARCH_WEB_IMAGE:$image \
     CADDY_IMAGE:$image POSTGRES_IMAGE:$image BACKUP_IMAGE:$image HERMES_IMAGE:$image; do
     printf '%s=%s\n' "${pair%%:*}" "${pair#*:}"
   done >"$repo/.env.production"
@@ -154,7 +155,7 @@ test ! -e "$repo/scripts/promote_release.sh"
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 42
@@ -167,7 +168,7 @@ test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l
 # phase one, and the stable coordinator must recognize that canonical state.
 # shellcheck disable=SC2016
 commit_target_bundle \
-  'source "$BUMPABESTIE_HELPER_DIR/release_boundary.sh"; load_release_boundary "$BUMPABESTIE_ROOT_DIR/.deployed-release.json"; rewrite_release_boundary "$BUMPABESTIE_ROOT_DIR/.env.production" "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"; exit 46' \
+  'source "$BUMPABESTIE_HELPER_DIR/release_boundary.sh"; load_release_boundary "$BUMPABESTIE_ROOT_DIR/.deployed-release.json"; rewrite_release_boundary "$BUMPABESTIE_ROOT_DIR/.env.production" "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_ADMIN_WEB_IMAGE" "$RELEASE_RESEARCH_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"; exit 46' \
   release-boundary
 previous_revision="$target_revision"
 git -C "$repo" checkout -q --detach "$previous_revision"
@@ -176,7 +177,7 @@ stage_temporary_auth_activation meta
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 46
@@ -213,13 +214,13 @@ record_temporary_boundary disabled
 # runs inside the coordinator fixture, not while this test constructs it.
 # shellcheck disable=SC2016
 commit_target_bundle \
-  'source "$BUMPABESTIE_HELPER_DIR/release_boundary.sh"; load_release_boundary "$BUMPABESTIE_ROOT_DIR/.deployed-release.json"; rewrite_release_boundary "$BUMPABESTIE_ROOT_DIR/.env.production" "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"; exit 48' \
+  'source "$BUMPABESTIE_HELPER_DIR/release_boundary.sh"; load_release_boundary "$BUMPABESTIE_ROOT_DIR/.deployed-release.json"; rewrite_release_boundary "$BUMPABESTIE_ROOT_DIR/.env.production" "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_ADMIN_WEB_IMAGE" "$RELEASE_RESEARCH_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"; exit 48' \
   release-boundary
 stage_temporary_auth_activation meta
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 48
@@ -238,7 +239,7 @@ commit_target_bundle 'exit 47'
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 47
@@ -257,7 +258,7 @@ sed -i 's/^META_PRIMARY_SENDER_ENABLED=false$/META_PRIMARY_SENDER_ENABLED=true/'
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 2
@@ -278,7 +279,7 @@ write_boundary
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 78
@@ -288,7 +289,7 @@ test -f "$state/maintenance.lock.maintenance-required"
 set +e
 BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
   "$launcher" "$target_revision" "sha-$target_revision" \
-  "$image" "$image" "$image" "$image" "$image" "$image"
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
 result=$?
 set -e
 test "$result" = 78

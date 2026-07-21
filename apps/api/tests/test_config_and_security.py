@@ -56,6 +56,22 @@ def test_root_environment_aliases_and_production_guards() -> None:
             seed_demo_data=False,
         )
 
+    with pytest.raises(ValidationError, match="host-only"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+            session_cookie_domain=".bumpabestie.com",
+        )
+
     production = Settings(
         app_env="production",
         jwt_secret="j" * 40,

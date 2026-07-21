@@ -37,7 +37,12 @@ describe("shared UI", () => {
   });
 
   it("offers recovery for errors", () => {
-    render(<StatePanel type="error" action={<button>Try again</button>} />);
+    render(
+      <StatePanel
+        type="error"
+        action={<button type="button">Try again</button>}
+      />,
+    );
     expect(
       screen.getByRole("heading", { name: "Something went wrong" }),
     ).toBeInTheDocument();
@@ -46,13 +51,15 @@ describe("shared UI", () => {
     ).toBeInTheDocument();
   });
 
-  it("traps keyboard focus inside dialogs and restores the opener", async () => {
+  it("uses native modal semantics and restores the opener", async () => {
     const onClose = vi.fn();
     function Harness() {
       const [open, setOpen] = React.useState(false);
       return (
         <>
-          <button onClick={() => setOpen(true)}>Open report</button>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open report
+          </button>
           {open && (
             <Modal
               title="Export report"
@@ -60,7 +67,7 @@ describe("shared UI", () => {
                 onClose();
                 setOpen(false);
               }}
-              actions={<button>Confirm export</button>}
+              actions={<button type="button">Confirm export</button>}
             >
               <input aria-label="Export name" />
             </Modal>
@@ -75,11 +82,10 @@ describe("shared UI", () => {
     // The close button is the first focusable element in the dialog.
     const close = screen.getByRole("button", { name: "Close dialog" });
     expect(close).toHaveFocus();
-    const confirm = screen.getByRole("button", { name: "Confirm export" });
-    confirm.focus();
-    fireEvent.keyDown(document, { key: "Tab" });
-    expect(close).toHaveFocus();
-    fireEvent.keyDown(document, { key: "Escape" });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.tagName).toBe("DIALOG");
+    expect(dialog).toHaveAttribute("open");
+    fireEvent(dialog, new Event("cancel", { cancelable: true }));
     expect(onClose).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(opener).toHaveFocus());
   });

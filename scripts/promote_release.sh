@@ -37,24 +37,27 @@ source "$HELPER_DIR/release_boundary.sh"
 source "$HELPER_DIR/promotion_state.sh"
 assert_maintenance_clear
 
-if (($# != 8)); then
-  echo "Usage: $0 REVISION INFRA_IMAGE_TAG API WEB CADDY POSTGRES BACKUP HERMES" >&2
+if (($# != 10)); then
+  echo "Usage: $0 REVISION INFRA_IMAGE_TAG API WEB ADMIN_WEB RESEARCH_WEB CADDY POSTGRES BACKUP HERMES" >&2
   exit 2
 fi
 revision="$1"
 infra_image_tag="$2"
 api_image="$3"
 web_image="$4"
-caddy_image="$5"
-postgres_image="$6"
-backup_image="$7"
-hermes_image="$8"
+admin_web_image="$5"
+research_web_image="$6"
+caddy_image="$7"
+postgres_image="$8"
+backup_image="$9"
+hermes_image="${10}"
 
 validate_release_pointer_values \
   "$revision" "sha-$revision" "$infra_image_tag" \
-  "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
+  "$api_image" "$web_image" "$admin_web_image" "$research_web_image" \
+  "$caddy_image" "$postgres_image" \
   "$backup_image" "$hermes_image" || {
-    echo "Promotion requires a full revision, immutable infrastructure tag and six digest references" >&2
+    echo "Promotion requires a full revision, immutable infrastructure tag and eight digest references" >&2
     exit 2
   }
 
@@ -66,7 +69,8 @@ restore_prior_boundary() {
   ((prior_boundary_loaded)) || return 1
   rewrite_release_boundary .env.production \
     "$prior_revision" "$prior_image_tag" "$prior_infra_image_tag" \
-    "$prior_api_image" "$prior_web_image" "$prior_caddy_image" \
+    "$prior_api_image" "$prior_web_image" "$prior_admin_web_image" \
+    "$prior_research_web_image" "$prior_caddy_image" \
     "$prior_postgres_image" "$prior_backup_image" "$prior_hermes_image" \
     "$prior_auth_login_mode" "$prior_temporary_web_pin_verifier_file" \
     "$prior_temporary_web_pin_verifier_file_host" \
@@ -129,6 +133,8 @@ prior_image_tag="$RELEASE_IMAGE_TAG"
 prior_infra_image_tag="$RELEASE_INFRA_IMAGE_TAG"
 prior_api_image="$RELEASE_API_IMAGE"
 prior_web_image="$RELEASE_WEB_IMAGE"
+prior_admin_web_image="$RELEASE_ADMIN_WEB_IMAGE"
+prior_research_web_image="$RELEASE_RESEARCH_WEB_IMAGE"
 prior_caddy_image="$RELEASE_CADDY_IMAGE"
 prior_postgres_image="$RELEASE_POSTGRES_IMAGE"
 prior_backup_image="$RELEASE_BACKUP_IMAGE"
@@ -172,7 +178,8 @@ source "$ROOT_DIR/scripts/release_boundary.sh"
 # shellcheck disable=SC2031
 rewrite_release_pointers .env.production \
   "$revision" "sha-$revision" "$infra_image_tag" \
-  "$api_image" "$web_image" "$caddy_image" "$postgres_image" \
+  "$api_image" "$web_image" "$admin_web_image" "$research_web_image" \
+  "$caddy_image" "$postgres_image" \
   "$backup_image" "$hermes_image"
 
 set +e

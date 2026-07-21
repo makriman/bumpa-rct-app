@@ -65,7 +65,6 @@ awk -v verifier="$verifier" -v expiry="$expiry" '
   }
   /^WHATSAPP_BACKEND=/ { print "WHATSAPP_BACKEND=disabled"; next }
   /^EXPOSE_LOCAL_OTP=/ { print "EXPOSE_LOCAL_OTP=false"; next }
-  /^NEXT_PUBLIC_DEMO_MODE=/ { print "NEXT_PUBLIC_DEMO_MODE=false"; next }
   { print }
 ' .env.example > "$env_file"
 unset verifier otp_secret

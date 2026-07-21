@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { hasActiveConsumerMembership } from "@bumpabestie/web-foundation";
 import { AppIcon } from "@/components/app-icon";
 import { PublicShell } from "@/components/public-shell";
 import { CSP_NONCE_REQUEST_HEADER } from "@/lib/content-security-policy";
@@ -8,7 +11,28 @@ import { buildStructuredData, publicPageMetadata } from "@/lib/site-metadata";
 
 export const metadata: Metadata = publicPageMetadata({ path: "/" });
 
+async function redirectAuthenticatedConsumer() {
+  const session = (await cookies()).get("bb_session")?.value;
+  if (!session) return;
+  const apiBase = (process.env.API_BASE_URL ?? "http://api:8000").replace(
+    /\/$/,
+    "",
+  );
+  let authenticated = false;
+  try {
+    const response = await fetch(`${apiBase}/v1/auth/me`, {
+      headers: { cookie: `bb_session=${session}` },
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const payload: unknown = await response.json();
+    authenticated = hasActiveConsumerMembership(payload);
+  } catch {}
+  if (authenticated) redirect("/chat");
+}
+
 export default async function HomePage() {
+  await redirectAuthenticatedConsumer();
   const structuredData = buildStructuredData();
   const nonce = (await headers()).get(CSP_NONCE_REQUEST_HEADER) ?? undefined;
   return (
@@ -42,25 +66,39 @@ export default async function HomePage() {
             </a>
           </div>
           <div className="trust-row">
-            <span>Private to your business</span>
-            <span>No spreadsheets needed</span>
-            <span>Answers in plain language</span>
+            <span>
+              <AppIcon name="check" size={15} /> Private to your business
+            </span>
+            <span>
+              <AppIcon name="check" size={15} /> No spreadsheets needed
+            </span>
+            <span>
+              <AppIcon name="check" size={15} /> Answers in plain language
+            </span>
           </div>
         </div>
-        <div
+        <section
           className="chat-preview"
           aria-label="Preview of a Bumpa Bestie conversation"
         >
           <div className="chat-window">
             <div className="preview-top">
               <div className="preview-person">
-                <span className="avatar">BB</span>
+                <Image
+                  className="avatar preview-brand-avatar"
+                  src="/brand-mark.svg"
+                  alt=""
+                  width={38}
+                  height={38}
+                />
                 <div>
                   Bumpa Bestie
-                  <div className="online">● Your data is fresh</div>
+                  <div className="online">
+                    <AppIcon name="check" size={13} /> Your data is fresh
+                  </div>
                 </div>
               </div>
-              <span>•••</span>
+              <span className="preview-label">Conversation preview</span>
             </div>
             <div className="bubble bubble-user">What sold best this week?</div>
             <div className="bubble bubble-agent">
@@ -69,7 +107,7 @@ export default async function HomePage() {
               <div className="insight-mini">
                 <span>Revenue from this product</span>
                 <strong>₦456,000</strong>
-                <span className="trend-up">↑ 18% vs last week</span>
+                <span className="trend-up">18% higher than last week</span>
               </div>
             </div>
             <div className="bubble bubble-agent">
@@ -77,7 +115,7 @@ export default async function HomePage() {
               Tuesday.
             </div>
           </div>
-        </div>
+        </section>
       </section>
       <section className="section section-soft" id="how-it-works">
         <div>
@@ -132,8 +170,8 @@ export default async function HomePage() {
           <article className="step">
             <h3>We connect your store</h3>
             <p>
-              An approved Bumpa Bestie operator securely connects your Bumpa
-              business. Your credentials are never shown to the assistant.
+              Your Bumpa connection is verified securely. Credentials are
+              encrypted and never shown to the assistant.
             </p>
           </article>
           <article className="step">
@@ -159,7 +197,7 @@ export default async function HomePage() {
             <p>Sign in to your workspace or ask your store owner for access.</p>
           </div>
           <Link className="button button-secondary" href="/login">
-            Open Bumpa Bestie →
+            Open Bumpa Bestie
           </Link>
         </div>
       </section>

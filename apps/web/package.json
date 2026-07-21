@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "api-contract:generate": "openapi-typescript ../../contracts/openapi.json --output lib/generated/api-contract.ts && prettier --write lib/generated/api-contract.ts",
+    "api-contract:generate": "openapi-typescript ../../contracts/openapi.json --output ../../packages/web-foundation/src/generated/api-contract.ts && prettier --write ../../packages/web-foundation/src/generated/api-contract.ts",
     "brand:generate": "node scripts/generate-brand-assets.mjs",
     "dev": "next dev",
     "build": "next build",
@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "test:e2e:update": "playwright test --update-snapshots"
+    "test:e2e:update": "playwright test --update-snapshots",
+    "test:lighthouse": "node scripts/lighthouse-budget.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "5.2.8",
@@ -36,9 +37,11 @@
     "@types/react-dom": "18.3.5",
     "@vitejs/plugin-react": "6.0.3",
     "@vitest/coverage-v8": "4.1.10",
+    "chrome-launcher": "1.2.1",
     "eslint": "8.57.1",
     "eslint-config-next": "15.5.20",
     "jsdom": "25.0.1",
+    "lighthouse": "13.4.1",
     "openapi-typescript": "7.10.1",
     "prettier": "3.4.2",
     "sharp": "0.34.5",

@@ -467,6 +467,12 @@ export type McpAdminConnection = McpConnection & {
   created_at: string;
 };
 
+const LAGOS_DATE_TIME = new Intl.DateTimeFormat("en-GB", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "Africa/Lagos",
+});
+
 export function titleCase(value: string | null | undefined): string {
   if (!value) return "Not available";
   return value
@@ -479,11 +485,7 @@ export function formatDate(value: string | null | undefined): string {
   if (!value) return "Not yet";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Unavailable";
-  return new Intl.DateTimeFormat("en-GB", {
-    dateStyle: "medium",
-    timeStyle: "short",
-    timeZone: "Africa/Lagos",
-  }).format(date);
+  return LAGOS_DATE_TIME.format(date);
 }
 
 export function durationBetween(start: string, finish?: string | null): string {

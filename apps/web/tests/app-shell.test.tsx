@@ -7,16 +7,17 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AppShell, crossSurfaceHref } from "@/components/app-shell";
 
-const replace = vi.fn();
+import { AppShell } from "@/components/app-shell";
+
+const replace = vi.hoisted(() => vi.fn());
 const apiRequest = vi.hoisted(() => vi.fn());
-const router = { replace };
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/chat",
-  useRouter: () => router,
+  usePathname: () => "/profile",
 }));
+
+vi.mock("@/lib/browser-navigation", () => ({ replaceLocation: replace }));
 
 vi.mock("@/lib/api", () => ({
   demoFallbackEnabled: false,
@@ -24,21 +25,8 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const session = {
-  user: {
-    id: "user-1",
-    name: "Ada Owner",
-    email: null,
-    phone_e164: "+2348012345678",
-  },
-  platform_roles: [],
-  memberships: [
-    {
-      id: "membership-1",
-      tenant_id: "tenant-1",
-      role: "owner",
-      status: "active",
-    },
-  ],
+  user: { name: "Ada Owner" },
+  memberships: [{ tenant_id: "tenant-1", role: "owner", status: "active" }],
   current_tenant_id: "tenant-1",
 };
 
@@ -48,112 +36,27 @@ afterEach(() => {
   apiRequest.mockReset();
 });
 
-describe("workspace mobile navigation", () => {
-  it("routes workspace switches across the dedicated production hosts", () => {
-    expect(
-      crossSurfaceHref(
-        "tenant",
-        "https://admin.bumpabestie.165-227-228-20.sslip.io/admin",
-      ),
-    ).toBe("https://bumpabestie.165-227-228-20.sslip.io/chat");
-    expect(
-      crossSurfaceHref(
-        "admin",
-        "https://bumpabestie.165-227-228-20.sslip.io/chat",
-      ),
-    ).toBe("https://admin.bumpabestie.165-227-228-20.sslip.io/admin");
-    expect(
-      crossSurfaceHref(
-        "research",
-        "https://admin.bumpabestie.165-227-228-20.sslip.io/admin",
-      ),
-    ).toBe("https://research.bumpabestie.165-227-228-20.sslip.io/research");
-    expect(
-      crossSurfaceHref(
-        "admin",
-        "https://www.bumpabestie.165-227-228-20.sslip.io/chat?view=owner#latest",
-      ),
-    ).toBe("https://admin.bumpabestie.165-227-228-20.sslip.io/admin");
-  });
-
-  it("offers a direct workspace switch for a dual-role administrator", async () => {
-    apiRequest.mockResolvedValueOnce({
-      ...session,
-      platform_roles: ["operator", "superadmin"],
-    });
-    render(
-      <AppShell surface="admin" title="Platform administration">
-        <p>Admin content</p>
-      </AppShell>,
-    );
-
-    const switcher = await screen.findByRole("link", {
-      name: "Switch to your tenant workspace",
-    });
-    expect(switcher).toHaveAttribute("href", "/chat");
-    expect(screen.getByText("Open your store membership")).toBeVisible();
-  });
-
-  it("offers a direct return to administration from a tenant workspace", async () => {
-    apiRequest.mockResolvedValueOnce({
-      ...session,
-      platform_roles: ["operator"],
-    });
-    render(
-      <AppShell surface="user" title="Bestie chat">
-        <p>Workspace content</p>
-      </AppShell>,
-    );
-
-    const switcher = await screen.findByRole("link", {
-      name: "Switch to platform administration",
-    });
-    expect(switcher).toHaveAttribute("href", "/admin");
-    expect(screen.getByText("Manage tenant mappings")).toBeVisible();
-    expect(
-      screen.queryByRole("link", { name: "Administrators" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("offers a discoverable research switch to a dual-role operator", async () => {
-    apiRequest.mockResolvedValueOnce({
-      ...session,
-      platform_roles: ["operator", "researcher"],
-    });
-    render(
-      <AppShell surface="admin" title="Platform administration">
-        <p>Admin content</p>
-      </AppShell>,
-    );
-
-    const switcher = await screen.findByRole("link", {
-      name: "Switch to research workspace",
-    });
-    expect(switcher).toHaveAttribute("href", "/research");
-    expect(screen.getByText("Open redacted research tools")).toBeVisible();
-  });
-
-  it("shows administrator management only to superadmins", async () => {
-    apiRequest.mockResolvedValueOnce({
-      ...session,
-      platform_roles: ["superadmin"],
-    });
-    render(
-      <AppShell surface="admin" title="Platform administration">
-        <p>Admin content</p>
-      </AppShell>,
-    );
-
-    expect(
-      await screen.findByRole("link", { name: "Administrators" }),
-    ).toBeVisible();
-  });
-
-  it("moves focus into the drawer, makes the page inert, and restores focus on Escape", async () => {
+describe("consumer account shell", () => {
+  it("exposes only chat and account destinations", async () => {
     apiRequest.mockResolvedValueOnce(session);
     render(
-      <AppShell surface="user" title="Bestie chat">
-        <p>Workspace content</p>
+      <AppShell title="Profile">
+        <p>Account content</p>
+      </AppShell>,
+    );
+
+    expect(
+      await screen.findByRole("link", { name: "Bestie chat" }),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: "Profile" })).toBeVisible();
+    expect(screen.queryByText(/platform|research/i)).not.toBeInTheDocument();
+  });
+
+  it("traps drawer focus and restores it on Escape", async () => {
+    apiRequest.mockResolvedValueOnce(session);
+    render(
+      <AppShell title="Profile">
+        <p>Account content</p>
       </AppShell>,
     );
 
@@ -161,19 +64,19 @@ describe("workspace mobile navigation", () => {
       name: "Open navigation",
     });
     fireEvent.click(trigger);
-
-    const home = screen.getByRole("link", { name: "Bumpa Bestie home" });
-    await waitFor(() => expect(home).toHaveFocus());
-    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("link", { name: "Bumpa Bestie home" }),
+      ).toHaveFocus(),
+    );
     expect(
-      screen.getByText("Workspace content").closest(".app-main"),
+      screen.getByText("Account content").closest(".app-main"),
     ).toHaveAttribute("inert");
 
     fireEvent.keyDown(document, { key: "Escape" });
     await waitFor(() => expect(trigger).toHaveFocus());
-    expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(
-      screen.getByText("Workspace content").closest(".app-main"),
+      screen.getByText("Account content").closest(".app-main"),
     ).not.toHaveAttribute("inert");
   });
 
@@ -187,44 +90,36 @@ describe("workspace mobile navigation", () => {
       .mockReturnValueOnce(logoutResponse);
 
     render(
-      <AppShell surface="user" title="Bestie chat">
-        <p>Workspace content</p>
+      <AppShell title="Profile">
+        <p>Account content</p>
       </AppShell>,
     );
-
-    const logout = await screen.findByRole("button", { name: "Log out" });
-    fireEvent.click(logout);
+    fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
 
     expect(apiRequest).toHaveBeenLastCalledWith("/auth/logout", {
       method: "POST",
     });
     expect(screen.getByRole("button", { name: "Logging out…" })).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Logging out…" }),
-    ).toHaveAttribute("aria-busy", "true");
     expect(replace).not.toHaveBeenCalled();
 
     finishLogout({ message: "Logged out" });
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/login"));
   });
 
-  it("announces a logout failure and allows another attempt", async () => {
+  it("announces logout failure and allows retry", async () => {
     apiRequest
       .mockResolvedValueOnce(session)
       .mockRejectedValueOnce(new Error("Logout service unavailable"));
-
     render(
-      <AppShell surface="user" title="Bestie chat">
-        <p>Workspace content</p>
+      <AppShell title="Profile">
+        <p>Account content</p>
       </AppShell>,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
-
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Logout service unavailable",
     );
     expect(screen.getByRole("button", { name: "Log out" })).toBeEnabled();
-    expect(replace).not.toHaveBeenCalled();
   });
 });

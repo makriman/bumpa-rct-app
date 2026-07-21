@@ -6,7 +6,7 @@ export default defineConfig({
   snapshotPathTemplate:
     "{testDir}/__screenshots__/{testFilePath}/{arg}-{projectName}-{platform}{ext}",
   fullyParallel: false,
-  workers: 2,
+  workers: process.env.CI ? 1 : 2,
   retries: 0,
   reporter: "list",
   expect: { timeout: 10_000 },
@@ -16,14 +16,24 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "desktop-chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile-chromium", use: { ...devices["Pixel 7"] } },
+    {
+      name: "desktop-chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1440, height: 900 },
+      },
+    },
+    {
+      name: "mobile-chromium",
+      use: {
+        ...devices["iPhone 13"],
+        viewport: { width: 390, height: 844 },
+      },
+    },
   ],
   webServer: {
-    command:
-      "npm run build && mkdir -p .next/standalone/public .next/standalone/.next/static && cp -R public/. .next/standalone/public/ && cp -R .next/static/. .next/standalone/.next/static/ && PORT=3010 HOSTNAME=127.0.0.1 node .next/standalone/server.js",
+    command: "./e2e/start-server.sh",
     url: "http://localhost:3010/api/health",
-    env: { NEXT_PUBLIC_DEMO_MODE: "false" },
     reuseExistingServer: false,
     timeout: 180_000,
   },
