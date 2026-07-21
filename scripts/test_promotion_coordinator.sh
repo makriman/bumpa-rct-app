@@ -203,6 +203,9 @@ done
 write_boundary
 stage_temporary_auth_activation disabled
 record_temporary_boundary disabled
+# The target bundle must expand these variables only when the generated helper
+# runs inside the coordinator fixture, not while this test constructs it.
+# shellcheck disable=SC2016
 commit_target_bundle \
   'source "$BUMPABESTIE_HELPER_DIR/release_boundary.sh"; load_release_boundary "$BUMPABESTIE_ROOT_DIR/.deployed-release.json"; rewrite_release_boundary "$BUMPABESTIE_ROOT_DIR/.env.production" "$RELEASE_REVISION" "$RELEASE_IMAGE_TAG" "$RELEASE_INFRA_IMAGE_TAG" "$RELEASE_API_IMAGE" "$RELEASE_WEB_IMAGE" "$RELEASE_CADDY_IMAGE" "$RELEASE_POSTGRES_IMAGE" "$RELEASE_BACKUP_IMAGE" "$RELEASE_HERMES_IMAGE" "$RELEASE_AUTH_LOGIN_MODE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE" "$RELEASE_TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" "$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT" "$RELEASE_WHATSAPP_BACKEND"; exit 48' \
   release-boundary
