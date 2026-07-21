@@ -38,6 +38,10 @@ previous_scheduler_image=""
 previous_web_image=""
 previous_admin_web_image=""
 previous_research_web_image=""
+previous_admin_web_was_recorded=false
+previous_research_web_was_recorded=false
+rollback_admin_web_image=""
+rollback_research_web_image=""
 previous_caddy_image=""
 previous_postgres_image=""
 previous_redis_image=""
@@ -141,6 +145,8 @@ if [[ -e .deployed-release.json ]]; then
   previous_web_image="$RELEASE_WEB_IMAGE"
   previous_admin_web_image="$RELEASE_ADMIN_WEB_IMAGE"
   previous_research_web_image="$RELEASE_RESEARCH_WEB_IMAGE"
+  previous_admin_web_was_recorded="$RELEASE_ADMIN_WEB_WAS_RECORDED"
+  previous_research_web_was_recorded="$RELEASE_RESEARCH_WEB_WAS_RECORDED"
   previous_caddy_image="$RELEASE_CADDY_IMAGE"
   previous_postgres_image="$RELEASE_POSTGRES_IMAGE"
   previous_redis_image="$RELEASE_REDIS_IMAGE"
@@ -348,24 +354,38 @@ running_image() {
 
 if ((previous_boundary_valid)); then
   for service in api worker scheduler web admin-web research-web hermes caddy postgres redis; do
+    was_recorded=true
     case "$service" in
       api) recorded_image="$previous_api_image" ;;
       worker) recorded_image="$previous_worker_image" ;;
       scheduler) recorded_image="$previous_scheduler_image" ;;
       web) recorded_image="$previous_web_image" ;;
-      admin-web) recorded_image="$previous_admin_web_image" ;;
-      research-web) recorded_image="$previous_research_web_image" ;;
+      admin-web)
+        recorded_image="$previous_admin_web_image"
+        was_recorded="$previous_admin_web_was_recorded"
+        ;;
+      research-web)
+        recorded_image="$previous_research_web_image"
+        was_recorded="$previous_research_web_was_recorded"
+        ;;
       hermes) recorded_image="$previous_hermes_image" ;;
       caddy) recorded_image="$previous_caddy_image" ;;
       postgres) recorded_image="$previous_postgres_image" ;;
       redis) recorded_image="$previous_redis_image" ;;
     esac
     actual_image="$(running_image "$service")"
-    if [[ -z "$actual_image" || "$actual_image" != "$recorded_image" ]]; then
+    if ! running_service_matches_recorded_topology \
+        "$was_recorded" "$actual_image" "$recorded_image"; then
       echo "Running $service image does not match the verified release boundary" >&2
       exit 2
     fi
   done
+  rollback_admin_web_image="$(select_surface_rollback_image \
+    "$previous_admin_web_was_recorded" \
+    "$previous_admin_web_image" "$target_admin_web_image")"
+  rollback_research_web_image="$(select_surface_rollback_image \
+    "$previous_research_web_was_recorded" \
+    "$previous_research_web_image" "$target_research_web_image")"
   automatic_rollback_available=1
 fi
 
@@ -592,7 +612,7 @@ rollback() {
     fi
   elif ((deployment_started && automatic_rollback_available)) \
     && [[ -n "$previous_api_image" && -n "$previous_web_image" \
-      && -n "$previous_admin_web_image" && -n "$previous_research_web_image" ]]; then
+      && -n "$rollback_admin_web_image" && -n "$rollback_research_web_image" ]]; then
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
     rollback_services=(api web admin-web research-web caddy)
@@ -613,16 +633,16 @@ rollback() {
       # anything, then restore the runtime auth secret before the prior API.
       rewrite_release_boundary .env.production \
         "$previous_revision" "$previous_image_tag" "$target_infra_image_tag" \
-        "$previous_api_image" "$previous_web_image" "$previous_admin_web_image" \
-        "$previous_research_web_image" "$target_caddy_image" \
+        "$previous_api_image" "$previous_web_image" "$rollback_admin_web_image" \
+        "$rollback_research_web_image" "$target_caddy_image" \
         "$target_postgres_image" "$target_backup_image" "$previous_hermes_image" \
         "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
         "$previous_temporary_web_pin_verifier_file_host" \
         "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || return 1
       export API_IMAGE="$previous_api_image"
       export WEB_IMAGE="$previous_web_image"
-      export ADMIN_WEB_IMAGE="$previous_admin_web_image"
-      export RESEARCH_WEB_IMAGE="$previous_research_web_image"
+      export ADMIN_WEB_IMAGE="$rollback_admin_web_image"
+      export RESEARCH_WEB_IMAGE="$rollback_research_web_image"
       export HERMES_IMAGE="$previous_hermes_image"
       AUTH_LOGIN_MODE="$previous_auth_login_mode"
       TEMPORARY_WEB_PIN_VERIFIER=""
@@ -676,8 +696,8 @@ rollback() {
         && "$hybrid_worker" == "$previous_worker_image" \
         && "$hybrid_scheduler" == "$previous_scheduler_image" \
         && "$hybrid_web" == "$previous_web_image" \
-        && "$hybrid_admin_web" == "$previous_admin_web_image" \
-        && "$hybrid_research_web" == "$previous_research_web_image" \
+        && "$hybrid_admin_web" == "$rollback_admin_web_image" \
+        && "$hybrid_research_web" == "$rollback_research_web_image" \
         && "$hybrid_hermes" == "$previous_hermes_image" \
         && "$hybrid_caddy" == "$target_caddy_image" \
         && "$hybrid_postgres" == "$target_postgres_image" ]]; then
