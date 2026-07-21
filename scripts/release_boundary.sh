@@ -187,7 +187,7 @@ _rewrite_release_environment() (
   local verifier_host="${13:-}"
   local expires_at="${14:-}"
   local whatsapp_backend="${15:-}"
-  local temporary_whatsapp_boundary=0
+  local canonicalize_whatsapp_cadences=0
   local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
   local env_tmp env_uid env_gid
   env_tmp=""
@@ -205,12 +205,14 @@ _rewrite_release_environment() (
     validate_auth_boundary_values \
       "$auth_login_mode" "$verifier_file" "$verifier_host" "$expires_at" \
       "$whatsapp_backend" || return 1
-    if [[ "$auth_login_mode" == "temporary_static_pin" ]]; then
-      temporary_whatsapp_boundary=1
-      if [[ "$whatsapp_backend" == "meta" ]]; then
-        meta_primary_sender_enabled=false
-        meta_test_sender_mode=inbound_replies_only
-      fi
+    if [[ "$auth_login_mode" == "temporary_static_pin" \
+      && "$whatsapp_backend" == "meta" ]]; then
+      meta_primary_sender_enabled=false
+      meta_test_sender_mode=inbound_replies_only
+    fi
+    if [[ "$auth_login_mode" == "temporary_static_pin" \
+      || "$whatsapp_backend" == "disabled" ]]; then
+      canonicalize_whatsapp_cadences=1
     fi
   fi
 
@@ -237,7 +239,7 @@ _rewrite_release_environment() (
     -v verifier_host="$verifier_host" \
     -v expires_at="$expires_at" \
     -v whatsapp_backend="$whatsapp_backend" \
-    -v temporary_whatsapp_boundary="$temporary_whatsapp_boundary" \
+    -v canonicalize_whatsapp_cadences="$canonicalize_whatsapp_cadences" \
     -v meta_primary_sender_enabled="$meta_primary_sender_enabled" \
     -v meta_test_sender_mode="$meta_test_sender_mode" '
       BEGIN {
@@ -257,9 +259,9 @@ _rewrite_release_environment() (
           replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"] = verifier_host
           replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
           replacement["WHATSAPP_BACKEND"] = whatsapp_backend
-          if (temporary_whatsapp_boundary == 1) {
-            replacement["META_PRIMARY_SENDER_ENABLED"] = meta_primary_sender_enabled
-            replacement["META_TEST_SENDER_VERIFICATION_MODE"] = meta_test_sender_mode
+          replacement["META_PRIMARY_SENDER_ENABLED"] = meta_primary_sender_enabled
+          replacement["META_TEST_SENDER_VERIFICATION_MODE"] = meta_test_sender_mode
+          if (canonicalize_whatsapp_cadences == 1) {
             replacement["PROACTIVE_INSIGHTS_ENABLED"] = "false"
             replacement["DAILY_INSIGHTS_ENABLED"] = "false"
             replacement["WEEKLY_INSIGHTS_ENABLED"] = "false"

@@ -305,6 +305,12 @@ if ! docker exec "$hermes_runtime" sh -eu -c '
     http://127.0.0.1:8699/v1/profiles/tenant_dynamic/activate \
     | grep -Fx "{\"status\":\"activated\"}" >/dev/null
 '; then
+  docker exec "$hermes_runtime" sh -c '
+    /command/s6-svstat /run/service/gateway-tenant_dynamic >&2 || true
+    if [ -f /opt/data/logs/gateways/tenant_dynamic/current ]; then
+      tail -n 120 /opt/data/logs/gateways/tenant_dynamic/current >&2
+    fi
+  ' >&2 || true
   docker logs "$hermes_runtime" >&2
   exit 1
 fi

@@ -185,6 +185,12 @@ grep -Fxq 'AUTH_LOGIN_MODE=disabled' "$repo/.env.production"
 grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER_FILE=' "$repo/.env.production"
 grep -Fxq 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=' "$repo/.env.production"
 grep -Fxq 'TEMPORARY_WEB_PIN_EXPIRES_AT=' "$repo/.env.production"
+grep -Fxq 'WHATSAPP_BACKEND=disabled' "$repo/.env.production"
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=true' "$repo/.env.production"
+grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=disabled' "$repo/.env.production"
+grep -Fxq 'PROACTIVE_INSIGHTS_ENABLED=false' "$repo/.env.production"
+grep -Fxq 'DAILY_INSIGHTS_ENABLED=false' "$repo/.env.production"
+grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$repo/.env.production"
 test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 2
 for history in "$state"/promotion-history/*-PREVIOUS_RESTORED.json; do
   jq --exit-status '

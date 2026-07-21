@@ -1766,5 +1766,11 @@ grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
 grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
 grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
+grep -Fq 'mcp==1.28.1' infra/hermes/Dockerfile
+grep -Fq 'pillow==12.3.0' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion' infra/hermes/Dockerfile
+grep -Fq 'npm ls --prefix /opt/hermes --omit=dev --depth=0' infra/hermes/Dockerfile
+grep -Fq 'from PIL import Image' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/.venv/bin/hermes --help' infra/hermes/Dockerfile
 
 echo "Production environment and immutable Compose contracts passed"

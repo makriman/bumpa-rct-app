@@ -433,24 +433,26 @@ staged_daily_enabled="$(env_value DAILY_INSIGHTS_ENABLED)" || fail "staged auth 
 staged_weekly_enabled="$(env_value WEEKLY_INSIGHTS_ENABLED)" || fail "staged auth boundary is incomplete"
 
 # The release record owns the selectors needed to reconstruct the previous auth
-# boundary. For temporary PIN mode those WhatsApp selectors are canonical and
-# fail closed, so a staged Meta activation cannot leak into rollback state.
+# boundary. A disabled backend and temporary PIN mode both have canonical,
+# fail-closed selectors, so a staged Meta activation cannot leak into rollback
+# state.
 previous_meta_primary_sender_enabled="$staged_meta_primary_sender_enabled"
 previous_meta_test_sender_verification_mode="$staged_meta_test_sender_mode"
 previous_proactive_insights_enabled="$staged_proactive_enabled"
 previous_daily_insights_enabled="$staged_daily_enabled"
 previous_weekly_insights_enabled="$staged_weekly_enabled"
-if [[ "$previous_auth_login_mode" == "temporary_static_pin" ]]; then
+if [[ "$previous_whatsapp_backend" == "disabled" ]]; then
+  previous_meta_primary_sender_enabled=true
+  previous_meta_test_sender_verification_mode=disabled
   previous_proactive_insights_enabled=false
   previous_daily_insights_enabled=false
   previous_weekly_insights_enabled=false
-  if [[ "$previous_whatsapp_backend" == "meta" ]]; then
-    previous_meta_primary_sender_enabled=false
-    previous_meta_test_sender_verification_mode=inbound_replies_only
-  else
-    previous_meta_primary_sender_enabled=true
-    previous_meta_test_sender_verification_mode=disabled
-  fi
+elif [[ "$previous_auth_login_mode" == "temporary_static_pin" ]]; then
+  previous_meta_primary_sender_enabled=false
+  previous_meta_test_sender_verification_mode=inbound_replies_only
+  previous_proactive_insights_enabled=false
+  previous_daily_insights_enabled=false
+  previous_weekly_insights_enabled=false
 fi
 validate_auth_boundary \
   "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
