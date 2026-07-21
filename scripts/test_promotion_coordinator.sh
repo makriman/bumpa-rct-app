@@ -68,6 +68,19 @@ write_boundary() {
   chmod 0600 "$repo/.env.production" "$repo/.deployed-release.json" "$repo/.deployed-revision"
 }
 
+make_legacy_surface_boundary() {
+  local env_tmp release_tmp
+  env_tmp="$(mktemp "$repo/.env.production.legacy.XXXXXX")"
+  release_tmp="$(mktemp "$repo/.deployed-release.legacy.XXXXXX")"
+  awk -F= '$1 != "ADMIN_WEB_IMAGE" && $1 != "RESEARCH_WEB_IMAGE"' \
+    "$repo/.env.production" >"$env_tmp"
+  jq 'del(.images.admin_web, .images.research_web)' \
+    "$repo/.deployed-release.json" >"$release_tmp"
+  chmod 0600 "$env_tmp" "$release_tmp"
+  mv -f "$env_tmp" "$repo/.env.production"
+  mv -f "$release_tmp" "$repo/.deployed-release.json"
+}
+
 stage_temporary_auth_activation() {
   local whatsapp_backend="${1:-disabled}" auth_env_tmp
   local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
@@ -144,6 +157,7 @@ commit_target_bundle() {
 }
 
 write_boundary
+make_legacy_surface_boundary
 # The target script body is deliberately passed literally for later execution.
 # shellcheck disable=SC2016
 commit_target_bundle \
@@ -160,6 +174,11 @@ result=$?
 set -e
 test "$result" = 42
 test "$(git -C "$repo" rev-parse HEAD)" = "$previous_revision"
+grep -Fxq "ADMIN_WEB_IMAGE=$image" "$repo/.env.production"
+grep -Fxq "RESEARCH_WEB_IMAGE=$image" "$repo/.env.production"
+jq --exit-status \
+  '(.images | has("admin_web") | not) and (.images | has("research_web") | not)' \
+  "$repo/.deployed-release.json" >/dev/null
 test ! -e "$state/maintenance.lock.coordinator-state.json"
 test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 1
 

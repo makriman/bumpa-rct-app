@@ -248,6 +248,18 @@ render_previous_environment() {
         print
       }
       END {
+        # A release created before the three-surface split has neither key.
+        # Canonicalize that single legacy shape to the recorded consumer image
+        # so rollback remains exact while the new Compose file gains both
+        # required pointers. Every other missing or duplicate key still fails.
+        if (seen["ADMIN_WEB_IMAGE"] == 0) {
+          print "ADMIN_WEB_IMAGE=" replacement["ADMIN_WEB_IMAGE"]
+          seen["ADMIN_WEB_IMAGE"] = 1
+        }
+        if (seen["RESEARCH_WEB_IMAGE"] == 0) {
+          print "RESEARCH_WEB_IMAGE=" replacement["RESEARCH_WEB_IMAGE"]
+          seen["RESEARCH_WEB_IMAGE"] = 1
+        }
         for (key in replacement) if (seen[key] != 1) exit 43
       }
     ' "$source" >"$destination"
@@ -519,6 +531,19 @@ env \
   "$worker_dir/promote_release.sh" "$@"
 child_result=$?
 set -e
+
+# A pre-three-surface environment is intentionally canonicalized during the
+# snapshot so a rollback can satisfy the current Compose contract. If the
+# target child fails before changing the checkout or either release record,
+# apply that canonical form before terminal validation. The three identity
+# checks prevent this path from overwriting a committed or hybrid boundary.
+if ((child_result != 0)) \
+  && [[ "$(git -C "$repo" rev-parse HEAD)" == "$previous_checkout" ]] \
+  && [[ "$(sha256sum "$repo/.deployed-release.json" | awk '{print $1}')" == "$previous_release_sha256" ]] \
+  && [[ "$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')" == "$previous_deployed_sha256" ]] \
+  && ! validate_previous_restored; then
+  restore_previous_environment || true
+fi
 
 phase=""
 if ((child_result == 0)) && validate_committed; then
