@@ -557,8 +557,10 @@ only on operator request as root with a separate narrow capability set, includin
    Run it as `bumpabestie`, not as root. The inherited descriptor keeps the same
    host lock across target selection, checkout, pointer selection and deploy;
    scheduled/manual backup cannot observe or resume a half-promoted release. The
-   worker preserves every non-release setting and the file owner, requires exactly
-   one of each of the nine release keys, writes mode `0600`, and renames atomically.
+   worker preserves every non-release setting and the file owner. It requires one
+   of each legacy release key, permits only the two new surface pointers to be
+   absent during this compatibility migration, then writes exactly eleven release
+   keys with mode `0600` and renames atomically.
    Never source `.env.production` or print it into a generated file. Before the
    forward boundary, failures restore both the recorded prior pointers and recorded
    operations checkout. A post-migration hybrid rollback deliberately retains the

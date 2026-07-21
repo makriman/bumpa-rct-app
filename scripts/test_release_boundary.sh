@@ -127,6 +127,35 @@ chmod 0600 "$env_file"
 env_uid_before="$(stat -c '%u' "$env_file" 2>/dev/null || stat -f '%u' "$env_file")"
 env_gid_before="$(stat -c '%g' "$env_file" 2>/dev/null || stat -f '%g' "$env_file")"
 
+# The one-time three-surface promotion starts from an environment that has no
+# admin or research image keys. Both pointer-only forward writes and full
+# boundary restores must add exactly those keys without weakening validation
+# for any other missing field.
+legacy_pointer_env="$test_dir/legacy-pointer.env"
+awk -F= '$1 != "ADMIN_WEB_IMAGE" && $1 != "RESEARCH_WEB_IMAGE"' \
+  "$env_file" >"$legacy_pointer_env"
+chmod 0600 "$legacy_pointer_env"
+rewrite_release_pointers "$legacy_pointer_env" \
+  "$new_revision" "sha-$new_revision" "$new_infra" \
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes"
+grep -Fxq "ADMIN_WEB_IMAGE=$new_admin_web" "$legacy_pointer_env"
+grep -Fxq "RESEARCH_WEB_IMAGE=$new_research_web" "$legacy_pointer_env"
+test "$(grep -Ec '^(ADMIN_WEB_IMAGE|RESEARCH_WEB_IMAGE)=' "$legacy_pointer_env")" = 2
+
+legacy_boundary_env="$test_dir/legacy-boundary.env"
+awk -F= '$1 != "ADMIN_WEB_IMAGE" && $1 != "RESEARCH_WEB_IMAGE"' \
+  "$env_file" >"$legacy_boundary_env"
+chmod 0600 "$legacy_boundary_env"
+rewrite_release_boundary "$legacy_boundary_env" \
+  "$old_revision" "sha-$old_revision" "$old_infra" \
+  "$old_api" "$old_web" "$old_admin_web" "$old_research_web" \
+  "$old_caddy" "$old_postgres" "$old_backup" "$old_hermes" \
+  disabled '' '' '' disabled
+grep -Fxq "ADMIN_WEB_IMAGE=$old_admin_web" "$legacy_boundary_env"
+grep -Fxq "RESEARCH_WEB_IMAGE=$old_research_web" "$legacy_boundary_env"
+test "$(grep -Ec '^(ADMIN_WEB_IMAGE|RESEARCH_WEB_IMAGE)=' "$legacy_boundary_env")" = 2
+
 rewrite_release_pointers "$env_file" \
   "$new_revision" "sha-$new_revision" "$new_infra" \
   "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
