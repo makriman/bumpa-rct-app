@@ -35,7 +35,12 @@ future_expiry=2099-01-01T00:00:00Z
 otp_secret="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
 
 write_env() {
-  local mode="$1" host_path="$2"
+  local mode="$1" host_path="$2" whatsapp_backend="${3:-disabled}"
+  local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
+  if [[ "$whatsapp_backend" == "meta" ]]; then
+    meta_primary_sender_enabled=false
+    meta_test_sender_mode=inbound_replies_only
+  fi
   printf '%s\n' \
     "DEPLOY_REF=$revision" \
     "IMAGE_TAG=sha-$revision" \
@@ -48,14 +53,20 @@ write_env() {
     "TEMPORARY_WEB_PIN_VERIFIER_FILE=$([[ "$mode" == temporary_static_pin ]] && printf %s "$runtime_path")" \
     "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST=$host_path" \
     "TEMPORARY_WEB_PIN_EXPIRES_AT=$([[ "$mode" == temporary_static_pin ]] && printf %s "$future_expiry")" \
-    'WHATSAPP_BACKEND=disabled' >"$env_file"
+    "WHATSAPP_BACKEND=$whatsapp_backend" \
+    "META_PRIMARY_SENDER_ENABLED=$meta_primary_sender_enabled" \
+    "META_TEST_SENDER_VERIFICATION_MODE=$meta_test_sender_mode" \
+    'PROACTIVE_INSIGHTS_ENABLED=false' \
+    'DAILY_INSIGHTS_ENABLED=false' \
+    'WEEKLY_INSIGHTS_ENABLED=false' >"$env_file"
   chmod 0600 "$env_file"
 }
 
 write_release() {
-  local mode="$1" host_path="$2"
+  local mode="$1" host_path="$2" whatsapp_backend="${3:-disabled}"
   jq --null-input \
     --arg revision "$revision" --arg image "$image" --arg mode "$mode" \
+    --arg whatsapp_backend "$whatsapp_backend" \
     --arg runtime "$([[ "$mode" == temporary_static_pin ]] && printf %s "$runtime_path")" \
     --arg host "$host_path" \
     --arg expiry "$([[ "$mode" == temporary_static_pin ]] && printf %s "$future_expiry")" '
@@ -73,7 +84,7 @@ write_release() {
         temporary_web_pin_verifier_file: $runtime,
         temporary_web_pin_verifier_file_host: $host,
         temporary_web_pin_expires_at: $expiry,
-        whatsapp_backend: "disabled"
+        whatsapp_backend: $whatsapp_backend
       }
     }
   ' >"$release_file"
@@ -148,6 +159,30 @@ PY
 
 selected_path() {
   awk -F= '$1 == "TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST" {print substr($0, index($0, "=") + 1)}' "$env_file"
+}
+
+assert_selector_rejected() {
+  local key="$1" value="$2" candidate=/opt/bumpabestie/.env.production.unsafe
+  local before=/tmp/unsafe-selector-before file_count_before
+  awk -F= -v key="$key" -v value="$value" '
+    $1 == key {
+      if (++seen > 1) exit 42
+      print key "=" value
+      next
+    }
+    { print }
+    END { if (seen != 1) exit 43 }
+  ' "$env_file" >"$candidate"
+  chmod 0600 "$candidate"
+  cp "$candidate" "$before"
+  file_count_before="$(find /var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers -maxdepth 1 -type f | wc -l)"
+  if "$setter" "$candidate" >/tmp/unsafe-selector.out 2>&1; then
+    echo "Setter accepted an unsafe temporary-PIN WhatsApp selector boundary" >&2
+    exit 1
+  fi
+  grep -Fq 'Stage the fail-closed temporary authentication selectors' /tmp/unsafe-selector.out
+  cmp -s "$candidate" "$before"
+  test "$(find /var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers -maxdepth 1 -type f | wc -l)" = "$file_count_before"
 }
 
 install -d -m 0755 /tmp/fail-pin-rotation-bin
@@ -254,10 +289,19 @@ test "$(selected_path)" = "$legacy_path"
 cmp -s "$legacy_path" /tmp/legacy-before
 test "$(find /var/lib/bumpabestie-auth-secret/temporary-web-pin-verifiers -maxdepth 1 -type f | wc -l)" = "$file_count_before"
 
-# A deployed versioned boundary rotates to another unique file, retains the
-# prior one byte-for-byte, and rollback selects that prior file again.
-write_env temporary_static_pin "$version_one"
-write_release temporary_static_pin "$version_one"
+# A deployed versioned boundary may enable only the exact reply-only Meta test
+# lane. Every widening of that selector boundary is rejected before prompting
+# or allocating a verifier.
+write_env temporary_static_pin "$version_one" meta
+write_release temporary_static_pin "$version_one" meta
+assert_selector_rejected META_PRIMARY_SENDER_ENABLED true
+assert_selector_rejected META_TEST_SENDER_VERIFICATION_MODE disabled
+assert_selector_rejected PROACTIVE_INSIGHTS_ENABLED true
+assert_selector_rejected DAILY_INSIGHTS_ENABLED true
+assert_selector_rejected WEEKLY_INSIGHTS_ENABLED true
+
+# The safe combined boundary rotates to another unique file, retains the prior
+# one byte-for-byte, and rollback selects that prior file again.
 cp "$version_one" /tmp/version-one-before
 run_setter_with_private_random_pin
 version_two="$(selected_path)"
@@ -268,7 +312,7 @@ cmp -s "$version_one" /tmp/version-one-before
 rewrite_release_boundary "$env_file" \
   "$revision" "sha-$revision" "sha-$revision" \
   "$image" "$image" "$image" "$image" "$image" "$image" \
-  temporary_static_pin "$runtime_path" "$version_one" "$future_expiry" disabled
+  temporary_static_pin "$runtime_path" "$version_one" "$future_expiry" meta
 test "$(selected_path)" = "$version_one"
 cmp -s "$version_one" /tmp/version-one-before
 assert_private_verifier "$version_one"

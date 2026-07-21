@@ -11,10 +11,6 @@ if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root on a fresh Ubuntu 24.04 host" >&2
   exit 2
 fi
-if [[ -z "${ADMIN_SSH_CIDR:-}" ]]; then
-  echo "Set ADMIN_SSH_CIDR, for example 203.0.113.10/32" >&2
-  exit 2
-fi
 os_id="$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')"
 os_version="$(sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"')"
 if [[ "$os_id:$os_version" != "ubuntu:24.04" ]]; then
@@ -25,7 +21,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get upgrade -y
-apt-get install -y ca-certificates curl fail2ban git gnupg jq python3 sudo unattended-upgrades ufw util-linux
+apt-get install -y ca-certificates curl git gnupg jq python3 sudo unattended-upgrades ufw util-linux
 
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -94,9 +90,14 @@ ufw default deny incoming
 ufw default allow outgoing
 ufw allow 80/tcp
 ufw allow 443/tcp
-ufw allow from "$ADMIN_SSH_CIDR" to any port 22 proto tcp
+if [[ -n "${ADMIN_SSH_CIDR:-}" ]]; then
+  ufw allow from "$ADMIN_SSH_CIDR" to any port 22 proto tcp \
+    comment 'BumpaBestie restricted SSH'
+else
+  ufw allow 22/tcp comment 'BumpaBestie key-only SSH'
+fi
 ufw --force enable
-systemctl enable --now docker fail2ban unattended-upgrades
+systemctl enable --now docker unattended-upgrades
 
 docker_firewall_source=""
 docker_firewall_binary="/usr/local/sbin/bumpabestie-cloudflare-docker-firewall"

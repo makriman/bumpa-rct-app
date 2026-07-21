@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     )
     cors_allowed_origins: str | None = None
     artifact_root: Path = Path("./.data/exports")
-    meta_graph_version: str = "v23.0"
+    meta_graph_version: str = "v25.0"
     meta_app_id: str | None = None
     meta_waba_id: str | None = None
     meta_webhook_verify_token: str | None = None
@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     meta_app_secret: str | None = None
     meta_app_secret_file: Path | None = None
     meta_phone_number_id: str | None = None
+    meta_primary_sender_enabled: bool = True
     meta_test_sender_verification_mode: Literal["disabled", "inbound_replies_only"] = "disabled"
     meta_test_sender_waba_id: str | None = Field(default=None, pattern=r"^\d{5,64}$")
     meta_test_sender_phone_number_id: str | None = Field(default=None, pattern=r"^\d{5,64}$")
@@ -232,7 +233,7 @@ class Settings(BaseSettings):
         """Return configured ``(WABA ID, phone-number ID)`` reply sender pairs."""
 
         senders: set[tuple[str, str]] = set()
-        if self.meta_waba_id and self.meta_phone_number_id:
+        if self.meta_primary_sender_enabled and self.meta_waba_id and self.meta_phone_number_id:
             senders.add((self.meta_waba_id, self.meta_phone_number_id))
         if (
             self.meta_test_sender_verification_mode == "inbound_replies_only"
@@ -475,9 +476,18 @@ class Settings(BaseSettings):
             raise ValueError("TEMPORARY_WEB_PIN_VERIFIER must use a secret file in production")
         if self.auth_login_mode != "temporary_static_pin":
             return
-        if self.whatsapp_backend != "disabled":
+        reply_only_test_lane = (
+            self.whatsapp_backend == "meta"
+            and not self.meta_primary_sender_enabled
+            and self.meta_test_sender_verification_mode == "inbound_replies_only"
+            and not self.proactive_insights_enabled
+            and not self.daily_insights_enabled
+            and not self.weekly_insights_enabled
+        )
+        if self.whatsapp_backend != "disabled" and not reply_only_test_lane:
             raise ValueError(
-                "Temporary static-PIN authentication requires WHATSAPP_BACKEND=disabled"
+                "Temporary static-PIN authentication permits only disabled WhatsApp or the "
+                "reply-only Meta test sender"
             )
         if self.app_env == "production" and self.temporary_web_pin_verifier_file is None:
             raise ValueError(
@@ -524,6 +534,21 @@ class Settings(BaseSettings):
             raise ValueError("Field-encryption keys are too short or use placeholders")
 
     def _validate_meta_test_sender_verification(self) -> None:
+        if self.whatsapp_backend == "disabled":
+            return
+        if not self.meta_primary_sender_enabled:
+            if self.meta_test_sender_verification_mode != "inbound_replies_only":
+                raise ValueError(
+                    "Disabling the Meta primary sender requires the reply-only test sender"
+                )
+            if self.auth_login_mode == "whatsapp_otp":
+                raise ValueError("WhatsApp OTP requires the Meta primary sender")
+            if (
+                self.proactive_insights_enabled
+                or self.daily_insights_enabled
+                or self.weekly_insights_enabled
+            ):
+                raise ValueError("Proactive WhatsApp delivery requires the Meta primary sender")
         if self.meta_test_sender_verification_mode == "disabled":
             return
         if self.whatsapp_backend != "meta":

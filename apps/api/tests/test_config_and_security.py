@@ -222,6 +222,45 @@ def test_meta_test_sender_is_typed_scoped_and_disabled_by_default() -> None:
         )
 
 
+def test_temporary_pin_can_coexist_only_with_the_reply_only_meta_test_lane() -> None:
+    values = {
+        "app_env": "test",
+        "auth_login_mode": "temporary_static_pin",
+        "temporary_web_pin_verifier": "a" * 64,
+        "temporary_web_pin_expires_at": utcnow() + timedelta(hours=1),
+        "whatsapp_backend": "meta",
+        "meta_waba_id": "2234567890",
+        "meta_phone_number_id": "3234567890",
+        "meta_primary_sender_enabled": False,
+        "meta_test_sender_verification_mode": "inbound_replies_only",
+        "meta_test_sender_waba_id": "423456789012345",
+        "meta_test_sender_phone_number_id": "523456789012345",
+        "meta_test_sender_display_phone_e164": "+15550102030",
+    }
+    configured = Settings(**values)
+
+    assert configured.allowed_meta_inbound_reply_senders == frozenset(
+        {("423456789012345", "523456789012345")}
+    )
+
+    with pytest.raises(ValidationError, match="reply-only test sender"):
+        Settings(
+            **{
+                **values,
+                "meta_test_sender_verification_mode": "disabled",
+            }
+        )
+
+    with pytest.raises(ValidationError, match="Meta primary sender"):
+        Settings(
+            **{
+                **values,
+                "proactive_insights_enabled": True,
+                "daily_insights_enabled": True,
+            }
+        )
+
+
 def test_configurable_secure_cookie_is_emitted(client: TestClient) -> None:
     configured = Settings(
         app_env="test",

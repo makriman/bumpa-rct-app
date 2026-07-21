@@ -246,8 +246,10 @@ for old_id, secret in old_keys.items():
     failed=1
   fi
   if [[ "$auth_login_mode" == "temporary_static_pin" ]]; then
-    if [[ "$whatsapp_backend" != "disabled" ]]; then
-      echo "Temporary static-PIN authentication requires WHATSAPP_BACKEND=disabled" >&2
+    temporary_meta_test_mode="$(value_for META_TEST_SENDER_VERIFICATION_MODE)"
+    if [[ "$whatsapp_backend" != "disabled" ]] \
+      && [[ "$whatsapp_backend" != "meta" || "$temporary_meta_test_mode" != "inbound_replies_only" ]]; then
+      echo "Temporary static-PIN authentication permits only disabled WhatsApp or the reply-only Meta test sender" >&2
       failed=1
     fi
     if [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
@@ -255,8 +257,14 @@ for old_id, secret in old_keys.items():
       echo "Production temporary PIN verifier must use the fixed API runtime secret path" >&2
       failed=1
     fi
-    if [[ "$(value_for META_TEST_SENDER_VERIFICATION_MODE)" != "disabled" ]]; then
-      echo "Temporary static-PIN authentication requires the Meta test sender to be disabled" >&2
+    if [[ "$whatsapp_backend" == "disabled" && "$temporary_meta_test_mode" != "disabled" ]] \
+      || [[ "$whatsapp_backend" == "meta" && "$temporary_meta_test_mode" != "inbound_replies_only" ]]; then
+      echo "Temporary static-PIN authentication requires a provider-matched Meta test-sender mode" >&2
+      failed=1
+    fi
+    if [[ "$whatsapp_backend" == "meta" \
+      && "$(value_for META_PRIMARY_SENDER_ENABLED)" != "false" ]]; then
+      echo "Temporary static-PIN authentication requires the Meta primary sender to be disabled" >&2
       failed=1
     fi
     if [[ "$(value_for PROACTIVE_INSIGHTS_ENABLED)" != "false" || \
@@ -297,6 +305,11 @@ PY
     failed=1
   }
   meta_test_sender_mode="$(value_for META_TEST_SENDER_VERIFICATION_MODE)"
+  meta_primary_sender_enabled="$(value_for META_PRIMARY_SENDER_ENABLED)"
+  if [[ ! "$meta_primary_sender_enabled" =~ ^(true|false)$ ]]; then
+    echo "META_PRIMARY_SENDER_ENABLED must be true or false" >&2
+    failed=1
+  fi
   if [[ ! "$meta_test_sender_mode" =~ ^(disabled|inbound_replies_only)$ ]]; then
     echo "META_TEST_SENDER_VERIFICATION_MODE must be disabled or inbound_replies_only" >&2
     failed=1
@@ -325,6 +338,16 @@ PY
       failed=1
     fi
   fi
+  if [[ "$whatsapp_backend" == "meta" && "$meta_primary_sender_enabled" == "false" ]]; then
+    if [[ "$meta_test_sender_mode" != "inbound_replies_only" ]]; then
+      echo "Disabling the Meta primary sender requires the reply-only test sender" >&2
+      failed=1
+    fi
+    if [[ "$auth_login_mode" == "whatsapp_otp" ]]; then
+      echo "WhatsApp OTP requires the Meta primary sender" >&2
+      failed=1
+    fi
+  fi
   proactive_enabled="$(value_for PROACTIVE_INSIGHTS_ENABLED)"
   daily_insights_enabled="$(value_for DAILY_INSIGHTS_ENABLED)"
   weekly_insights_enabled="$(value_for WEEKLY_INSIGHTS_ENABLED)"
@@ -334,6 +357,13 @@ PY
       failed=1
     fi
   done
+  if [[ "$whatsapp_backend" == "meta" && "$meta_primary_sender_enabled" == "false" ]] \
+    && [[ "$proactive_enabled" == "true" \
+      || "$daily_insights_enabled" == "true" \
+      || "$weekly_insights_enabled" == "true" ]]; then
+    echo "Proactive WhatsApp delivery requires the Meta primary sender" >&2
+    failed=1
+  fi
   if [[ "$proactive_enabled" != "true" \
     && ("$daily_insights_enabled" == "true" || "$weekly_insights_enabled" == "true") ]]; then
     echo "Insight cadences cannot be enabled while proactive insights are disabled" >&2

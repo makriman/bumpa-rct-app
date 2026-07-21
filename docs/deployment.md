@@ -88,9 +88,11 @@ application environment.
 ## Host prerequisites
 
 - Ubuntu 24.04 LTS on `linux/amd64`, a stable IP, provider backups and monitoring.
-- Cloud firewall: SSH 22 only from a trusted `/32` or VPN CIDR. While branded
-  DNS is Cloudflare-proxied, origin TCP 80/443 must accept only Cloudflare's
-  current published IPv4/IPv6 ranges; an `Anywhere` origin rule is not a live
+- Cloud firewall: use a durable trusted CIDR for SSH 22 when one exists. For
+  operators on dynamic addresses, expose only the hardened key-only SSH service
+  instead of pinning access to a transient `/32`. While branded DNS is
+  Cloudflare-proxied, origin TCP 80/443 must accept only Cloudflare's current
+  published IPv4/IPv6 ranges; an `Anywhere` web-origin rule is not a live
   production configuration.
 - SSH keys only, non-root `bumpabestie` deploy user and `/opt/bumpabestie` mode 0750.
 - No public Postgres, Redis, Docker API or Hermes ports.
@@ -101,8 +103,24 @@ On a fresh supported host, review the script and run it from the checked-out
 revision:
 
 ```bash
-ADMIN_SSH_CIDR=203.0.113.10/32 sudo --preserve-env=ADMIN_SSH_CIDR ./scripts/bootstrap_server.sh
+sudo ./scripts/bootstrap_server.sh
 ```
+
+The default SSH rule accepts port 22 from any address, but `sshd` accepts only
+authorized public keys: password and keyboard-interactive authentication are
+disabled. If the deployment team has a durable VPN or static egress range,
+restrict the rule by setting it explicitly:
+
+```bash
+ADMIN_SSH_CIDR=203.0.113.10/32 \
+  sudo --preserve-env=ADMIN_SSH_CIDR ./scripts/bootstrap_server.sh
+```
+
+Do not use a short-lived residential or mobile `/32`. That configuration caused
+the July 2026 production lockout when the operator address changed. Fail2ban is
+intentionally absent: the host uses key-only SSH, a three-attempt connection
+limit, UFW, provider monitoring and the optional durable source restriction
+above without maintaining a second stateful ban list.
 
 Record the OS release, Docker/Compose versions, firewall rules, listening sockets
 and the deploy user's SSH fingerprint. The bootstrap script installs and enables
@@ -144,13 +162,16 @@ oneshot alone is also unacceptable because a restarted Docker daemon can restore
 published ports before that oneshot runs.
 
 After all five records are proxied and the edge-to-origin health check passes,
-keep an already-tested SSH session open and use the same canonical administrator
-CIDR recorded during bootstrap. Start with the read-only UFW plan:
+keep an already-tested SSH session open and use the same SSH access mode selected
+during bootstrap. Start with the read-only UFW plan:
 
 ```bash
-sudo python3 ./scripts/configure_cloudflare_ufw.py plan \
-  --ssh-cidr 203.0.113.10/32
+sudo python3 ./scripts/configure_cloudflare_ufw.py plan
 ```
+
+When bootstrap used a durable restricted range, pass that same value to both the
+plan and apply commands as `--ssh-cidr 203.0.113.10/32`. Omit the option only for
+the key-only global SSH mode.
 
 The command retrieves `https://www.cloudflare.com/ips-v4/` and
 `https://www.cloudflare.com/ips-v6/` directly over verified TLS. It fails closed
@@ -165,7 +186,6 @@ Review the plan and apply with the explicit confirmation phrase:
 
 ```bash
 sudo python3 ./scripts/configure_cloudflare_ufw.py apply \
-  --ssh-cidr 203.0.113.10/32 \
   --confirm restrict-origin-to-cloudflare
 ```
 
@@ -376,6 +396,28 @@ PROACTIVE_INSIGHTS_ENABLED=false
 DAILY_INSIGHTS_ENABLED=false
 WEEKLY_INSIGHTS_ENABLED=false
 ```
+
+To retain temporary mapped-user web login while exercising only Meta's test
+number, keep the same PIN controls and replace the WhatsApp fields with the
+following reply-only boundary:
+
+```dotenv
+WHATSAPP_BACKEND=meta
+META_GRAPH_VERSION=v25.0
+META_PRIMARY_SENDER_ENABLED=false
+META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only
+META_TEST_SENDER_WABA_ID=<test-waba-id>
+META_TEST_SENDER_PHONE_NUMBER_ID=<test-phone-number-id>
+META_TEST_SENDER_DISPLAY_PHONE_E164=<test-display-number>
+PROACTIVE_INSIGHTS_ENABLED=false
+DAILY_INSIGHTS_ENABLED=false
+WEEKLY_INSIGHTS_ENABLED=false
+```
+
+This mode leaves OTP on the temporary PIN path, accepts inbound WhatsApp messages
+only for the exact test WABA/phone pair, replies from that same sender, and rejects
+primary-sender or proactive delivery. The access token, app secret and webhook
+verify token remain file-backed secrets; never place them in the environment file.
 
 Leave `TEMPORARY_WEB_PIN_VERIFIER` blank in the host environment. The non-secret
 `TEMPORARY_WEB_PIN_VERIFIER_FILE` must equal the fixed API-only runtime path shown

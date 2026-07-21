@@ -129,8 +129,31 @@ def test_production_web_pin_configuration_requires_scoped_verifier_and_expiry(
         Settings(**naive_values, temporary_web_pin_verifier_file=verifier_file)
 
     meta_values = {**values, "whatsapp_backend": "meta"}
-    with pytest.raises(ValidationError, match="requires WHATSAPP_BACKEND=disabled"):
+    with pytest.raises(ValidationError, match="reply-only Meta test sender"):
         Settings(**meta_values, temporary_web_pin_verifier_file=verifier_file)
+
+    reply_only_values = {
+        **meta_values,
+        "meta_app_id": "123456789012345",
+        "meta_waba_id": "223456789012345",
+        "meta_phone_number_id": "323456789012345",
+        "meta_webhook_verify_token": "v" * 32,
+        "meta_app_secret": "s" * 32,
+        "meta_system_user_access_token": "t" * 40,
+        "meta_primary_sender_enabled": False,
+        "meta_test_sender_verification_mode": "inbound_replies_only",
+        "meta_test_sender_waba_id": "423456789012345",
+        "meta_test_sender_phone_number_id": "523456789012345",
+        "meta_test_sender_display_phone_e164": "+15550102030",
+    }
+    reply_only = Settings(
+        **reply_only_values,
+        temporary_web_pin_verifier_file=verifier_file,
+    )
+    assert reply_only.auth_login_mode == "temporary_static_pin"
+    assert reply_only.allowed_meta_inbound_reply_senders == frozenset(
+        {("423456789012345", "523456789012345")}
+    )
 
 
 def test_web_pin_request_is_generic_provider_free_and_typed(

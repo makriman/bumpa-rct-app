@@ -26,6 +26,11 @@ previous_temporary_web_pin_verifier_file=""
 previous_temporary_web_pin_verifier_file_host=""
 previous_temporary_web_pin_expires_at=""
 previous_whatsapp_backend=""
+previous_meta_primary_sender_enabled=""
+previous_meta_test_sender_verification_mode=""
+previous_proactive_insights_enabled=""
+previous_daily_insights_enabled=""
+previous_weekly_insights_enabled=""
 
 fail() {
   echo "bumpabestie-promote: $*" >&2
@@ -154,15 +159,30 @@ env_value() {
 
 validate_auth_boundary() {
   local login_mode="$1" verifier_file="$2" verifier_host="$3"
-  local expires_at="$4" whatsapp_backend="$5" expiry_pattern
+  local expires_at="$4" whatsapp_backend="$5" meta_primary_sender_enabled="$6"
+  local meta_test_sender_mode="$7" proactive_enabled="$8" daily_enabled="$9"
+  local weekly_enabled="${10}" expiry_pattern
   [[ "$login_mode" =~ ^(disabled|whatsapp_otp|temporary_static_pin)$ ]] || return 1
   [[ "$whatsapp_backend" =~ ^(disabled|meta)$ ]] || return 1
+  [[ "$meta_primary_sender_enabled" =~ ^(true|false)$ ]] || return 1
+  [[ "$meta_test_sender_mode" =~ ^(disabled|inbound_replies_only)$ ]] || return 1
+  [[ "$proactive_enabled" =~ ^(true|false)$ ]] || return 1
+  [[ "$daily_enabled" =~ ^(true|false)$ ]] || return 1
+  [[ "$weekly_enabled" =~ ^(true|false)$ ]] || return 1
   if [[ "$login_mode" == "temporary_static_pin" ]]; then
-    [[ "$whatsapp_backend" == "disabled" ]] || return 1
     [[ "$verifier_file" == "/run/auth-secret/temporary_web_pin_verifier" ]] || return 1
     validate_temporary_verifier_host_path "$verifier_host" || return 1
     expiry_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$'
     [[ "$expires_at" =~ $expiry_pattern ]] || return 1
+    [[ "$proactive_enabled" == "false" \
+      && "$daily_enabled" == "false" \
+      && "$weekly_enabled" == "false" ]] || return 1
+    if [[ "$whatsapp_backend" == "disabled" ]]; then
+      [[ "$meta_test_sender_mode" == "disabled" ]] || return 1
+    else
+      [[ "$meta_primary_sender_enabled" == "false" \
+        && "$meta_test_sender_mode" == "inbound_replies_only" ]] || return 1
+    fi
   else
     [[ -z "$verifier_file" && -z "$verifier_host" && -z "$expires_at" ]] || return 1
   fi
@@ -184,7 +204,12 @@ render_previous_environment() {
     -v verifier_file="$previous_temporary_web_pin_verifier_file" \
     -v verifier_host="$previous_temporary_web_pin_verifier_file_host" \
     -v expires_at="$previous_temporary_web_pin_expires_at" \
-    -v whatsapp_backend="$previous_whatsapp_backend" '
+    -v whatsapp_backend="$previous_whatsapp_backend" \
+    -v meta_primary_sender_enabled="$previous_meta_primary_sender_enabled" \
+    -v meta_test_sender_mode="$previous_meta_test_sender_verification_mode" \
+    -v proactive_enabled="$previous_proactive_insights_enabled" \
+    -v daily_enabled="$previous_daily_insights_enabled" \
+    -v weekly_enabled="$previous_weekly_insights_enabled" '
       BEGIN {
         replacement["DEPLOY_REF"] = deploy_ref
         replacement["IMAGE_TAG"] = image_tag
@@ -201,6 +226,11 @@ render_previous_environment() {
         replacement["TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST"] = verifier_host
         replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
         replacement["WHATSAPP_BACKEND"] = whatsapp_backend
+        replacement["META_PRIMARY_SENDER_ENABLED"] = meta_primary_sender_enabled
+        replacement["META_TEST_SENDER_VERIFICATION_MODE"] = meta_test_sender_mode
+        replacement["PROACTIVE_INSIGHTS_ENABLED"] = proactive_enabled
+        replacement["DAILY_INSIGHTS_ENABLED"] = daily_enabled
+        replacement["WEEKLY_INSIGHTS_ENABLED"] = weekly_enabled
       }
       {
         separator = index($0, "=")
@@ -253,14 +283,24 @@ restore_previous_environment() (
 record_matches_env() {
   local expected_revision="$1" expected_operations="$2"
   local auth_login_mode verifier_inline verifier_file verifier_host expires_at
-  local whatsapp_backend
+  local whatsapp_backend meta_primary_sender_enabled meta_test_sender_mode
+  local proactive_enabled daily_enabled weekly_enabled
   auth_login_mode="$(env_value AUTH_LOGIN_MODE)" || return 1
   verifier_inline="$(env_value TEMPORARY_WEB_PIN_VERIFIER)" || return 1
   verifier_file="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE)" || return 1
   verifier_host="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST)" || return 1
   expires_at="$(env_value TEMPORARY_WEB_PIN_EXPIRES_AT)" || return 1
   whatsapp_backend="$(env_value WHATSAPP_BACKEND)" || return 1
+  meta_primary_sender_enabled="$(env_value META_PRIMARY_SENDER_ENABLED)" || return 1
+  meta_test_sender_mode="$(env_value META_TEST_SENDER_VERIFICATION_MODE)" || return 1
+  proactive_enabled="$(env_value PROACTIVE_INSIGHTS_ENABLED)" || return 1
+  daily_enabled="$(env_value DAILY_INSIGHTS_ENABLED)" || return 1
+  weekly_enabled="$(env_value WEEKLY_INSIGHTS_ENABLED)" || return 1
   [[ -z "$verifier_inline" ]] || return 1
+  validate_auth_boundary \
+    "$auth_login_mode" "$verifier_file" "$verifier_host" "$expires_at" \
+    "$whatsapp_backend" "$meta_primary_sender_enabled" "$meta_test_sender_mode" \
+    "$proactive_enabled" "$daily_enabled" "$weekly_enabled" || return 1
   jq --exit-status \
     --arg revision "$expected_revision" --arg operations "$expected_operations" \
     --arg deploy_ref "$(env_value DEPLOY_REF)" \
@@ -379,16 +419,61 @@ previous_temporary_web_pin_verifier_file="$(jq -r '.auth.temporary_web_pin_verif
 previous_temporary_web_pin_verifier_file_host="$(jq -r '.auth.temporary_web_pin_verifier_file_host // ""' "$repo/.deployed-release.json")"
 previous_temporary_web_pin_expires_at="$(jq -r '.auth.temporary_web_pin_expires_at // ""' "$repo/.deployed-release.json")"
 previous_whatsapp_backend="$(jq -r '.auth.whatsapp_backend // "disabled"' "$repo/.deployed-release.json")"
+
+staged_auth_login_mode="$(env_value AUTH_LOGIN_MODE)" || fail "staged auth boundary is incomplete"
+staged_verifier_inline="$(env_value TEMPORARY_WEB_PIN_VERIFIER)" || fail "staged auth boundary is incomplete"
+staged_verifier_file="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE)" || fail "staged auth boundary is incomplete"
+staged_verifier_host="$(env_value TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST)" || fail "staged auth boundary is incomplete"
+staged_expires_at="$(env_value TEMPORARY_WEB_PIN_EXPIRES_AT)" || fail "staged auth boundary is incomplete"
+staged_whatsapp_backend="$(env_value WHATSAPP_BACKEND)" || fail "staged auth boundary is incomplete"
+staged_meta_primary_sender_enabled="$(env_value META_PRIMARY_SENDER_ENABLED)" || fail "staged auth boundary is incomplete"
+staged_meta_test_sender_mode="$(env_value META_TEST_SENDER_VERIFICATION_MODE)" || fail "staged auth boundary is incomplete"
+staged_proactive_enabled="$(env_value PROACTIVE_INSIGHTS_ENABLED)" || fail "staged auth boundary is incomplete"
+staged_daily_enabled="$(env_value DAILY_INSIGHTS_ENABLED)" || fail "staged auth boundary is incomplete"
+staged_weekly_enabled="$(env_value WEEKLY_INSIGHTS_ENABLED)" || fail "staged auth boundary is incomplete"
+
+# The release record owns the selectors needed to reconstruct the previous auth
+# boundary. For temporary PIN mode those WhatsApp selectors are canonical and
+# fail closed, so a staged Meta activation cannot leak into rollback state.
+previous_meta_primary_sender_enabled="$staged_meta_primary_sender_enabled"
+previous_meta_test_sender_verification_mode="$staged_meta_test_sender_mode"
+previous_proactive_insights_enabled="$staged_proactive_enabled"
+previous_daily_insights_enabled="$staged_daily_enabled"
+previous_weekly_insights_enabled="$staged_weekly_enabled"
+if [[ "$previous_auth_login_mode" == "temporary_static_pin" ]]; then
+  previous_proactive_insights_enabled=false
+  previous_daily_insights_enabled=false
+  previous_weekly_insights_enabled=false
+  if [[ "$previous_whatsapp_backend" == "meta" ]]; then
+    previous_meta_primary_sender_enabled=false
+    previous_meta_test_sender_verification_mode=inbound_replies_only
+  else
+    previous_meta_primary_sender_enabled=true
+    previous_meta_test_sender_verification_mode=disabled
+  fi
+fi
 validate_auth_boundary \
   "$previous_auth_login_mode" "$previous_temporary_web_pin_verifier_file" \
   "$previous_temporary_web_pin_verifier_file_host" \
-  "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" || \
+  "$previous_temporary_web_pin_expires_at" "$previous_whatsapp_backend" \
+  "$previous_meta_primary_sender_enabled" \
+  "$previous_meta_test_sender_verification_mode" \
+  "$previous_proactive_insights_enabled" "$previous_daily_insights_enabled" \
+  "$previous_weekly_insights_enabled" || \
   fail "recorded auth boundary is invalid"
 previous_env_sha256="$(canonical_previous_env_sha256)" || \
   fail "unable to canonicalize the previous environment boundary"
 previous_release_sha256="$(sha256sum "$repo/.deployed-release.json" | awk '{print $1}')"
 previous_deployed_sha256="$(sha256sum "$repo/.deployed-revision" | awk '{print $1}')"
 atomic_journal SNAPSHOT_RECORDED
+
+[[ -z "$staged_verifier_inline" ]] || fail "staged auth boundary is invalid"
+validate_auth_boundary \
+  "$staged_auth_login_mode" "$staged_verifier_file" "$staged_verifier_host" \
+  "$staged_expires_at" "$staged_whatsapp_backend" \
+  "$staged_meta_primary_sender_enabled" "$staged_meta_test_sender_mode" \
+  "$staged_proactive_enabled" "$staged_daily_enabled" "$staged_weekly_enabled" || \
+  fail "staged auth boundary is invalid"
 
 [[ -z "$(git -C "$repo" status --porcelain)" ]] || fail "repository checkout is dirty"
 git -C "$repo" fetch --tags --prune origin main
