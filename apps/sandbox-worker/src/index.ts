@@ -152,6 +152,7 @@ async function runCommand(
 ): Promise<JsonObject> {
   const command = stringValue(body, "command", 8_000);
   const cwd = workspacePath(stringValue(body, "cwd", 500));
+  await sandbox.mkdir("/workspace/.tmp", { recursive: true });
   const result = await sandbox.exec(command, {
     cwd,
     timeout: timeoutValue(body),
