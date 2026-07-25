@@ -5,16 +5,17 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 ENV_FILE="${ENV_FILE:-.env.production}"
+HERMES_REQUIRE_MCP_READY="${HERMES_REQUIRE_MCP_READY:-false}"
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "Hermes reconciliation requires $ENV_FILE" >&2
   exit 2
 fi
+if [[ ! "$HERMES_REQUIRE_MCP_READY" =~ ^(true|false)$ ]]; then
+  echo "HERMES_REQUIRE_MCP_READY must be true or false" >&2
+  exit 2
+fi
 
 compose=(docker compose --env-file "$ENV_FILE" -f compose.yaml -f compose.prod.yaml)
-if ! "${compose[@]}" ps --status running --quiet hermes | grep -q .; then
-  echo "Hermes container is not running" >&2
-  exit 1
-fi
 
 profile_count="$(
   "${compose[@]}" run --rm --no-deps hermes-import
@@ -71,10 +72,15 @@ fi
 '
 
 if [[ "$runtime_profile_count" == "0" ]]; then
+  if [[ "$HERMES_REQUIRE_MCP_READY" == "true" ]]; then
+    echo "Hermes MCP readiness requires at least one profile" >&2
+    exit 1
+  fi
   echo "Hermes profiles ready: 0"
   exit 0
 fi
 
+profiles_ready=0
 for _attempt in {1..90}; do
   # shellcheck disable=SC2016
   if "${compose[@]}" exec -T hermes sh -eu -c '
@@ -93,11 +99,32 @@ for _attempt in {1..90}; do
     done
     [ "$checked" -eq '"$runtime_profile_count"' ]
   '; then
-    echo "Hermes profiles ready: $profile_count"
-    exit 0
+    profiles_ready=1
+    break
   fi
   sleep 2
 done
 
-echo "Hermes profiles did not become ready" >&2
-exit 1
+if [[ "$profiles_ready" != "1" ]]; then
+  echo "Hermes profiles did not become ready" >&2
+  exit 1
+fi
+
+if [[ "$HERMES_REQUIRE_MCP_READY" == "true" ]]; then
+  mcp_url="$(
+    awk -F= '
+      $1 == "MCP_INTERNAL_BASE_URL" { count++; sub(/^[^=]*=/, ""); value=$0 }
+      END { if (count == 1) print value }
+    ' "$ENV_FILE"
+  )"
+  if [[ -z "$mcp_url" ]]; then
+    echo "MCP_INTERNAL_BASE_URL is missing or duplicated" >&2
+    exit 1
+  fi
+  "${compose[@]}" exec -T hermes \
+    /opt/hermes/.venv/bin/python - \
+    "$mcp_url" /opt/data/profiles "$profile_count" \
+    <"$ROOT_DIR/scripts/verify_hermes_mcp.py"
+fi
+
+echo "Hermes profiles ready: $profile_count"
