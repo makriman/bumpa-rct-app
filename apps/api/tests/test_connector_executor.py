@@ -12,6 +12,11 @@ from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import McpConnection, McpToolPermission, Tenant, User
 from app.services import connector_executor as connectors
+from app.services.home_assistant import (
+    HomeAssistantConnectionError,
+    encrypt_home_assistant_credentials,
+    validate_home_assistant_base_url,
+)
 
 
 def _client(handler: httpx.MockTransport) -> httpx.Client:
@@ -102,6 +107,185 @@ def test_connector_registry_dispatches_only_server_authorized_reads_and_writes(
         )
         assert read["rows"][1] == ["2500"]
         assert written["updated_rows"] == 1
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://assistant.example.com",
+        "https://127.0.0.1",
+        "https://192.168.1.20",
+        "https://assistant.local",
+        "https://assistant.example.com:8123",
+        "https://assistant.example.com/api",
+        "https://user:password@assistant.example.com",
+    ],
+)
+def test_home_assistant_requires_an_explicit_public_https_origin(value: str) -> None:
+    with pytest.raises(HomeAssistantConnectionError):
+        validate_home_assistant_base_url(value)
+    assert (
+        validate_home_assistant_base_url("https://Shop-Automation.Example.com/")
+        == "https://shop-automation.example.com"
+    )
+
+
+def test_home_assistant_reads_and_confirmed_writes_are_tenant_allowlisted() -> None:
+    factory = _factory()
+    settings = Settings(
+        app_env="test",
+        field_encryption_key="home-assistant-connector-test-key",
+    )
+    calls: list[tuple[str, str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/api/services":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "domain": "light",
+                        "services": {"turn_on": {}, "turn_off": {}},
+                    }
+                ],
+            )
+        if request.method == "POST":
+            assert request.url.path == "/api/services/light/turn_on"
+            assert json.loads(request.content)["entity_id"] == "light.shop"
+            return httpx.Response(200, json=[{"entity_id": "light.shop"}])
+        entity_id = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "entity_id": entity_id,
+                "state": "on",
+                "attributes": {
+                    "friendly_name": "Shop light",
+                    "private_blob": "must not be returned",
+                },
+                "last_changed": "2026-07-25T10:00:00Z",
+                "last_updated": "2026-07-25T10:00:00Z",
+            },
+        )
+
+    with factory() as db:
+        tenant = Tenant(slug="home-assistant", name="Home Assistant")
+        owner = User(primary_phone_e164="+2348000000088")
+        db.add_all((tenant, owner))
+        db.flush()
+        connection = McpConnection(
+            tenant_id=tenant.id,
+            created_by=owner.id,
+            provider="home_assistant",
+            status="active",
+            encrypted_credentials=encrypt_home_assistant_credentials(
+                settings,
+                base_url="https://shop-automation.example.com",
+                access_token="dedicated-home-assistant-test-token",  # noqa: S106
+            ),
+            read_only=False,
+            admin_approved=True,
+            allowed_resources=[
+                "home_assistant:entity:light.shop",
+                "home_assistant:service:light.turn_on",
+            ],
+        )
+        db.add(connection)
+        db.flush()
+        for tool_name, permission in (
+            ("list_entities", "read"),
+            ("get_state", "read"),
+            ("list_services", "read"),
+            ("call_service", "write_with_confirmation"),
+        ):
+            db.add(
+                McpToolPermission(
+                    tenant_id=tenant.id,
+                    mcp_connection_id=connection.id,
+                    tool_name=tool_name,
+                    permission=permission,
+                    created_by=owner.id,
+                )
+            )
+        db.commit()
+        transport = httpx.MockTransport(handler)
+
+        entities = connectors.execute_connector_read(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            connection_id=connection.id,
+            tool_name="list_entities",
+            tool_input={},
+            transport=transport,
+        )
+        services = connectors.execute_connector_read(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            connection_id=connection.id,
+            tool_name="list_services",
+            tool_input={},
+            transport=transport,
+        )
+        called = connectors.execute_connector_write(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            connection_id=connection.id,
+            tool_name="call_service",
+            tool_input={
+                "service": "light.turn_on",
+                "entity_id": "light.shop",
+                "data": {"brightness": 120},
+            },
+            idempotency_key="confirmed-home-assistant-call",
+            transport=transport,
+        )
+
+        assert entities["entities"] == [
+            {
+                "entity_id": "light.shop",
+                "state": "on",
+                "friendly_name": "Shop light",
+                "last_changed": "2026-07-25T10:00:00Z",
+                "last_updated": "2026-07-25T10:00:00Z",
+            }
+        ]
+        assert services["services"] == ["light.turn_on"]
+        assert called == {
+            "called": True,
+            "service": "light.turn_on",
+            "entity_id": "light.shop",
+            "result_count": 1,
+        }
+        assert all(call[2] == "Bearer dedicated-home-assistant-test-token" for call in calls)
+        with pytest.raises(connectors.ConnectorExecutionError, match="allowlist"):
+            connectors.execute_connector_read(
+                db,
+                settings,
+                tenant_id=tenant.id,
+                connection_id=connection.id,
+                tool_name="get_state",
+                tool_input={"entity_id": "lock.back_door"},
+                transport=transport,
+            )
+        with pytest.raises(connectors.ConnectorExecutionError, match="service data"):
+            connectors.execute_connector_write(
+                db,
+                settings,
+                tenant_id=tenant.id,
+                connection_id=connection.id,
+                tool_name="call_service",
+                tool_input={
+                    "service": "light.turn_on",
+                    "entity_id": "light.shop",
+                    "data": {"entity_id": "lock.back_door"},
+                },
+                idempotency_key="confirmed-but-target-overridden",
+                transport=transport,
+            )
 
 
 def test_google_drive_reads_exports_and_idempotent_writes_are_allowlisted() -> None:

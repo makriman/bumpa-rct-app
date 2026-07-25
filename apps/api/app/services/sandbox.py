@@ -124,6 +124,59 @@ class SandboxClient:
             max_response_bytes=2_097_152,
         )
 
+    def document_pages(
+        self,
+        *,
+        tenant_id: str,
+        workspace: str,
+        content: bytes,
+        mime_type: str,
+    ) -> dict[str, Any]:
+        if not content or len(content) > 16_777_216:
+            raise ValueError("Sandbox document exceeds the configured limit")
+        if mime_type != "application/pdf":
+            raise ValueError("Sandbox document format is unsupported")
+        return self._request(
+            "POST",
+            tenant_id=tenant_id,
+            workspace=workspace,
+            operation="document-pages",
+            payload={
+                "content_base64": base64.b64encode(content).decode("ascii"),
+                "mime_type": mime_type,
+            },
+            max_response_bytes=3_145_728,
+        )
+
+    def export_file(
+        self,
+        *,
+        tenant_id: str,
+        workspace: str,
+        path: str,
+        mime_type: str,
+    ) -> dict[str, Any]:
+        if not path.startswith("/workspace") or "\x00" in path or len(path) > 500:
+            raise ValueError("Sandbox export path must remain inside /workspace")
+        if mime_type not in {
+            "application/json",
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "text/csv",
+            "text/plain",
+            "video/mp4",
+        }:
+            raise ValueError("Sandbox export type is unsupported")
+        return self._request(
+            "POST",
+            tenant_id=tenant_id,
+            workspace=workspace,
+            operation="export",
+            payload={"path": path, "mime_type": mime_type},
+            max_response_bytes=12_000_000,
+        )
+
     def generate_image(
         self,
         *,

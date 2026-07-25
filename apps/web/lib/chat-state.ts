@@ -6,6 +6,7 @@ export type ConversationSummaryPage =
 export type ChatMessageView = components["schemas"]["ChatMessageView"];
 export type ChatMessagePage = components["schemas"]["ChatMessagePage"];
 export type ChatResponse = components["schemas"]["ChatResponse"];
+export type GeneratedMediaView = components["schemas"]["GeneratedMediaView"];
 
 export type ChatMessageItem = {
   id: string;
@@ -14,6 +15,7 @@ export type ChatMessageItem = {
   createdAt: string;
   delivery: "saved" | "sending" | "failed";
   source?: string;
+  generatedMedia?: GeneratedMediaView[];
 };
 
 export type FailedSend = {
@@ -203,6 +205,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             createdAt: new Date().toISOString(),
             delivery: "saved",
             source: action.source,
+            generatedMedia: action.response.generated_media ?? [],
           },
         ],
       };
@@ -286,5 +289,6 @@ export function apiMessagesToItems(
     createdAt: message.created_at,
     delivery: "saved",
     source: message.direction === "outbound" ? "Saved conversation" : undefined,
+    generatedMedia: message.generated_media ?? [],
   }));
 }

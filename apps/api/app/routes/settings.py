@@ -24,6 +24,7 @@ from app.db.models import (
 )
 from app.db.session import get_db, set_security_context
 from app.schemas import (
+    HomeAssistantConnect,
     McpAllowedResourcesUpdate,
     McpConnectionCreate,
     McpConnectionView,
@@ -37,6 +38,11 @@ from app.schemas import (
 )
 from app.services.audit import audit
 from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
+from app.services.home_assistant import (
+    HomeAssistantConnectionError,
+    encrypt_home_assistant_credentials,
+    validate_home_assistant_base_url,
+)
 from app.services.mcp_oauth import (
     McpOAuthError,
     build_authorization_url,
@@ -471,6 +477,59 @@ def update_mcp_allowed_resources(
     )
 
 
+@router.post(
+    "/mcp-connections/{connection_id}/home-assistant/connect",
+    response_model=McpConnectionView,
+)
+def connect_home_assistant(
+    connection_id: str,
+    payload: HomeAssistantConnect,
+    principal: Principal = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> McpConnectionView:
+    connection = _tenant_mcp_connection(db, principal, connection_id)
+    if connection.provider != "home_assistant":
+        raise HTTPException(status_code=404, detail="Home Assistant connection not found")
+    if not connection.admin_approved or connection.status not in {"approved", "active", "error"}:
+        raise HTTPException(status_code=409, detail="Operator approval is required first")
+    try:
+        base_url = validate_home_assistant_base_url(payload.base_url)
+        encrypted = encrypt_home_assistant_credentials(
+            settings,
+            base_url=base_url,
+            access_token=payload.access_token,
+        )
+    except HomeAssistantConnectionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    before = {
+        "status": connection.status,
+        "credentials_present": bool(connection.encrypted_credentials),
+    }
+    connection.encrypted_credentials = encrypted
+    connection.status = "active"
+    audit(
+        db,
+        actor_user_id=principal.user.id,
+        tenant_id=connection.tenant_id,
+        action="mcp.home_assistant.connected",
+        resource_type="mcp_connection",
+        resource_id=connection.id,
+        before=before,
+        after={
+            "status": connection.status,
+            "credentials_present": True,
+            "trusted_origin": base_url,
+        },
+    )
+    db.commit()
+    return _mcp_connection_view(
+        connection,
+        settings,
+        _connection_permissions(db, connection.id),
+    )
+
+
 @router.delete("/mcp-connections/{connection_id}", status_code=204)
 def delete_mcp_connection(
     connection_id: str,
@@ -774,7 +833,8 @@ def _validated_allowed_resources(values: list[str]) -> list[str]:
     normalized = sorted({value.strip() for value in values if value.strip()})
     pattern = re.compile(
         r"(?:drive:file|drive:folder|sheets:spreadsheet|gmail:label|"
-        r"gmail:recipient-domain|calendar:calendar|meta_ads:account):"
+        r"gmail:recipient-domain|calendar:calendar|meta_ads:account|"
+        r"home_assistant:entity|home_assistant:service):"
         r"[A-Za-z0-9@._-]+"
     )
     if any(len(value) > 300 or not pattern.fullmatch(value) for value in normalized):

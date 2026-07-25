@@ -16,6 +16,10 @@ from app.core.crypto import FieldCipher
 from app.db.models import McpConnection
 from app.providers.redaction import redact_text
 from app.schemas import McpProvider
+from app.services.home_assistant import (
+    HomeAssistantConnectionError,
+    decrypt_home_assistant_credentials,
+)
 from app.services.mcp_oauth import McpOAuthError, refresh_access_token
 from app.services.mcp_permissions import authorize_mcp_tool
 
@@ -98,7 +102,6 @@ def _execute(
     idempotency_key: str | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
-    token = _access_token(db, connection, settings, transport=transport)
     resources = set(connection.allowed_resources)
     timeout = httpx.Timeout(settings.mcp_oauth_request_timeout_seconds)
     with httpx.Client(
@@ -107,6 +110,23 @@ def _execute(
         trust_env=False,
         transport=transport,
     ) as client:
+        if connection.provider == "home_assistant":
+            try:
+                credentials = decrypt_home_assistant_credentials(
+                    settings,
+                    connection.encrypted_credentials,
+                )
+            except HomeAssistantConnectionError as exc:
+                raise ConnectorExecutionError(str(exc)) from exc
+            return _home_assistant(
+                client,
+                credentials.access_token,
+                credentials.base_url,
+                resources,
+                tool_name,
+                tool_input,
+            )
+        token = _access_token(db, connection, settings, transport=transport)
         if connection.provider == "google_drive":
             return _drive(client, token, resources, tool_name, tool_input, idempotency_key)
         if connection.provider == "google_sheets":
@@ -126,6 +146,150 @@ def _execute(
             )
     kind = "write" if write else "read"
     raise ConnectorExecutionError(f"The configured connector does not support this {kind}.")
+
+
+def _home_assistant(
+    client: httpx.Client,
+    token: str,
+    base_url: str,
+    resources: set[str],
+    tool_name: str,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_name == "list_entities":
+        all_approved = sorted(
+            item.removeprefix("home_assistant:entity:")
+            for item in resources
+            if item.startswith("home_assistant:entity:")
+        )
+        approved = all_approved[:100]
+        entities: list[dict[str, Any]] = []
+        for entity_id in approved:
+            payload = _json(
+                client,
+                "GET",
+                f"{base_url}/api/states/{quote(entity_id, safe='')}",
+                token,
+            )
+            entities.append(_home_assistant_state(payload))
+        return {
+            "entities": entities,
+            "count": len(entities),
+            "truncated": len(all_approved) > len(approved),
+            "untrusted_content": True,
+        }
+    if tool_name == "get_state":
+        entity_id = _home_assistant_identifier(
+            _string(values, "entity_id", maximum=200),
+            label="entity",
+        )
+        _require_resource(resources, f"home_assistant:entity:{entity_id}")
+        payload = _json(
+            client,
+            "GET",
+            f"{base_url}/api/states/{quote(entity_id, safe='')}",
+            token,
+        )
+        return {
+            "entity": _home_assistant_state(payload),
+            "untrusted_content": True,
+        }
+    if tool_name == "list_services":
+        raw = _json_value(client, "GET", f"{base_url}/api/services", token)
+        if not isinstance(raw, list):
+            raise ConnectorExecutionError("Home Assistant returned invalid service data.")
+        available: set[str] = set()
+        for group in raw[:200]:
+            if not isinstance(group, dict) or not isinstance(group.get("domain"), str):
+                continue
+            domain = group["domain"]
+            services = group.get("services")
+            if not isinstance(services, dict):
+                continue
+            for service in list(services)[:200]:
+                if isinstance(service, str):
+                    available.add(f"{domain}.{service}")
+        approved = sorted(
+            item.removeprefix("home_assistant:service:")
+            for item in resources
+            if item.startswith("home_assistant:service:")
+            and item.removeprefix("home_assistant:service:") in available
+        )
+        return {
+            "services": approved[:200],
+            "count": min(len(approved), 200),
+            "truncated": len(approved) > 200,
+        }
+    if tool_name == "call_service":
+        service = _home_assistant_identifier(
+            _string(values, "service", maximum=200),
+            label="service",
+        )
+        entity_id = _home_assistant_identifier(
+            _string(values, "entity_id", maximum=200),
+            label="entity",
+        )
+        _require_resource(resources, f"home_assistant:service:{service}")
+        _require_resource(resources, f"home_assistant:entity:{entity_id}")
+        domain, service_name = service.split(".", 1)
+        raw_data = values.get("data", {})
+        if not isinstance(raw_data, dict) or len(raw_data) > 50:
+            raise ConnectorExecutionError("Home Assistant service data is invalid.")
+        service_data: dict[str, Any] = {"entity_id": entity_id}
+        for key, value in raw_data.items():
+            if (
+                not isinstance(key, str)
+                or key == "entity_id"
+                or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", key)
+                or isinstance(value, (dict, list))
+                or len(str(value)) > 500
+            ):
+                raise ConnectorExecutionError("Home Assistant service data is invalid.")
+            service_data[key] = value
+        result = _json_value(
+            client,
+            "POST",
+            f"{base_url}/api/services/{quote(domain, safe='')}/{quote(service_name, safe='')}",
+            token,
+            json_body=service_data,
+        )
+        return {
+            "called": True,
+            "service": service,
+            "entity_id": entity_id,
+            "result_count": len(result) if isinstance(result, list) else 0,
+        }
+    raise ConnectorExecutionError("This Home Assistant tool is not supported.")
+
+
+def _home_assistant_identifier(value: str, *, label: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z0-9_]+", value):
+        raise ConnectorExecutionError(f"Home Assistant {label} is invalid.")
+    return value
+
+
+def _home_assistant_state(payload: dict[str, Any]) -> dict[str, Any]:
+    entity_id = payload.get("entity_id")
+    state = payload.get("state")
+    attributes = payload.get("attributes")
+    friendly_name = (
+        attributes.get("friendly_name")
+        if isinstance(attributes, dict) and isinstance(attributes.get("friendly_name"), str)
+        else None
+    )
+    if not isinstance(entity_id, str) or not isinstance(state, str):
+        raise ConnectorExecutionError("Home Assistant returned invalid entity data.")
+    return {
+        "entity_id": entity_id[:200],
+        "state": state[:500],
+        "friendly_name": friendly_name[:200] if friendly_name else None,
+        "last_changed": _bounded_optional_string(payload.get("last_changed"), 80),
+        "last_updated": _bounded_optional_string(payload.get("last_updated"), 80),
+    }
+
+
+def _bounded_optional_string(value: Any, maximum: int) -> str | None:
+    return value[:maximum] if isinstance(value, str) else None
 
 
 def _drive(
@@ -635,6 +799,29 @@ def _json(
     if not isinstance(payload, dict):
         raise ConnectorExecutionError("The connector returned invalid data.")
     return payload
+
+
+def _json_value(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    token: str,
+    *,
+    params: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> Any:
+    raw = _request(
+        client,
+        method,
+        url,
+        token,
+        params=params,
+        json_body=json_body,
+    )
+    try:
+        return json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConnectorExecutionError("The connector returned invalid data.") from exc
 
 
 def _bytes(

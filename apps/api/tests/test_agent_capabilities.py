@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import Settings
 from app.db.base import Base
 from app.db.models import (
+    AgentMessage,
     BumpaConnection,
     BumpaMetricSnapshot,
     BumpaOrder,
@@ -32,6 +33,7 @@ from app.providers.hermes import (
     HermesClient,
     HermesEndpoint,
 )
+from app.services import generated_media as generated_media_service
 from app.services.agent_actions import (
     AgentActionError,
     action_preview,
@@ -53,8 +55,14 @@ from app.services.business_tools import (
     tenant_store_context,
 )
 from app.services.connector_executor import ConnectorExecutionError
-from app.services.generated_media import generate_and_queue_image, generated_media_path
+from app.services.generated_media import (
+    GeneratedMediaError,
+    generate_and_queue_image,
+    generated_media_path,
+    queue_sandbox_file,
+)
 from app.services.media import MediaProcessingError, process_whatsapp_content
+from app.services.sandbox import SandboxProviderError
 from app.services.web_research import ResearchProviderError, search_web
 
 
@@ -606,6 +614,24 @@ def test_action_confirmation_is_exact_bound_expiring_and_single_use(
                 supplied_token=token,
                 decision="confirm",
             )
+        new_request_context = create_action_context_token(
+            settings,
+            tenant_id=tenant.id,
+            user_id=owner.id,
+            conversation_id=conversation.id,
+            channel="web",
+        )
+        retried_action, _retried_token = prepare_pending_action(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            connection_id=connection.id,
+            tool_name="send_message",
+            target_summary="Send this exact quotation to buyer@example.com.",
+            action_input=exact_input,
+            action_context_token=new_request_context,
+        )
+        assert retried_action.id != action.id
 
         second_input = {**exact_input, "subject": "A different exact action"}
         expiring, expiring_token = prepare_pending_action(
@@ -878,6 +904,7 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
     settings = _settings(
         artifact_root=tmp_path,
         managed_image_generation_enabled=True,
+        sandbox_tools_enabled=True,
         sandbox_worker_url="https://sandbox.example.com",
         sandbox_service_token=("sandbox-test-token-with-at-least-thirty-two-characters"),  # noqa: S106
     )
@@ -901,6 +928,16 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
             channel="web",
         )
         db.add(conversation)
+        db.flush()
+        inbound = AgentMessage(
+            tenant_id=tenant.id,
+            user_id=owner.id,
+            conversation_id=conversation.id,
+            channel="web",
+            direction="inbound",
+            content="Create a product poster and a weekly sales file.",
+        )
+        db.add(inbound)
         db.commit()
         context = create_action_context_token(
             settings,
@@ -908,6 +945,7 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
             user_id=owner.id,
             conversation_id=conversation.id,
             channel="web",
+            initiating_message_id=inbound.id,
         )
 
         queued = generate_and_queue_image(
@@ -923,6 +961,252 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
         assert media.tenant_id == tenant.id
         assert media.user_id == owner.id
         assert media.conversation_id == conversation.id
+        assert media.agent_message_id == inbound.id
         assert media.channel == "web"
         assert generated_media_path(settings, media).read_bytes() == png
         assert other.id not in media.storage_path
+
+        csv_content = b"week,sales\n2026-W30,125000\n"
+        monkeypatch.setattr(
+            "app.services.generated_media.SandboxClient.export_file",
+            lambda _client, **_kwargs: {
+                "content_base64": base64.b64encode(csv_content).decode("ascii"),
+                "mime_type": "text/csv",
+                "size_bytes": len(csv_content),
+            },
+        )
+        exported = queue_sandbox_file(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            workspace="conversation-1",
+            path="/workspace/weekly-sales.csv",
+            filename="weekly-sales.csv",
+            mime_type="text/csv",
+            action_context_token=context,
+        )
+        document = db.get(GeneratedAgentMedia, exported["media_id"])
+        assert document is not None
+        assert document.media_type == "document"
+        assert document.agent_message_id == inbound.id
+        assert document.filename == "weekly-sales.csv"
+        assert generated_media_path(settings, document).read_bytes() == csv_content
+
+        pdf_content = b"%PDF-1.7\nsanitized outbound fixture"
+        monkeypatch.setattr(
+            "app.services.generated_media.SandboxClient.export_file",
+            lambda _client, **_kwargs: {
+                "content_base64": base64.b64encode(pdf_content).decode("ascii"),
+                "mime_type": "application/pdf",
+                "size_bytes": len(pdf_content),
+            },
+        )
+        exported_pdf = queue_sandbox_file(
+            db,
+            settings,
+            tenant_id=tenant.id,
+            workspace="conversation-1",
+            path="/workspace/weekly-sales.pdf",
+            filename="weekly-sales.exe",
+            mime_type="application/pdf",
+            action_context_token=context,
+        )
+        pdf = db.get(GeneratedAgentMedia, exported_pdf["media_id"])
+        assert pdf is not None
+        assert pdf.media_type == "document"
+        assert pdf.filename == "weekly-sales.pdf"
+        assert generated_media_path(settings, pdf).read_bytes() == pdf_content
+
+
+@pytest.mark.parametrize(
+    ("content", "mime_type", "expected"),
+    [
+        (b"\x89PNG\r\n\x1a\nfixture", "image/png", ("image", "png")),
+        (b"\xff\xd8\xfffixture", "image/jpeg", ("image", "jpg")),
+        (b"\x00\x00\x00\x18ftypmp42", "video/mp4", ("video", "mp4")),
+        (b"%PDF-1.7\nfixture", "application/pdf", ("document", "pdf")),
+        (b"plain text", "text/plain", ("document", "txt")),
+        (b"column,value\nsales,20\n", "text/csv", ("document", "csv")),
+        (b'{"sales": 20}', "application/json", ("document", "json")),
+    ],
+)
+def test_generated_media_delivery_types_require_matching_safe_content(
+    content: bytes,
+    mime_type: str,
+    expected: tuple[str, str],
+) -> None:
+    assert generated_media_service._delivery_type(content, mime_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("content", "mime_type", "message"),
+    [
+        (b"\xff", "text/plain", "valid UTF-8"),
+        (b"unsafe\x00text", "text/csv", "binary data"),
+        (b"{invalid", "application/json", "JSON"),
+        (b"GIF89a", "image/gif", "unsupported"),
+        (b"not-a-png", "image/png", "unsupported"),
+    ],
+)
+def test_generated_media_rejects_mismatched_or_unsafe_content(
+    content: bytes,
+    mime_type: str,
+    message: str,
+) -> None:
+    with pytest.raises(GeneratedMediaError, match=message):
+        generated_media_service._delivery_type(content, mime_type)
+
+
+def test_generated_media_control_plane_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        artifact_root=tmp_path,
+        managed_image_generation_enabled=True,
+        sandbox_tools_enabled=True,
+        sandbox_worker_url="https://sandbox.example.com",
+        sandbox_service_token="sandbox-test-token-with-at-least-thirty-two-characters",  # noqa: S106
+    )
+    factory = _factory()
+    context = type(
+        "Context",
+        (),
+        {
+            "user_id": "user-1",
+            "conversation_id": "conversation-1",
+            "initiating_message_id": "message-1",
+            "channel": "web",
+        },
+    )()
+    monkeypatch.setattr(
+        generated_media_service,
+        "decode_action_context_token",
+        lambda *_args, **_kwargs: context,
+    )
+    with factory() as db:
+        with pytest.raises(GeneratedMediaError, match="disabled"):
+            generate_and_queue_image(
+                db,
+                settings.model_copy(update={"managed_image_generation_enabled": False}),
+                tenant_id="tenant-1",
+                prompt="poster",
+                action_context_token="context",  # noqa: S106
+            )
+        with pytest.raises(GeneratedMediaError, match="disabled"):
+            queue_sandbox_file(
+                db,
+                settings.model_copy(update={"sandbox_tools_enabled": False}),
+                tenant_id="tenant-1",
+                workspace="conversation-1",
+                path="/workspace/file.txt",
+                filename="file.txt",
+                mime_type="text/plain",
+                action_context_token="context",  # noqa: S106
+            )
+        with pytest.raises(GeneratedMediaError, match="filename"):
+            queue_sandbox_file(
+                db,
+                settings,
+                tenant_id="tenant-1",
+                workspace="conversation-1",
+                path="/workspace/file.txt",
+                filename="..",
+                mime_type="text/plain",
+                action_context_token="context",  # noqa: S106
+            )
+
+        def unavailable(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise SandboxProviderError("private provider detail")
+
+        monkeypatch.setattr(
+            "app.services.generated_media.SandboxClient.generate_image",
+            unavailable,
+        )
+        with pytest.raises(GeneratedMediaError, match="temporarily unavailable"):
+            generate_and_queue_image(
+                db,
+                settings,
+                tenant_id="tenant-1",
+                prompt="poster",
+                action_context_token="context",  # noqa: S106
+            )
+        monkeypatch.setattr(
+            "app.services.generated_media.SandboxClient.export_file",
+            unavailable,
+        )
+        with pytest.raises(GeneratedMediaError, match="safe delivery"):
+            queue_sandbox_file(
+                db,
+                settings,
+                tenant_id="tenant-1",
+                workspace="conversation-1",
+                path="/workspace/file.txt",
+                filename="file.txt",
+                mime_type="text/plain",
+                action_context_token="context",  # noqa: S106
+            )
+
+
+@pytest.mark.parametrize(
+    "provider_result",
+    [
+        {},
+        {"image_base64": "%%%"},
+        {"image_base64": base64.b64encode(b"GIF89a").decode("ascii")},
+    ],
+)
+def test_managed_image_rejects_invalid_provider_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider_result: dict[str, Any],
+) -> None:
+    settings = _settings(
+        artifact_root=tmp_path,
+        managed_image_generation_enabled=True,
+        sandbox_worker_url="https://sandbox.example.com",
+        sandbox_service_token="sandbox-test-token-with-at-least-thirty-two-characters",  # noqa: S106
+    )
+    monkeypatch.setattr(
+        generated_media_service,
+        "decode_action_context_token",
+        lambda *_args, **_kwargs: type(
+            "Context",
+            (),
+            {
+                "user_id": "user-1",
+                "conversation_id": "conversation-1",
+                "initiating_message_id": "message-1",
+                "channel": "web",
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        "app.services.generated_media.SandboxClient.generate_image",
+        lambda *_args, **_kwargs: provider_result,
+    )
+    with _factory()() as db, pytest.raises(GeneratedMediaError):
+        generate_and_queue_image(
+            db,
+            settings,
+            tenant_id="tenant-1",
+            prompt="poster",
+            action_context_token="context",  # noqa: S106
+        )
+
+
+def test_generated_media_path_cannot_escape_artifact_root(tmp_path: Path) -> None:
+    media = GeneratedAgentMedia(
+        tenant_id="tenant-1",
+        user_id="user-1",
+        conversation_id="conversation-1",
+        channel="web",
+        media_type="document",
+        mime_type="text/plain",
+        storage_path="../outside.txt",
+        byte_size=1,
+        checksum_sha256="0" * 64,
+        status="pending",
+    )
+    with pytest.raises(GeneratedMediaError, match="storage path"):
+        generated_media_path(_settings(artifact_root=tmp_path), media)

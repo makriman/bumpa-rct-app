@@ -5,7 +5,6 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,7 +14,7 @@ from app.core.crypto import FieldCipher
 from app.db.base import Base
 from app.db.models import (
     AgentMessage,
-    Conversation,
+    GeneratedAgentMedia,
     HermesProfile,
     ResearchEvent,
     ResearchReport,
@@ -24,7 +23,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import SessionLocal
-from app.providers.hermes import HermesEndpoint, HermesUnavailable
+from app.providers.hermes import HermesEndpoint, HermesResult, HermesUnavailable
 from app.services.audit import audit
 from app.services.chat import handle_chat
 from app.services.research_events import (
@@ -310,21 +309,20 @@ def test_failed_hermes_call_persists_only_sanitized_diagnostics_and_events(
             raise error
 
     monkeypatch.setattr("app.services.chat.HermesClient", FailingHermesClient)
-    with pytest.raises(HTTPException) as raised:
-        handle_chat(
-            db,
-            tenant=tenant,
-            user=user,
-            message="Help owner.private@example.com with sales",
-            channel="web",
-            external_message_id="client-private-id",
-            settings=settings,
-        )
+    conversation, inbound, outbound, _freshness = handle_chat(
+        db,
+        tenant=tenant,
+        user=user,
+        message="Help owner.private@example.com with sales",
+        channel="web",
+        external_message_id="client-private-id",
+        settings=settings,
+    )
 
-    assert raised.value.status_code == 503
-    assert raised.value.detail == "Agent service is temporarily unavailable"
-    assert db.scalar(select(Conversation)) is None
-    assert db.scalar(select(AgentMessage)) is None
+    assert conversation.id == inbound.conversation_id == outbound.conversation_id
+    assert "consultant service is temporarily unavailable" in outbound.content
+    assert "haven’t guessed or taken any external action" in outbound.content
+    assert len(db.scalars(select(AgentMessage)).all()) == 2
     system_error = db.scalar(select(SystemError))
     assert system_error is not None
     assert system_error.tenant_id == tenant.id
@@ -344,8 +342,10 @@ def test_failed_hermes_call_persists_only_sanitized_diagnostics_and_events(
         "hermes_call_started",
         "hermes_call_failed",
         "research_classification_completed",
+        "assistant_response_sent",
     ]
-    assert all(event.raw_text_present is False for event in events)
+    assert all(event.raw_text_present is False for event in events[:-1])
+    assert events[-1].raw_text_present is True
     failed = next(event for event in events if event.event_type == "hermes_call_failed")
     assert failed.business_outcome == {
         "error_code": "hermes_unavailable",
@@ -380,6 +380,96 @@ def test_failed_hermes_call_persists_only_sanitized_diagnostics_and_events(
         "client-private-id",
     ):
         assert sensitive not in serialized
+
+
+def test_chat_persists_the_initiating_message_for_cross_transaction_mcp_media(
+    db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = _tenant(db, "mcp-media-transaction", consent="pending")
+    user = User(primary_phone_e164="+2348000009091")
+    settings = get_settings().model_copy(
+        update={
+            "agent_backend": "hermes",
+            "agent_capabilities_v2": True,
+        }
+    )
+    profile = HermesProfile(
+        tenant_id=tenant.id,
+        profile_name="tenant_mcp_media_transaction",
+        profile_path="/var/lib/hermes/profiles/mcp-media-transaction",
+        provider="hermes",
+        api_internal_url="http://hermes:8700/v1",
+        api_port=8700,
+        encrypted_api_key=FieldCipher(settings.field_encryption_key).encrypt("private-api-key"),
+        status="active",
+    )
+    db.add_all((user, profile))
+    db.commit()
+    secondary_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+
+    class MediaProducingHermesClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def respond(
+            self,
+            _endpoint: HermesEndpoint,
+            *,
+            message: str,
+            business_context: str,
+        ) -> HermesResult:
+            assert "Current action context" in business_context
+            with secondary_factory() as tool_db:
+                initiating = tool_db.scalar(
+                    select(AgentMessage).where(
+                        AgentMessage.tenant_id == tenant.id,
+                        AgentMessage.external_message_id == "media-client-message",
+                    )
+                )
+                assert initiating is not None
+                tool_db.add(
+                    GeneratedAgentMedia(
+                        tenant_id=tenant.id,
+                        user_id=user.id,
+                        conversation_id=initiating.conversation_id,
+                        agent_message_id=initiating.id,
+                        channel="web",
+                        media_type="document",
+                        mime_type="text/csv",
+                        filename="weekly-sales.csv",
+                        storage_path="generated-media/test/weekly-sales.csv",
+                        byte_size=10,
+                        checksum_sha256="0" * 64,
+                        status="pending",
+                    )
+                )
+                tool_db.commit()
+            return HermesResult(
+                content="Your weekly sales file is ready.",
+                input_tokens=10,
+                output_tokens=7,
+                total_tokens=17,
+                latency_ms=12,
+            )
+
+    monkeypatch.setattr(
+        "app.services.chat.HermesClient",
+        MediaProducingHermesClient,
+    )
+    _conversation, inbound, outbound, _freshness = handle_chat(
+        db,
+        tenant=tenant,
+        user=user,
+        message="Create my weekly sales file.",
+        channel="web",
+        external_message_id="media-client-message",
+        settings=settings,
+    )
+    media = db.scalar(select(GeneratedAgentMedia))
+    assert media is not None
+    assert media.agent_message_id == outbound.id
+    assert media.agent_message_id != inbound.id
 
 
 def test_web_client_message_id_is_tenant_scoped_and_replays_within_tenant(

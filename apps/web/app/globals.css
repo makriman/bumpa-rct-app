@@ -2680,6 +2680,57 @@ a {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.bestie-message-media {
+  width: min(100%, 34rem);
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+.bestie-generated-image-link {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #dce8e1;
+  border-radius: 14px;
+  background: #f7faf8;
+}
+.bestie-generated-image {
+  width: 100%;
+  height: auto;
+  max-height: 32rem;
+  display: block;
+  object-fit: contain;
+}
+.bestie-generated-video {
+  width: 100%;
+  max-height: 32rem;
+  border-radius: 14px;
+  background: #101713;
+}
+.bestie-generated-document {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 13px;
+  border: 1px solid #dce8e1;
+  border-radius: 12px;
+  background: #f7faf8;
+  color: var(--forest-deep);
+  font-size: 0.82rem;
+  font-weight: 720;
+  text-decoration: none;
+}
+.bestie-generated-document:hover {
+  border-color: #b9d2c4;
+  background: #eff6f2;
+}
+.bestie-generated-document small {
+  flex: none;
+  color: #60736a;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
 .bestie-message-meta {
   display: flex;
   gap: 8px;

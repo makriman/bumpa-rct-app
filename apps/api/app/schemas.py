@@ -11,7 +11,14 @@ ReportFormat = Literal["csv", "jsonl", "pdf"]
 PlatformAdminRole = Literal["operator", "superadmin"]
 PlatformAccessRole = Literal["operator", "researcher"]
 PlatformRoleName = Literal["operator", "researcher", "superadmin"]
-McpProvider = Literal["google_drive", "google_sheets", "gmail", "calendar", "meta_ads"]
+McpProvider = Literal[
+    "google_drive",
+    "google_sheets",
+    "gmail",
+    "calendar",
+    "meta_ads",
+    "home_assistant",
+]
 McpToolPermissionValue = Literal["deny", "read", "write_with_confirmation"]
 AsyncJobStatus = Literal[
     "pending",
@@ -219,8 +226,9 @@ class ChatRequest(BaseModel):
 
 class GeneratedMediaView(BaseModel):
     id: str
-    media_type: Literal["image"]
+    media_type: Literal["document", "image", "video"]
     mime_type: str
+    filename: str | None = None
     byte_size: int
     url: str
 
@@ -252,6 +260,7 @@ class ChatMessageView(BaseModel):
     direction: Literal["inbound", "outbound"]
     content: str
     created_at: datetime
+    generated_media: list[GeneratedMediaView] = Field(default_factory=list)
 
 
 class ChatMessagePage(BaseModel):
@@ -293,6 +302,11 @@ class McpAdminConnectionView(McpConnectionView):
 class McpOAuthStartView(BaseModel):
     authorization_url: str
     expires_in_seconds: int
+
+
+class HomeAssistantConnect(BaseModel):
+    base_url: str = Field(min_length=12, max_length=500)
+    access_token: str = Field(min_length=20, max_length=16_384)
 
 
 class McpToolPermissionUpdate(BaseModel):

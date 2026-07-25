@@ -678,17 +678,10 @@ def _process_message(
                 )
         inbound.media_metadata = processed.metadata
         voice_reply_requested = _voice_reply_requested(processed.prompt)
-        progress = _WhatsAppProgress(
-            settings=settings,
-            event_id=event.id,
-            inbound_message_id=external_id,
-            phone=phone,
-            tenant_id=tenant.id,
-            user_id=user.id,
-            meta_sender=reply_sender,
-        )
-        progress.start()
-        try:
+        clarification = _low_confidence_clarification(processed)
+        if clarification is not None:
+            voice_reply_requested = False
+            processed.metadata["clarification_required"] = True
             _conversation, _incoming, outgoing, _freshness = handle_chat(
                 db,
                 tenant=tenant,
@@ -701,11 +694,38 @@ def _process_message(
                 stored_content_parts=processed.stored_content_parts,
                 reply_to_external_message_id=reply_to_meta_message_id,
                 media_metadata=processed.metadata,
-                event_callback=progress.on_event,
+                fixed_response=clarification,
                 settings=settings,
             )
-        finally:
-            progress.finish()
+        else:
+            progress = _WhatsAppProgress(
+                settings=settings,
+                event_id=event.id,
+                inbound_message_id=external_id,
+                phone=phone,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                meta_sender=reply_sender,
+            )
+            progress.start()
+            try:
+                _conversation, _incoming, outgoing, _freshness = handle_chat(
+                    db,
+                    tenant=tenant,
+                    user=user,
+                    message=processed.prompt,
+                    channel="whatsapp",
+                    conversation_id=active_conversation.id if active_conversation else None,
+                    external_message_id=external_id,
+                    provider_content_parts=processed.provider_content_parts,
+                    stored_content_parts=processed.stored_content_parts,
+                    reply_to_external_message_id=reply_to_meta_message_id,
+                    media_metadata=processed.metadata,
+                    event_callback=progress.on_event,
+                    settings=settings,
+                )
+            finally:
+                progress.finish()
     _deliver_text_chunks(
         db,
         event=event,
@@ -771,6 +791,7 @@ def _process_message(
             GeneratedAgentMedia.tenant_id == tenant.id,
             GeneratedAgentMedia.user_id == user.id,
             GeneratedAgentMedia.conversation_id == outgoing.conversation_id,
+            GeneratedAgentMedia.agent_message_id == outgoing.id,
             GeneratedAgentMedia.channel == "whatsapp",
             GeneratedAgentMedia.status == "pending",
         )
@@ -791,12 +812,8 @@ def _process_message(
                 phone=phone,
                 content=content,
                 mime_type=media.mime_type,
-                filename=(
-                    f"bumpa-bestie-{media.id}.jpg"
-                    if media.mime_type == "image/jpeg"
-                    else f"bumpa-bestie-{media.id}.png"
-                ),
-                media_type="image",
+                filename=media.filename or _generated_media_filename(media),
+                media_type=media.media_type,
                 voice=False,
                 settings=settings,
                 tenant_id=tenant.id,
@@ -823,7 +840,7 @@ def _process_message(
                     channel="whatsapp",
                     event_type="managed_media",
                     status="failed",
-                    media_type="image",
+                    media_type=media.media_type,
                     error_code="generated_media_delivery_failed",
                 )
             )
@@ -1184,6 +1201,19 @@ def _idempotency_key(event_id: str, purpose: str) -> str:
     return f"whatsapp:{digest}"
 
 
+def _generated_media_filename(media: GeneratedAgentMedia) -> str:
+    extension = {
+        "application/json": "json",
+        "application/pdf": "pdf",
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "text/csv": "csv",
+        "text/plain": "txt",
+        "video/mp4": "mp4",
+    }.get(media.mime_type, "bin")
+    return f"bumpa-bestie-{media.id}.{extension}"
+
+
 def _message_text(message: dict[str, Any]) -> str:
     message_type = str(message.get("type", "unknown"))
     if message_type == "text":
@@ -1253,6 +1283,34 @@ def _voice_reply_requested(prompt: str) -> bool:
     )
 
 
+def _low_confidence_clarification(processed: Any) -> str | None:
+    probability = processed.metadata.get("language_probability")
+    if not isinstance(probability, int | float) or probability >= 0.6:
+        return None
+    transcript = next(
+        (
+            part.get("text")
+            for part in processed.stored_content_parts
+            if isinstance(part, dict)
+            and part.get("type") == "transcript"
+            and isinstance(part.get("text"), str)
+        ),
+        None,
+    )
+    if not transcript:
+        return (
+            "I couldn’t transcribe that voice or video reliably. "
+            "Please resend it more clearly or type the request."
+        )
+    language = processed.metadata.get("language")
+    language_note = f" ({language})" if isinstance(language, str) and language else ""
+    return (
+        f"I heard{language_note}: “{transcript[:1_500]}”\n\n"
+        "I’m not confident that transcription is accurate, so I haven’t acted on it or "
+        "treated any names, amounts or instructions as fact. Please confirm or correct it."
+    )
+
+
 class _WhatsAppProgress:
     """Emit at most two real-tool-derived progress bubbles after the threshold."""
 
@@ -1318,9 +1376,18 @@ class _WhatsAppProgress:
         )
         if self._done.wait(delay):
             return
+        typing_interval = min(
+            20.0,
+            max(5.0, self._settings.whatsapp_progress_after_seconds),
+        )
+        last_typing_at = 0.0
         last_version = 0
         for index in range(1, 3):
             while not self._done.is_set():
+                current = monotonic()
+                if current - last_typing_at >= typing_interval:
+                    self._refresh_typing()
+                    last_typing_at = current
                 with self._lock:
                     latest = self._latest
                 if latest is not None and latest[0] > last_version:
@@ -1333,6 +1400,17 @@ class _WhatsAppProgress:
                 return
             if self._done.wait(self._settings.whatsapp_progress_after_seconds):
                 return
+
+    def _refresh_typing(self) -> None:
+        assert self._meta_sender is not None
+        try:
+            MetaWhatsAppClient.for_inbound_reply(
+                self._settings,
+                waba_id=self._meta_sender[0],
+                phone_number_id=self._meta_sender[1],
+            ).mark_read(self._inbound_message_id, typing=True)
+        except (MetaProviderError, ValueError):
+            return
 
     def _send(self, index: int, body: str) -> None:
         assert self._meta_sender is not None

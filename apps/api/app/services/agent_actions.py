@@ -36,6 +36,8 @@ class ActionContext:
     user_id: str
     conversation_id: str
     channel: str
+    request_id: str
+    initiating_message_id: str | None
     expires_at: int
 
 
@@ -46,12 +48,15 @@ def create_action_context_token(
     user_id: str,
     conversation_id: str,
     channel: str,
+    initiating_message_id: str | None = None,
 ) -> str:
     payload = {
         "tenant_id": tenant_id,
         "user_id": user_id,
         "conversation_id": conversation_id,
         "channel": channel,
+        "request_id": new_id(),
+        "initiating_message_id": initiating_message_id,
         "expires_at": int(utcnow().timestamp()) + ACTION_CONTEXT_TTL_SECONDS,
     }
     encoded = _encode_json(payload)
@@ -75,6 +80,14 @@ def decode_action_context_token(
             user_id=str(payload["user_id"]),
             conversation_id=str(payload["conversation_id"]),
             channel=str(payload["channel"]),
+            request_id=str(
+                payload.get("request_id") or hashlib.sha256(encoded.encode("ascii")).hexdigest()
+            ),
+            initiating_message_id=(
+                str(payload["initiating_message_id"])
+                if payload.get("initiating_message_id")
+                else None
+            ),
             expires_at=int(payload["expires_at"]),
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -85,6 +98,7 @@ def decode_action_context_token(
         or context.channel not in {"web", "whatsapp"}
         or not context.user_id
         or not context.conversation_id
+        or not context.request_id
     ):
         raise AgentActionError("The action context is invalid or expired.")
     return context
@@ -134,7 +148,7 @@ def prepare_pending_action(
     idempotency_key = hashlib.sha256(
         (
             f"{tenant_id}\0{context.user_id}\0{context.conversation_id}\0"
-            f"{connection_id}\0{tool_name}\0{serialized_input}"
+            f"{context.request_id}\0{connection_id}\0{tool_name}\0{serialized_input}"
         ).encode()
     ).hexdigest()
     existing = db.scalar(

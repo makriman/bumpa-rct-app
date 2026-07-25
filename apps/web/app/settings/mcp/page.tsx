@@ -29,6 +29,8 @@ const descriptions: Record<string, string> = {
   gmail: "Search approved messages without exposing your mailbox credentials.",
   calendar: "Use upcoming business commitments as planning context.",
   meta_ads: "Review approved campaign performance alongside store activity.",
+  home_assistant:
+    "Use only explicitly approved shop devices and services; private-network discovery stays off.",
 };
 
 type ConnectionRequest = {
@@ -51,6 +53,11 @@ export default function McpPage() {
   const [toast, setToast] = useState("");
   const [request, setRequest] = useState<ConnectionRequest | null>(null);
   const [writeRequest, setWriteRequest] = useState<WriteRequest | null>(null);
+  const [homeAssistant, setHomeAssistant] = useState<McpConnection | null>(
+    null,
+  );
+  const [homeAssistantUrl, setHomeAssistantUrl] = useState("");
+  const [homeAssistantToken, setHomeAssistantToken] = useState("");
   const [revoke, setRevoke] = useState<McpConnection | null>(null);
 
   useEffect(() => {
@@ -174,6 +181,38 @@ export default function McpPage() {
     }
   }
 
+  async function connectHomeAssistant() {
+    if (!homeAssistant || busy) return;
+    const operation = `home-assistant:${homeAssistant.id}`;
+    setBusy(operation);
+    setError("");
+    try {
+      await apiRequest(
+        `/settings/mcp-connections/${homeAssistant.id}/home-assistant/connect`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            base_url: homeAssistantUrl,
+            access_token: homeAssistantToken,
+          }),
+        },
+      );
+      await connections.reload();
+      setHomeAssistant(null);
+      setHomeAssistantUrl("");
+      setHomeAssistantToken("");
+      setToast(
+        "Home Assistant connected. Only approved entities and services are available to Bestie.",
+      );
+    } catch (reason) {
+      setError(
+        messageFor(reason, "Home Assistant could not be connected safely."),
+      );
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function revokeConnection() {
     if (!revoke || busy) return;
     const operation = `revoke:${revoke.id}`;
@@ -185,7 +224,7 @@ export default function McpPage() {
       });
       await connections.reload();
       setRevoke(null);
-      setToast("Connection revoked. Stored OAuth credentials were removed.");
+      setToast("Connection revoked. Stored provider credentials were removed.");
     } catch (reason) {
       setError(messageFor(reason, "The connection could not be revoked."));
     } finally {
@@ -210,7 +249,7 @@ export default function McpPage() {
       <div className="alert alert-info">
         Bumpa Bestie never accepts arbitrary MCP server addresses. Every
         connector comes from the curated connection catalogue, starts read-only,
-        requires a security review, and stores OAuth tokens encrypted. A
+        requires a security review, and stores provider credentials encrypted. A
         permitted write still requires fresh confirmation at the moment it runs.
       </div>
       {error && (
@@ -249,6 +288,7 @@ export default function McpPage() {
                 live={isLive}
                 onRequest={(readOnly) => setRequest({ item, readOnly })}
                 onOAuth={(value) => void beginOAuth(value)}
+                onManualConnect={(value) => setHomeAssistant(value)}
                 onPermission={(value, tool, permission) => {
                   if (permission === "write_with_confirmation") {
                     setWriteRequest({ connection: value, tool });
@@ -267,6 +307,11 @@ export default function McpPage() {
         onCloseRequest={() => setRequest(null)}
         onCloseRevoke={() => setRevoke(null)}
         onCloseWrite={() => setWriteRequest(null)}
+        onCloseHomeAssistant={() => {
+          setHomeAssistant(null);
+          setHomeAssistantUrl("");
+          setHomeAssistantToken("");
+        }}
         onCreate={createConnection}
         onEnableWrite={() =>
           writeRequest
@@ -277,7 +322,13 @@ export default function McpPage() {
               )
             : Promise.resolve()
         }
+        onConnectHomeAssistant={connectHomeAssistant}
         onRevoke={revokeConnection}
+        homeAssistant={homeAssistant}
+        homeAssistantToken={homeAssistantToken}
+        homeAssistantUrl={homeAssistantUrl}
+        onHomeAssistantToken={setHomeAssistantToken}
+        onHomeAssistantUrl={setHomeAssistantUrl}
         request={request}
         revoke={revoke}
         writeRequest={writeRequest}
@@ -292,23 +343,37 @@ function McpDialogs({
   onCloseRequest,
   onCloseRevoke,
   onCloseWrite,
+  onCloseHomeAssistant,
   onCreate,
   onEnableWrite,
+  onConnectHomeAssistant,
   onRevoke,
   request,
   revoke,
   writeRequest,
+  homeAssistant,
+  homeAssistantToken,
+  homeAssistantUrl,
+  onHomeAssistantToken,
+  onHomeAssistantUrl,
 }: {
   busy: string;
   onCloseRequest: () => void;
   onCloseRevoke: () => void;
   onCloseWrite: () => void;
+  onCloseHomeAssistant: () => void;
   onCreate: () => Promise<void>;
   onEnableWrite: () => Promise<void>;
+  onConnectHomeAssistant: () => Promise<void>;
   onRevoke: () => Promise<void>;
   request: ConnectionRequest | null;
   revoke: McpConnection | null;
   writeRequest: WriteRequest | null;
+  homeAssistant: McpConnection | null;
+  homeAssistantToken: string;
+  homeAssistantUrl: string;
+  onHomeAssistantToken: (value: string) => void;
+  onHomeAssistantUrl: (value: string) => void;
 }) {
   return (
     <>
@@ -343,8 +408,8 @@ function McpDialogs({
             <strong>
               {request.readOnly ? "read-only" : "controlled-write"}
             </strong>{" "}
-            mode. It does not open an OAuth window until the security review is
-            complete.
+            mode. Authorization or a trusted-instance connection remains locked
+            until the security review is complete.
           </p>
           {!request.readOnly && (
             <div className="alert alert-warning">
@@ -388,6 +453,64 @@ function McpDialogs({
           </p>
         </Modal>
       )}
+      {homeAssistant && (
+        <Modal
+          title="Connect Home Assistant"
+          onClose={() => !busy && onCloseHomeAssistant()}
+          actions={
+            <>
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={onCloseHomeAssistant}
+                disabled={Boolean(busy)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                onClick={() => void onConnectHomeAssistant()}
+                disabled={
+                  Boolean(busy) ||
+                  homeAssistantUrl.trim().length < 12 ||
+                  homeAssistantToken.trim().length < 20
+                }
+              >
+                {busy ? "Connecting…" : "Connect trusted instance"}
+              </button>
+            </>
+          }
+        >
+          <p>
+            Use an explicit public HTTPS Home Assistant URL and a dedicated
+            long-lived token. Bestie never scans your private network.
+          </p>
+          <label className="field">
+            <span>Home Assistant URL</span>
+            <input
+              type="url"
+              value={homeAssistantUrl}
+              onChange={(event) => onHomeAssistantUrl(event.target.value)}
+              placeholder="https://your-instance.example.com"
+              autoComplete="url"
+            />
+          </label>
+          <label className="field">
+            <span>Long-lived access token</span>
+            <input
+              type="password"
+              value={homeAssistantToken}
+              onChange={(event) => onHomeAssistantToken(event.target.value)}
+              autoComplete="off"
+            />
+          </label>
+          <div className="alert alert-warning">
+            Only entities and services in the approved allowlist can be used.
+            Service calls still require an exact preview and fresh confirmation.
+          </div>
+        </Modal>
+      )}
       {revoke && (
         <Modal
           title={`Revoke ${titleCase(revoke.provider)}`}
@@ -414,7 +537,7 @@ function McpDialogs({
           }
         >
           <p>
-            Access stops immediately. Encrypted OAuth credentials and tool
+            Access stops immediately. Encrypted provider credentials and tool
             permissions are removed, while the audit record is retained.
           </p>
         </Modal>
@@ -430,6 +553,7 @@ function ConnectionCard({
   live,
   onRequest,
   onOAuth,
+  onManualConnect,
   onPermission,
   onRevoke,
 }: {
@@ -439,6 +563,7 @@ function ConnectionCard({
   live: boolean;
   onRequest: (readOnly: boolean) => void;
   onOAuth: (connection: McpConnection) => void;
+  onManualConnect: (connection: McpConnection) => void;
   onPermission: (
     connection: McpConnection,
     tool: McpRegistryTool,
@@ -450,6 +575,10 @@ function ConnectionCard({
     connection?.admin_approved &&
     connection.oauth_available &&
     ["approved", "oauth_in_progress", "active"].includes(connection.status);
+  const canConnectManually =
+    connection?.admin_approved &&
+    item.connection_method === "manual_token" &&
+    ["approved", "active", "error"].includes(connection.status);
   return (
     <Card className="connection-card">
       <div className="connection-icon" aria-hidden="true">
@@ -568,6 +697,21 @@ function ConnectionCard({
                     : connection.status === "active"
                       ? "Reauthorize"
                       : "Authorize provider"}
+                </button>
+              )}
+              {canConnectManually && (
+                <button
+                  type="button"
+                  className="button button-primary button-small"
+                  disabled={!live || Boolean(busy)}
+                  aria-busy={busy === `home-assistant:${connection.id}`}
+                  onClick={() => onManualConnect(connection)}
+                >
+                  {busy === `home-assistant:${connection.id}`
+                    ? "Connecting…"
+                    : connection.status === "active"
+                      ? "Replace token"
+                      : "Connect trusted instance"}
                 </button>
               )}
               <button

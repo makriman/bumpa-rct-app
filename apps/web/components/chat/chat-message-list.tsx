@@ -124,6 +124,53 @@ export function ChatMessageList({
             )}
             <div className="bestie-message-body">
               <div className="bestie-message-text">{message.content}</div>
+              {message.generatedMedia?.length ? (
+                <div
+                  className="bestie-message-media"
+                  aria-label="Files from Bumpa Bestie"
+                >
+                  {message.generatedMedia.map((media) =>
+                    media.media_type === "image" ? (
+                      <a
+                        className="bestie-generated-image-link"
+                        href={media.url}
+                        key={media.id}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <Image
+                          className="bestie-generated-image"
+                          src={media.url}
+                          alt={media.filename ?? "Image from Bumpa Bestie"}
+                          width={640}
+                          height={480}
+                          unoptimized
+                        />
+                      </a>
+                    ) : media.media_type === "video" ? (
+                      <video
+                        className="bestie-generated-video"
+                        controls
+                        key={media.id}
+                        preload="metadata"
+                      >
+                        <source src={media.url} type={media.mime_type} />
+                        Your browser cannot play this video.
+                      </video>
+                    ) : (
+                      <a
+                        className="bestie-generated-document"
+                        href={media.url}
+                        key={media.id}
+                        download={media.filename ?? true}
+                      >
+                        <span>{media.filename ?? "Download document"}</span>
+                        <small>{formatFileSize(media.byte_size)}</small>
+                      </a>
+                    ),
+                  )}
+                </div>
+              ) : null}
               <div className="bestie-message-meta">
                 <span>
                   {message.direction === "outbound" ? "Bumpa Bestie" : "You"} ·{" "}
@@ -174,4 +221,10 @@ export function ChatMessageList({
       </div>
     </div>
   );
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

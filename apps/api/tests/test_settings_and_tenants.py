@@ -121,7 +121,7 @@ def test_tenant_profile_consent_and_settings_lifecycle(client: TestClient) -> No
     assert bumpa.json()["store_timezone"] == "Africa/Lagos"
     assert bumpa.json()["store_currency"] == "NGN"
     assert client.get("/v1/hermes/profile", headers=owner).json()["provider"] == "local"
-    assert len(client.get("/v1/mcp/registry", headers=owner).json()) == 5
+    assert len(client.get("/v1/mcp/registry", headers=owner).json()) == 6
     connection = client.post(
         "/v1/settings/mcp-connections",
         headers=owner,

@@ -131,6 +131,21 @@ PROVIDERS: dict[McpProvider, ProviderDefinition] = {
         ),
         uses_pkce=False,
     ),
+    "home_assistant": ProviderDefinition(
+        provider="home_assistant",
+        name="Home Assistant",
+        authorization_url="",
+        exchange_url="",
+        read_scopes=(),
+        write_scopes=(),
+        tools=(
+            McpTool("list_entities", "List approved entities", "read"),
+            McpTool("get_state", "Read an approved entity state", "read"),
+            McpTool("list_services", "List approved services", "read"),
+            McpTool("call_service", "Call an approved service", "write"),
+        ),
+        uses_pkce=False,
+    ),
 }
 
 
@@ -141,7 +156,13 @@ def registry(settings: Settings) -> list[dict[str, Any]]:
             {
                 "provider": definition.provider,
                 "name": definition.name,
-                "enabled": oauth_client(settings, definition.provider) is not None,
+                "enabled": (
+                    definition.provider == "home_assistant"
+                    or oauth_client(settings, definition.provider) is not None
+                ),
+                "connection_method": (
+                    "manual_token" if definition.provider == "home_assistant" else "oauth"
+                ),
                 "default_mode": "read_only",
                 "tools": [
                     {"name": tool.name, "label": tool.label, "kind": tool.kind}
@@ -154,6 +175,8 @@ def registry(settings: Settings) -> list[dict[str, Any]]:
 
 def oauth_client(settings: Settings, provider: McpProvider) -> OAuthClient | None:
     definition = PROVIDERS[provider]
+    if provider == "home_assistant":
+        return None
     if provider == "meta_ads":
         if not settings.mcp_meta_ads_oauth_enabled:
             return None
@@ -439,6 +462,10 @@ def revoke_oauth_token(
     """
 
     if not encrypted_credentials:
+        return True
+    if provider == "home_assistant":
+        # Long-lived tokens have no standard remote revocation endpoint. Local
+        # deletion is immediate; the tenant can also revoke the token in HA.
         return True
     try:
         bundle = json.loads(FieldCipher.from_settings(settings).decrypt(encrypted_credentials))

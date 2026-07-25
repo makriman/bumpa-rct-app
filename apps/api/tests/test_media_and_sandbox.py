@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from typing import Any
 
 import httpx
 import pytest
+from pypdf import PdfWriter
 
 from app.core.config import Settings
 from app.services.media import (
@@ -118,6 +120,25 @@ def test_whatsapp_structured_document_video_and_speech_fallbacks(
             settings=speech_disabled,
             meta_client=_MediaClient("audio/ogg", b"voice"),  # type: ignore[arg-type]
         )
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    blank_pdf = io.BytesIO()
+    writer.write(blank_pdf)
+    monkeypatch.setattr(
+        "app.services.media.SandboxClient.document_pages",
+        lambda _client, **_kwargs: {"pages": [base64.b64encode(b"scanned-page").decode("ascii")]},
+    )
+    scanned = process_whatsapp_content(
+        message={"type": "document", "document": {"id": "scanned-pdf-12345"}},
+        settings=settings,
+        meta_client=_MediaClient("application/pdf", blank_pdf.getvalue()),  # type: ignore[arg-type]
+        tenant_id="tenant-123456",
+        workspace="conversation-1",
+    )
+    assert scanned.metadata["document_extraction"] == "vision_ocr"
+    assert scanned.metadata["document_page_count"] == 1
+    assert any(part["type"] == "image_url" for part in scanned.provider_content_parts)
 
 
 def test_safe_document_and_voice_generation_boundaries() -> None:
@@ -275,6 +296,24 @@ def test_sandbox_client_routes_every_operation_and_sanitizes_failures() -> None:
         content=b"video",
         mime_type="video/mp4",
     )["ok"]
+    assert client.document_pages(
+        tenant_id="tenant-123456",
+        workspace="session-1",
+        content=b"%PDF fixture",
+        mime_type="application/pdf",
+    )["ok"]
+    assert client.export_file(
+        tenant_id="tenant-123456",
+        workspace="session-1",
+        path="/workspace/plan.csv",
+        mime_type="text/csv",
+    )["ok"]
+    assert client.export_file(
+        tenant_id="tenant-123456",
+        workspace="session-1",
+        path="/workspace/plan.pdf",
+        mime_type="application/pdf",
+    )["ok"]
     assert (
         client.generate_image(
             tenant_id="tenant-123456",
@@ -306,6 +345,20 @@ def test_sandbox_client_routes_every_operation_and_sanitizes_failures() -> None:
             workspace="session-1",
             content=b"video",
             mime_type="video/avi",
+        )
+    with pytest.raises(ValueError, match="format"):
+        client.document_pages(
+            tenant_id="tenant-123456",
+            workspace="session-1",
+            content=b"document",
+            mime_type="application/msword",
+        )
+    with pytest.raises(ValueError, match="type"):
+        client.export_file(
+            tenant_id="tenant-123456",
+            workspace="session-1",
+            path="/workspace/macro.xlsm",
+            mime_type="application/vnd.ms-excel.sheet.macroEnabled.12",
         )
     with pytest.raises(ValueError, match="URL"):
         SandboxClient(_settings(sandbox_worker_url="http://localhost"))

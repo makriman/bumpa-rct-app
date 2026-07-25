@@ -530,6 +530,13 @@
             "title": "Direction",
             "type": "string"
           },
+          "generated_media": {
+            "items": {
+              "$ref": "#/components/schemas/GeneratedMediaView"
+            },
+            "title": "Generated Media",
+            "type": "array"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -732,12 +739,27 @@
             "title": "Byte Size",
             "type": "integer"
           },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
           "id": {
             "title": "Id",
             "type": "string"
           },
           "media_type": {
-            "const": "image",
+            "enum": [
+              "document",
+              "image",
+              "video"
+            ],
             "title": "Media Type",
             "type": "string"
           },
@@ -936,6 +958,28 @@
         "title": "HermesRestartView",
         "type": "object"
       },
+      "HomeAssistantConnect": {
+        "properties": {
+          "access_token": {
+            "maxLength": 16384,
+            "minLength": 20,
+            "title": "Access Token",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 500,
+            "minLength": 12,
+            "title": "Base Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_url",
+          "access_token"
+        ],
+        "title": "HomeAssistantConnect",
+        "type": "object"
+      },
       "McpAdminConnectionView": {
         "properties": {
           "admin_approved": {
@@ -991,7 +1035,8 @@
               "google_sheets",
               "gmail",
               "calendar",
-              "meta_ads"
+              "meta_ads",
+              "home_assistant"
             ],
             "title": "Provider",
             "type": "string"
@@ -1095,7 +1140,8 @@
               "google_sheets",
               "gmail",
               "calendar",
-              "meta_ads"
+              "meta_ads",
+              "home_assistant"
             ],
             "title": "Provider",
             "type": "string"
@@ -1159,7 +1205,8 @@
               "google_sheets",
               "gmail",
               "calendar",
-              "meta_ads"
+              "meta_ads",
+              "home_assistant"
             ],
             "title": "Provider",
             "type": "string"
@@ -10907,6 +10954,106 @@
           }
         },
         "summary": "Delete Mcp Connection",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/v1/settings/mcp-connections/{connection_id}/home-assistant/connect": {
+      "post": {
+        "operationId": "connect_home_assistant_v1_settings_mcp_connections__connection_id__home_assistant_connect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "bb_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Bb Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HomeAssistantConnect"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connect Home Assistant",
         "tags": [
           "settings"
         ]

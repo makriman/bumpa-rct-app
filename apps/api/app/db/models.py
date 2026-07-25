@@ -880,9 +880,14 @@ class GeneratedAgentMedia(IdMixin, TimestampMixin, Base):
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    agent_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL"),
+        index=True,
+    )
     channel: Mapped[str] = mapped_column(String(24))
     media_type: Mapped[str] = mapped_column(String(24), default="image")
     mime_type: Mapped[str] = mapped_column(String(100))
+    filename: Mapped[str | None] = mapped_column(String(200))
     storage_path: Mapped[str] = mapped_column(String(500))
     byte_size: Mapped[int] = mapped_column(Integer)
     checksum_sha256: Mapped[str] = mapped_column(String(64))
@@ -894,7 +899,8 @@ class McpConnection(IdMixin, TimestampMixin, Base):
     __tablename__ = "mcp_connections"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('google_drive', 'google_sheets', 'gmail', 'calendar', 'meta_ads')",
+            "provider IN ('google_drive', 'google_sheets', 'gmail', 'calendar', "
+            "'meta_ads', 'home_assistant')",
             name="ck_mcp_connections_provider",
         ),
         CheckConstraint(
