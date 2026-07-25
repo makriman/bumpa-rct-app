@@ -868,10 +868,15 @@ docker exec \
 "${compose[@]}" --profile tools run --rm migrate
 "${compose[@]}" --profile tools run --rm --no-deps \
   hermes-profile-reconcile
-"${compose[@]}" up -d --wait --wait-timeout 180 hermes
-ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
 "${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \
-  api web admin-web research-web worker scheduler hermes caddy
+  api web admin-web research-web worker scheduler
+# Hermes profiles must connect only after the private API and tenant MCP are
+# reachable. Starting Hermes before the API exhausts its bounded MCP retries and
+# parks the server until a manual reconnect, leaving Claude with summary context
+# but no exact business tools.
+HERMES_REQUIRE_MCP_READY=true \
+  ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
+"${compose[@]}" up -d --wait --wait-timeout 180 caddy
 run_production_smoke
 
 for service in caddy postgres redis api web admin-web research-web worker scheduler hermes; do

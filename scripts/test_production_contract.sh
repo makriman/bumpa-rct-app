@@ -1166,9 +1166,14 @@ role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' script
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
 profile_materialize_line="$(grep -n -F '  hermes-profile-reconcile' scripts/deploy.sh | cut -d: -f1)"
 reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
+mcp_requirement_line="$(grep -n -F 'HERMES_REQUIRE_MCP_READY=true' scripts/deploy.sh | cut -d: -f1)"
+caddy_start_line="$(grep -n -F '"${compose[@]}" up -d --wait --wait-timeout 180 caddy' scripts/deploy.sh | cut -d: -f1)"
 # The following patterns intentionally match literal shell source.
 # shellcheck disable=SC2016
 application_start_line="$(grep -n -F -- '--profile async up -d --wait --wait-timeout 240 --remove-orphans' scripts/deploy.sh | cut -d: -f1)"
+application_start_block="$(
+  sed -n "${application_start_line},$((application_start_line + 1))p" scripts/deploy.sh
+)"
 require_single_line_number stop_line "$stop_line"
 require_single_line_number image_pull_line "$image_pull_line"
 require_single_line_number target_auth_secret_preflight_line "$target_auth_secret_preflight_line"
@@ -1184,6 +1189,8 @@ require_single_line_number role_init_line "$role_init_line"
 require_single_line_number migrate_line "$migrate_line"
 require_single_line_number profile_materialize_line "$profile_materialize_line"
 require_single_line_number reconcile_line "$reconcile_line"
+require_single_line_number mcp_requirement_line "$mcp_requirement_line"
+require_single_line_number caddy_start_line "$caddy_start_line"
 require_single_line_number application_start_line "$application_start_line"
 if [[ -z "$stop_line" || -z "$image_pull_line" \
   || -z "$target_auth_secret_preflight_line" \
@@ -1371,13 +1378,31 @@ if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migr
   echo "Deployment does not reconcile the application role before migrations" >&2
   exit 1
 fi
-if [[ -z "$profile_materialize_line" || -z "$reconcile_line" || -z "$application_start_line" \
+if [[ -z "$profile_materialize_line" || -z "$application_start_line" \
+  || -z "$mcp_requirement_line" || -z "$reconcile_line" || -z "$caddy_start_line" \
   || "$migrate_line" -ge "$profile_materialize_line" \
-  || "$profile_materialize_line" -ge "$reconcile_line" \
-  || "$reconcile_line" -ge "$application_start_line" ]]; then
-  echo "Deployment does not reconcile staged Hermes profiles between migration and application startup" >&2
+  || "$profile_materialize_line" -ge "$application_start_line" \
+  || "$application_start_line" -ge "$mcp_requirement_line" \
+  || "$mcp_requirement_line" -ge "$reconcile_line" \
+  || "$reconcile_line" -ge "$caddy_start_line" ]]; then
+  echo "Deployment does not start the private API, verify Hermes MCP, then open ingress" >&2
   exit 1
 fi
+if [[ "$application_start_block" != *"api web admin-web research-web worker scheduler"* \
+  || "$application_start_block" == *"hermes"* \
+  || "$application_start_block" == *"caddy"* ]]; then
+  echo "Deployment starts Hermes or public ingress before private API readiness" >&2
+  exit 1
+fi
+grep -Fq 'HERMES_REQUIRE_MCP_READY' scripts/reconcile_hermes_profiles.sh
+grep -Fq 'up -d --no-deps --force-recreate hermes' scripts/reconcile_hermes_profiles.sh
+if grep -Fq 'Hermes container is not running' scripts/reconcile_hermes_profiles.sh; then
+  echo "Hermes reconciliation cannot bootstrap a fresh deployment" >&2
+  exit 1
+fi
+grep -Fq '/opt/hermes/.venv/bin/python -' scripts/reconcile_hermes_profiles.sh
+grep -Fq '<"$ROOT_DIR/scripts/verify_hermes_mcp.py"' scripts/reconcile_hermes_profiles.sh
+grep -Fq 'REQUIRED_TOOLS = frozenset(' scripts/verify_hermes_mcp.py
 if grep -Fq "export CADDY_IMAGE=\"\$previous_caddy_image\"" scripts/deploy.sh; then
   echo "Deployment attempts a backward infrastructure rollback" >&2
   exit 1
