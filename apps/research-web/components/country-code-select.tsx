@@ -318,7 +318,11 @@ export default function CountryCodeSelect({
 
   const choose = (country: PhoneCountry) => {
     onChange(country.iso);
-    close(true);
+    // The trigger remains mounted while the popover closes, so restore focus
+    // synchronously. A requestAnimationFrame here can race a fast user's next
+    // input and steal focus after they have started typing their number.
+    close();
+    triggerRef.current?.focus({ preventScroll: true });
   };
 
   if (!selected) return null;

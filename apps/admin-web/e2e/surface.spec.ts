@@ -289,7 +289,9 @@ test("operator login establishes a server-issued session and returns to the prot
   await page
     .getByRole("option", { name: "United States +1", exact: true })
     .click();
-  await page.getByRole("textbox", { name: "Mobile number" }).fill("2025550124");
+  const mobileNumber = page.getByRole("textbox", { name: "Mobile number" });
+  await mobileNumber.fill("2025550124");
+  await expect(mobileNumber).toHaveValue("2025550124");
   await page.getByRole("button", { name: "Continue securely" }).click();
   await page.getByRole("textbox", { name: "Six-digit code" }).fill("246811");
   await page.getByRole("button", { name: "Verify and sign in" }).click();
