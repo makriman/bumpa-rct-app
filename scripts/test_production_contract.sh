@@ -29,6 +29,7 @@ duplicate_env="$(mktemp)"
 live_env="$(mktemp)"
 verification_env="$(mktemp)"
 temporary_verification_env="$(mktemp)"
+pilot_env="$(mktemp)"
 disabled_auth_env="$(mktemp)"
 whatsapp_auth_env="$(mktemp)"
 versioned_auth_env="$(mktemp)"
@@ -76,7 +77,7 @@ cleanup() {
   fi
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$temporary_verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
-    "$versioned_auth_env" \
+    "$versioned_auth_env" "$pilot_env" \
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$auth_secret_init_volume" >/dev/null 2>&1 || true
@@ -1717,6 +1718,28 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+awk '
+  /^META_PRIMARY_SENDER_ENABLED=/ { print "META_PRIMARY_SENDER_ENABLED=true"; next }
+  /^WHATSAPP_PRIMARY_PILOT_ENABLED=/ {
+    print "WHATSAPP_PRIMARY_PILOT_ENABLED=true"; next
+  }
+  { print }
+' "$temporary_verification_env" > "$pilot_env"
+chmod 0600 "$pilot_env"
+./scripts/validate_env.sh "$pilot_env" production >/dev/null
+pilot_rendered="$(docker compose --env-file "$pilot_env" \
+  -f compose.yaml -f compose.prod.yaml --profile async --profile tools config --format json)"
+if ! jq --exit-status '
+  .services.api.environment.AUTH_LOGIN_MODE == "temporary_static_pin" and
+  .services.api.environment.META_PRIMARY_SENDER_ENABLED == "true" and
+  .services.api.environment.WHATSAPP_PRIMARY_PILOT_ENABLED == "true" and
+  .services.worker.environment.META_PRIMARY_SENDER_ENABLED == "true" and
+  .services.worker.environment.WHATSAPP_PRIMARY_PILOT_ENABLED == "true"
+' <<<"$pilot_rendered" >/dev/null; then
+  echo "Production Compose did not preserve the explicit primary-number pilot boundary" >&2
+  exit 1
+fi
+
 # The one-shot migration process intentionally disables provider backends. A
 # live Meta test-sender setting must therefore remain available to the API while
 # being neutralized for migrations, whose settings are loaded before Alembic
@@ -1782,10 +1805,16 @@ grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
 grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
 grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
+grep -Fq 'go get google.golang.org/grpc@v1.82.1' infra/caddy/Dockerfile
+grep -Fq 'go version -m /out/caddy' infra/caddy/Dockerfile
+grep -Fq 'httplib2==0.32.0' infra/hermes/Dockerfile
 grep -Fq 'mcp==1.28.1' infra/hermes/Dockerfile
 grep -Fq 'pillow==12.3.0' infra/hermes/Dockerfile
+grep -Fq 'pyasn1==0.6.4' infra/hermes/Dockerfile
+grep -Fq 'npm prune --prefix /opt/hermes --omit=dev --workspaces=false' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion' infra/hermes/Dockerfile
-grep -Fq 'npm ls --prefix /opt/hermes --omit=dev --depth=0' infra/hermes/Dockerfile
+grep -Fq '/usr/local/lib/node_modules/npm' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/node_modules/.bin/agent-browser --help' infra/hermes/Dockerfile
 grep -Fq 'from PIL import Image' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/.venv/bin/hermes --help' infra/hermes/Dockerfile
 

@@ -63,6 +63,7 @@ secrets retain local defaults.
 - [Security model](docs/security.md)
 - [Privacy and retention policy](docs/privacy-retention-policy.md)
 - [Deployment](docs/deployment.md)
+- [Production SME consultant capabilities](docs/agent-capabilities.md)
 - [Temporary web-only login](docs/temporary-web-login.md)
 - [Operations runbook](docs/runbook.md)
 - [Build-plan compliance ledger](docs/build-plan-compliance.md)

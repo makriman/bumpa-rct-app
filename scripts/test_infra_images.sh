@@ -72,7 +72,7 @@ docker run --rm \
   --entrypoint sh "$backup_image" -eu -c '
     profile=/staged/profiles/tenant_contract
     mkdir -p "$profile"
-    : > "$profile/.no-skills"
+    : > "$profile/.bumpa-capabilities-v2"
     printf "%s\n" \
       "API_SERVER_ENABLED=true" \
       "API_SERVER_HOST=0.0.0.0" \
@@ -92,7 +92,7 @@ docker run --rm \
     printf "%s\n" "Contract-only isolated tenant profile." > "$profile/SOUL.md"
     printf "%s\n" "must-not-be-imported" > "$profile/unexpected.txt"
     chmod 0700 /staged /staged/profiles "$profile"
-    chmod 0600 "$profile"/* "$profile"/.no-skills "$profile"/.env
+    chmod 0600 "$profile"/* "$profile"/.bumpa-capabilities-v2 "$profile"/.env
   '
 
 imported="$(
@@ -122,7 +122,8 @@ docker run --rm \
     test "$(stat -c %a "$profile")" = 700
     test "$(stat -c %a "$profile/.env")" = 600
     test "$(stat -c %U "$profile")" = hermes
-    test -f "$profile/.no-skills"
+    test -f "$profile/.bumpa-capabilities-v2"
+    test ! -e "$profile/.no-skills"
     test -f "$profile/config.yaml"
     test -f "$profile/SOUL.md"
     test ! -e "$profile/unexpected.txt"
@@ -180,7 +181,7 @@ docker run --rm \
     printf "%s" expected-hermes-staging > /staged/control-plane/expected.txt
     profile=/staged/profiles/tenant_dynamic
     mkdir -p "$profile/skills" "$profile/memories" "$profile/sessions" "$profile/cron"
-    : > "$profile/.no-skills"
+    : > "$profile/.bumpa-capabilities-v2"
     printf "%s\n" \
       "API_SERVER_ENABLED=true" \
       "API_SERVER_HOST=0.0.0.0" \
@@ -622,6 +623,9 @@ docker run --rm --entrypoint gosu "$postgres_image" --version | grep -F 'go1.26.
 docker run --rm --entrypoint postgres "$postgres_image" --version | grep -F 'PostgreSQL) 16.14' >/dev/null
 docker run --rm --entrypoint caddy "$caddy_image" version | grep -Fx 'v2.11.4' >/dev/null
 docker run --rm --entrypoint caddy "$caddy_image" build-info | grep -F 'go1.26.5' >/dev/null
+docker run --rm --entrypoint caddy "$caddy_image" build-info \
+  | grep -F 'google.golang.org/grpc' \
+  | grep -F 'v1.82.1' >/dev/null
 adapted_caddy_config="$(
   docker run --rm \
     --network none \

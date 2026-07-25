@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -82,6 +84,7 @@ class MetaWhatsAppClient:
             raise ValueError("Meta response limit is outside the supported range")
 
         self._phone_number_id = phone_number_id
+        self._graph_version = graph_version
         self._url = f"{GRAPH_BASE_URL}/{graph_version}/{phone_number_id}/messages"
         self._access_token = access_token
         self._otp_template_name = otp_template_name
@@ -139,20 +142,28 @@ class MetaWhatsAppClient:
     def supports_otp(self) -> bool:
         return self._otp_template_name is not None
 
-    def send_text(self, phone_e164: str, body: str) -> str:
+    def send_text(
+        self,
+        phone_e164: str,
+        body: str,
+        *,
+        reply_to_message_id: str | None = None,
+    ) -> str:
         if not body or not body.strip():
             raise ValueError("WhatsApp text body must not be empty")
         if len(body) > MAX_TEXT_LENGTH:
             raise ValueError(f"WhatsApp text body exceeds {MAX_TEXT_LENGTH} characters")
-        delivery = self._send(
-            phone_e164,
-            {
-                "messaging_product": "whatsapp",
-                "recipient_type": "individual",
-                "type": "text",
-                "text": {"preview_url": False, "body": body},
-            },
-        )
+        payload: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "type": "text",
+            "text": {"preview_url": False, "body": body},
+        }
+        if reply_to_message_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+                raise ValueError("Invalid Meta reply message identifier")
+            payload["context"] = {"message_id": reply_to_message_id}
+        delivery = self._send(phone_e164, payload)
         return delivery.message_id
 
     def send_template(
@@ -184,6 +195,138 @@ class MetaWhatsAppClient:
         )
         return delivery.message_id
 
+    def send_interactive_buttons(
+        self,
+        phone_e164: str,
+        *,
+        body: str,
+        buttons: list[tuple[str, str]],
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        if not body.strip() or len(body) > 1024:
+            raise ValueError("Interactive message body is invalid")
+        if not 1 <= len(buttons) <= 3:
+            raise ValueError("Interactive messages require one to three buttons")
+        rendered: list[dict[str, Any]] = []
+        for button_id, title in buttons:
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", button_id):
+                raise ValueError("Interactive button identifier is invalid")
+            if not title.strip() or len(title) > 20:
+                raise ValueError("Interactive button title is invalid")
+            rendered.append(
+                {
+                    "type": "reply",
+                    "reply": {"id": button_id, "title": title.strip()},
+                }
+            )
+        payload: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body.strip()},
+                "action": {"buttons": rendered},
+            },
+        }
+        if reply_to_message_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+                raise ValueError("Invalid Meta reply message identifier")
+            payload["context"] = {"message_id": reply_to_message_id}
+        return self._send(phone_e164, payload).message_id
+
+    def upload_media(
+        self,
+        *,
+        content: bytes,
+        mime_type: str,
+        filename: str,
+    ) -> str:
+        if not content or len(content) > 67_108_864:
+            raise ValueError("Outbound media is empty or exceeds its safe limit")
+        if not re.fullmatch(r"[A-Za-z0-9.+-]{1,80}/[A-Za-z0-9.+-]{1,80}", mime_type):
+            raise ValueError("Outbound media MIME type is invalid")
+        safe_filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:200] or "attachment"
+        url = f"{GRAPH_BASE_URL}/{self._graph_version}/{self._phone_number_id}/media"
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Accept": "application/json",
+        }
+        try:
+            with httpx.Client(
+                timeout=self._timeout,
+                transport=self._transport,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                with client.stream(
+                    "POST",
+                    url,
+                    headers=headers,
+                    data={"messaging_product": "whatsapp", "type": mime_type},
+                    files={"file": (safe_filename, content, mime_type)},
+                ) as response:
+                    raw = self._read_bounded(response)
+                    if not response.is_success:
+                        raise MetaProviderError(
+                            "provider",
+                            retryable=response.status_code in {408, 425, 429}
+                            or response.status_code >= 500,
+                            http_status=response.status_code,
+                            request_id=response.headers.get("x-fb-request-id"),
+                        )
+        except MetaProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise MetaProviderError("timeout", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise MetaProviderError("transport", retryable=True) from exc
+        payload = self._decode_json(raw)
+        media_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(media_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", media_id):
+            raise MetaProviderError("invalid_response", retryable=False)
+        return media_id
+
+    def send_media(
+        self,
+        phone_e164: str,
+        *,
+        media_type: str,
+        media_id: str,
+        caption: str | None = None,
+        filename: str | None = None,
+        voice: bool = False,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        if media_type not in {"audio", "document", "image", "video"}:
+            raise ValueError("Outbound WhatsApp media type is invalid")
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", media_id):
+            raise ValueError("Outbound WhatsApp media identifier is invalid")
+        media: dict[str, Any] = {"id": media_id}
+        if caption:
+            if media_type not in {"document", "image", "video"} or len(caption) > 1024:
+                raise ValueError("Outbound WhatsApp media caption is invalid")
+            media["caption"] = caption
+        if filename:
+            if media_type != "document":
+                raise ValueError("Only documents support outbound filenames")
+            media["filename"] = re.sub(r"[^A-Za-z0-9._-]", "_", filename)[:200]
+        if voice:
+            if media_type != "audio":
+                raise ValueError("Only audio can be sent as a native voice note")
+            media["voice"] = True
+        payload: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "type": media_type,
+            media_type: media,
+        }
+        if reply_to_message_id is not None:
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+                raise ValueError("Invalid Meta reply message identifier")
+            payload["context"] = {"message_id": reply_to_message_id}
+        return self._send(phone_e164, payload).message_id
+
     def send_otp(self, phone_e164: str, code: str) -> str:
         if self._otp_template_name is None:
             raise ValueError("Meta sender has no approved AUTHENTICATION template for OTP delivery")
@@ -207,6 +350,124 @@ class MetaWhatsAppClient:
             ],
         )
 
+    def mark_read(self, message_id: str, *, typing: bool = False) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", message_id):
+            raise ValueError("Invalid Meta message identifier")
+        payload: dict[str, Any] = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+        }
+        if typing:
+            payload["typing_indicator"] = {"type": "text"}
+        self._send_control(payload)
+
+    def download_media(self, media_id: str, *, max_bytes: int) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", media_id):
+            raise ValueError("Invalid Meta media identifier")
+        if not 65_536 <= max_bytes <= 67_108_864:
+            raise ValueError("Media limit is outside the supported range")
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Accept": "application/json",
+        }
+        metadata_url = f"{GRAPH_BASE_URL}/{self._graph_version}/{media_id}"
+        try:
+            with httpx.Client(
+                timeout=self._timeout,
+                transport=self._transport,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                with client.stream("GET", metadata_url, headers=headers) as response:
+                    raw = self._read_bounded(response)
+                    if not response.is_success:
+                        raise MetaProviderError(
+                            "provider",
+                            retryable=response.status_code >= 500,
+                            http_status=response.status_code,
+                            request_id=response.headers.get("x-fb-request-id"),
+                        )
+                metadata = self._decode_json(raw)
+                media_url = metadata.get("url") if isinstance(metadata, dict) else None
+                if not isinstance(media_url, str) or not self._safe_media_url(media_url):
+                    raise MetaProviderError("invalid_response", retryable=False)
+                with client.stream(
+                    "GET",
+                    media_url,
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                ) as media_response:
+                    if not media_response.is_success:
+                        raise MetaProviderError(
+                            "provider",
+                            retryable=media_response.status_code >= 500,
+                            http_status=media_response.status_code,
+                            request_id=media_response.headers.get("x-fb-request-id"),
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in media_response.iter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise MetaProviderError("invalid_response", retryable=False)
+                        chunks.append(chunk)
+        except MetaProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise MetaProviderError("timeout", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise MetaProviderError("transport", retryable=True) from exc
+        content = b"".join(chunks)
+        mime_type: str = (
+            str(metadata.get("mime_type"))
+            if isinstance(metadata, dict) and isinstance(metadata.get("mime_type"), str)
+            else "application/octet-stream"
+        )
+        actual_sha = hashlib.sha256(content).hexdigest()
+        expected_sha = metadata.get("sha256") if isinstance(metadata, dict) else None
+        if isinstance(expected_sha, str) and re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha):
+            if expected_sha.lower() != actual_sha:
+                raise MetaProviderError("invalid_response", retryable=False)
+        return {
+            "content": content,
+            "mime_type": mime_type[:160],
+            "sha256": actual_sha,
+            "size_bytes": len(content),
+        }
+
+    def _send_control(self, payload: dict[str, Any]) -> None:
+        headers = {
+            "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            with httpx.Client(
+                timeout=self._timeout,
+                transport=self._transport,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                with client.stream("POST", self._url, json=payload, headers=headers) as response:
+                    raw = self._read_bounded(response)
+                    if not response.is_success:
+                        raise MetaProviderError(
+                            "provider",
+                            retryable=response.status_code in {408, 425, 429}
+                            or response.status_code >= 500,
+                            http_status=response.status_code,
+                            request_id=response.headers.get("x-fb-request-id"),
+                        )
+        except MetaProviderError:
+            raise
+        except httpx.TimeoutException as exc:
+            raise MetaProviderError("timeout", retryable=True) from exc
+        except httpx.RequestError as exc:
+            raise MetaProviderError("transport", retryable=True) from exc
+        data = self._decode_json(raw)
+        if not isinstance(data, dict) or data.get("success") is not True:
+            raise MetaProviderError("invalid_response", retryable=False)
+
     def _send(self, phone_e164: str, payload: dict[str, Any]) -> MetaDelivery:
         to = self._normalize_phone(phone_e164)
         request_payload = {**payload, "to": to}
@@ -220,6 +481,7 @@ class MetaWhatsAppClient:
                 timeout=self._timeout,
                 transport=self._transport,
                 follow_redirects=False,
+                trust_env=False,
             ) as client:
                 with client.stream(
                     "POST", self._url, json=request_payload, headers=headers
@@ -312,3 +574,20 @@ class MetaWhatsAppClient:
         except ValueError:
             return None
         return parsed if 0 <= parsed <= 86_400 else None
+
+    @staticmethod
+    def _safe_media_url(value: str) -> bool:
+        parsed = urlsplit(value)
+        hostname = (parsed.hostname or "").lower()
+        return bool(
+            parsed.scheme == "https"
+            and hostname
+            and (
+                hostname == "lookaside.fbsbx.com"
+                or hostname.endswith(".facebook.com")
+                or hostname.endswith(".fbcdn.net")
+                or hostname.endswith(".fbsbx.com")
+            )
+            and parsed.username is None
+            and parsed.password is None
+        )

@@ -7,8 +7,12 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, TypeAdapter, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_mcp_endpoint() -> str:
+    return "http://api:" + str(8_000) + "/internal/mcp/"
 
 
 class Settings(BaseSettings):
@@ -39,6 +43,7 @@ class Settings(BaseSettings):
     field_encryption_old_keys: dict[str, str] = Field(default_factory=dict)
     research_pseudonym_key: str = "local-only-change-me-research-pseudonym-key"
     onboarding_integrity_key: str = "local-only-change-me-onboarding-integrity-key"
+    internal_service_token: str = "local-only-change-me-internal-service-token"
     access_token_minutes: int = 60
     otp_ttl_minutes: int = 10
     otp_max_attempts: int = 5
@@ -86,6 +91,10 @@ class Settings(BaseSettings):
     meta_app_secret_file: Path | None = None
     meta_phone_number_id: str | None = None
     meta_primary_sender_enabled: bool = True
+    whatsapp_primary_pilot_enabled: bool = False
+    whatsapp_multimodal_enabled: bool = False
+    whatsapp_speech_enabled: bool = False
+    whatsapp_progress_enabled: bool = False
     meta_test_sender_verification_mode: Literal["disabled", "inbound_replies_only"] = "disabled"
     meta_test_sender_waba_id: str | None = Field(default=None, pattern=r"^\d{5,64}$")
     meta_test_sender_phone_number_id: str | None = Field(default=None, pattern=r"^\d{5,64}$")
@@ -120,6 +129,10 @@ class Settings(BaseSettings):
     audit_log_retention_days: int = Field(default=365, ge=30, le=3650)
     system_error_retention_days: int = Field(default=90, ge=7, le=3650)
     operational_retention_batch_size: int = Field(default=500, ge=1, le=1000)
+    research_consent_policy_version: str = Field(
+        default="v2-consultant-pilot",
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$",
+    )
     public_origin: str = "http://bumpabestie.localhost:8080"
     api_origin: str = "http://api.bumpabestie.localhost:8080"
     mcp_google_oauth_enabled: bool = False
@@ -133,6 +146,31 @@ class Settings(BaseSettings):
     mcp_oauth_state_ttl_seconds: int = Field(default=600, ge=120, le=1800)
     mcp_oauth_request_timeout_seconds: float = Field(default=15.0, ge=1.0, le=30.0)
     mcp_oauth_max_response_bytes: int = Field(default=131_072, ge=4096, le=524_288)
+    external_connectors_enabled: bool = False
+    agent_capabilities_v2: bool = False
+    hermes_tools_enabled: bool = False
+    web_research_enabled: bool = False
+    sandbox_tools_enabled: bool = False
+    managed_image_generation_enabled: bool = False
+    mcp_internal_base_url: str = Field(default_factory=_default_mcp_endpoint)
+    tavily_api_key: str | None = None
+    tavily_api_key_file: Path | None = None
+    tavily_request_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
+    tavily_max_response_bytes: int = Field(default=1_048_576, ge=4096, le=4_194_304)
+    elevenlabs_api_key: str | None = None
+    elevenlabs_api_key_file: Path | None = None
+    elevenlabs_request_timeout_seconds: float = Field(default=45.0, ge=1.0, le=120.0)
+    elevenlabs_max_response_bytes: int = Field(default=4_194_304, ge=4096, le=16_777_216)
+    elevenlabs_tts_voice_id: str | None = None
+    elevenlabs_tts_model_id: str = "eleven_v3"
+    sandbox_worker_url: str | None = None
+    sandbox_service_token: str | None = None
+    sandbox_service_token_file: Path | None = None
+    whatsapp_media_max_bytes: int = Field(default=16_777_216, ge=65_536, le=67_108_864)
+    whatsapp_video_max_seconds: int = Field(default=180, ge=1, le=600)
+    whatsapp_progress_after_seconds: float = Field(default=8.0, ge=2.0, le=30.0)
+    whatsapp_fifo_lock_seconds: int = Field(default=120, ge=30, le=900)
+    whatsapp_fifo_wait_seconds: int = Field(default=10, ge=1, le=60)
     whatsapp_backend: Literal["mock", "disabled", "meta"] = "mock"
     bumpa_backend: Literal["mock", "disabled", "bumpa"] = "mock"
     agent_backend: Literal["mock", "disabled", "hermes"] = "mock"
@@ -149,6 +187,8 @@ class Settings(BaseSettings):
     hermes_read_timeout_seconds: float = Field(default=90.0, ge=1.0, le=180.0)
     hermes_max_response_bytes: int = Field(default=262_144, ge=4096, le=1_048_576)
     hermes_max_context_chars: int = Field(default=12_000, ge=1000, le=100_000)
+    hermes_history_messages: int = Field(default=16, ge=2, le=40)
+    hermes_temperature: float | None = Field(default=0.0, ge=0.0, le=1.0)
     hermes_circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
     hermes_circuit_recovery_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
     session_cookie_name: str = "bb_session"
@@ -167,6 +207,10 @@ class Settings(BaseSettings):
         "meta_test_sender_display_phone_e164",
         "temporary_web_pin_verifier_file",
         "temporary_web_pin_expires_at",
+        "tavily_api_key_file",
+        "elevenlabs_api_key_file",
+        "sandbox_service_token_file",
+        "sandbox_worker_url",
         mode="before",
     )
     @classmethod
@@ -268,6 +312,46 @@ class Settings(BaseSettings):
             self.meta_system_user_access_token,
             self.meta_system_user_access_token_file,
         )
+
+    @property
+    def effective_tavily_api_key(self) -> str:
+        return self._provider_secret(
+            "TAVILY_API_KEY",
+            self.tavily_api_key,
+            self.tavily_api_key_file,
+        )
+
+    @property
+    def effective_elevenlabs_api_key(self) -> str:
+        return self._provider_secret(
+            "ELEVENLABS_API_KEY",
+            self.elevenlabs_api_key,
+            self.elevenlabs_api_key_file,
+        )
+
+    @property
+    def effective_sandbox_service_token(self) -> str:
+        return self._provider_secret(
+            "SANDBOX_SERVICE_TOKEN",
+            self.sandbox_service_token,
+            self.sandbox_service_token_file,
+        )
+
+    @property
+    def mcp_internal_issuer_url(self) -> AnyHttpUrl:
+        parsed = urlsplit(self.mcp_internal_base_url)
+        return TypeAdapter(AnyHttpUrl).validate_python(f"{parsed.scheme}://{parsed.netloc}")
+
+    @property
+    def mcp_internal_resource_url(self) -> AnyHttpUrl:
+        return TypeAdapter(AnyHttpUrl).validate_python(self.mcp_internal_base_url)
+
+    @property
+    def mcp_internal_allowed_hosts(self) -> list[str]:
+        parsed = urlsplit(self.mcp_internal_base_url)
+        if not parsed.hostname:
+            return []
+        return [parsed.netloc]
 
     @property
     def effective_ops_alert_hmac_secret(self) -> str:
@@ -474,6 +558,7 @@ class Settings(BaseSettings):
             self._validate_proactive_insights()
             self._validate_ops_alerts()
             self._validate_mcp_oauth_configuration()
+            self._validate_agent_capabilities()
         return self
 
     def _validate_auth_login_mode(self) -> None:
@@ -489,10 +574,19 @@ class Settings(BaseSettings):
             and not self.daily_insights_enabled
             and not self.weekly_insights_enabled
         )
-        if self.whatsapp_backend != "disabled" and not reply_only_test_lane:
+        contained_primary_pilot = (
+            self.whatsapp_backend == "meta"
+            and self.meta_primary_sender_enabled
+            and self.whatsapp_primary_pilot_enabled
+        )
+        if (
+            self.whatsapp_backend != "disabled"
+            and not reply_only_test_lane
+            and not contained_primary_pilot
+        ):
             raise ValueError(
-                "Temporary static-PIN authentication permits only disabled WhatsApp or the "
-                "reply-only Meta test sender"
+                "Temporary static-PIN authentication permits only disabled WhatsApp, the "
+                "reply-only Meta test sender, or the explicitly contained primary pilot"
             )
         if self.app_env == "production" and self.temporary_web_pin_verifier_file is None:
             raise ValueError(
@@ -651,6 +745,59 @@ class Settings(BaseSettings):
                 raise ValueError("Meta Ads MCP OAuth client ID must be numeric")
             if len(self.effective_meta_ads_oauth_client_secret) < 24:
                 raise ValueError("Meta Ads MCP OAuth client secret is too short")
+
+    def _validate_agent_capabilities(self) -> None:
+        if (self.agent_capabilities_v2 or self.hermes_tools_enabled) and (
+            self.internal_service_token.startswith("local-only")
+            or len(self.internal_service_token) < 32
+        ):
+            raise ValueError(
+                "Agent capabilities require an explicitly configured INTERNAL_SERVICE_TOKEN"
+            )
+        parsed_mcp = urlsplit(self.mcp_internal_base_url)
+        if not (
+            parsed_mcp.scheme == "http"
+            and parsed_mcp.hostname
+            and parsed_mcp.hostname not in {"localhost", "127.0.0.1"}
+            and parsed_mcp.username is None
+            and parsed_mcp.password is None
+            and parsed_mcp.path == "/internal/mcp/"
+            and not parsed_mcp.query
+            and not parsed_mcp.fragment
+        ):
+            raise ValueError("MCP_INTERNAL_BASE_URL must be the private API MCP endpoint")
+        if self.web_research_enabled:
+            if self.tavily_api_key:
+                raise ValueError("TAVILY_API_KEY must use a secret file in production")
+            if self.tavily_api_key_file is None or len(self.effective_tavily_api_key) < 20:
+                raise ValueError("Web research is enabled without a Tavily secret file")
+        if self.whatsapp_speech_enabled:
+            if not self.whatsapp_multimodal_enabled:
+                raise ValueError("WhatsApp speech requires WhatsApp multimodal processing")
+            if self.elevenlabs_api_key:
+                raise ValueError("ELEVENLABS_API_KEY must use a secret file in production")
+            if self.elevenlabs_api_key_file is None or len(self.effective_elevenlabs_api_key) < 20:
+                raise ValueError("WhatsApp speech is enabled without an ElevenLabs secret file")
+        if self.sandbox_tools_enabled:
+            parsed = urlsplit(self.sandbox_worker_url or "")
+            if not (
+                parsed.scheme == "https"
+                and parsed.hostname
+                and parsed.username is None
+                and parsed.password is None
+                and not parsed.query
+                and not parsed.fragment
+            ):
+                raise ValueError("Sandbox tools require an uncredentialed HTTPS Worker URL")
+            if self.sandbox_service_token:
+                raise ValueError("SANDBOX_SERVICE_TOKEN must use a secret file in production")
+            if (
+                self.sandbox_service_token_file is None
+                or len(self.effective_sandbox_service_token) < 32
+            ):
+                raise ValueError("Sandbox tools are enabled without a service-token file")
+        if self.managed_image_generation_enabled and not self.sandbox_tools_enabled:
+            raise ValueError("Managed image generation requires the isolated Sandbox Worker")
 
 
 @lru_cache

@@ -1,27 +1,41 @@
 import base64
 import binascii
+import hashlib
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from queue import Empty, Queue
+from threading import Thread
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.dependencies import Principal, require_tenant
 from app.core.rate_limit import enforce_operation_rate_limit
-from app.db.models import AgentMessage, Conversation
+from app.db.models import AgentMessage, Conversation, GeneratedAgentMedia, PendingAgentAction
 from app.db.session import get_db
 from app.providers.redaction import redact_text
 from app.schemas import (
+    AgentActionDecision,
     ChatMessagePage,
     ChatMessageView,
     ChatRequest,
     ChatResponse,
     ConversationSummary,
     ConversationSummaryPage,
+    GeneratedMediaView,
+    PendingAgentActionView,
+)
+from app.services.agent_actions import (
+    AgentActionError,
+    confirmation_token,
+    decide_pending_action,
 )
 from app.services.chat import data_freshness_at_message, handle_chat
+from app.services.generated_media import GeneratedMediaError, generated_media_path
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -132,7 +146,331 @@ def web_chat(
         outbound_message_id=outbound.id,
         answer=outbound.content,
         data_freshness=freshness,
+        generated_media=_generated_media_views(
+            db,
+            tenant_id=principal.tenant.id,
+            user_id=principal.user.id,
+            conversation_id=conversation.id,
+            channel="web",
+        ),
     )
+
+
+@router.post("/web/stream")
+def web_chat_stream(
+    payload: ChatRequest,
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Stream durable assistant and tool lifecycle events as SSE."""
+
+    if settings.agent_backend == "disabled":
+        raise HTTPException(status_code=503, detail="Hermes agent service is not configured")
+    assert principal.tenant is not None
+    tenant = principal.tenant
+    cached: tuple[AgentMessage, AgentMessage] | None = None
+    if payload.client_message_id:
+        existing = db.scalar(
+            select(AgentMessage).where(
+                AgentMessage.tenant_id == tenant.id,
+                AgentMessage.channel == "web",
+                AgentMessage.external_message_id == payload.client_message_id,
+            )
+        )
+        if existing:
+            outbound = db.scalar(
+                select(AgentMessage)
+                .where(
+                    AgentMessage.conversation_id == existing.conversation_id,
+                    AgentMessage.direction == "outbound",
+                    AgentMessage.created_at >= existing.created_at,
+                )
+                .order_by(AgentMessage.created_at)
+            )
+            if outbound:
+                cached = (existing, outbound)
+    if cached is None:
+        enforce_operation_rate_limit(
+            settings,
+            operation="chat",
+            scopes={"tenant": tenant.id, "user": principal.user.id},
+            limit=settings.chat_rate_limit,
+            window_seconds=settings.chat_rate_limit_window_seconds,
+        )
+
+    def generate() -> Iterator[str]:
+        yield _sse(
+            "message.started",
+            {
+                "client_message_id": payload.client_message_id,
+                "conversation_id": payload.conversation_id,
+            },
+        )
+        if cached is not None:
+            incoming, outgoing = cached
+            for delta in _text_deltas(outgoing.content):
+                yield _sse("message.delta", {"delta": delta})
+            yield _sse(
+                "message.completed",
+                {
+                    "conversation_id": incoming.conversation_id,
+                    "inbound_message_id": incoming.id,
+                    "outbound_message_id": outgoing.id,
+                    "answer": outgoing.content,
+                    "generated_media": [
+                        item.model_dump()
+                        for item in _generated_media_views(
+                            db,
+                            tenant_id=tenant.id,
+                            user_id=principal.user.id,
+                            conversation_id=incoming.conversation_id,
+                            channel="web",
+                        )
+                    ],
+                    "replayed": True,
+                },
+            )
+            return
+
+        events: Queue[tuple[str, dict[str, object]]] = Queue()
+        streamed_text: list[str] = []
+
+        def on_event(name: str, data: dict[str, object]) -> None:
+            if name == "message.delta" and isinstance(data.get("delta"), str):
+                streamed_text.append(str(data["delta"]))
+            events.put((name, data))
+
+        def run_agent() -> None:
+            try:
+                conversation, inbound, outbound, freshness = handle_chat(
+                    db,
+                    tenant=tenant,
+                    user=principal.user,
+                    message=payload.message,
+                    channel="web",
+                    conversation_id=payload.conversation_id,
+                    external_message_id=payload.client_message_id,
+                    event_callback=on_event,
+                    settings=settings,
+                )
+                if not streamed_text:
+                    for delta in _text_deltas(outbound.content):
+                        events.put(("message.delta", {"delta": delta}))
+                actions = db.scalars(
+                    select(PendingAgentAction).where(
+                        PendingAgentAction.tenant_id == tenant.id,
+                        PendingAgentAction.user_id == principal.user.id,
+                        PendingAgentAction.conversation_id == conversation.id,
+                        PendingAgentAction.status == "pending",
+                    )
+                ).all()
+                for action in actions:
+                    events.put(
+                        (
+                            "confirmation.required",
+                            {
+                                "action_id": action.id,
+                                "target": action.target_summary,
+                                "exact_input": action.action_input,
+                                "expires_at": action.expires_at.isoformat(),
+                                "confirmation_token": confirmation_token(settings, action),
+                            },
+                        )
+                    )
+                events.put(
+                    (
+                        "message.completed",
+                        {
+                            "conversation_id": conversation.id,
+                            "inbound_message_id": inbound.id,
+                            "outbound_message_id": outbound.id,
+                            "answer": outbound.content,
+                            "data_freshness": (
+                                freshness.isoformat() if isinstance(freshness, datetime) else None
+                            ),
+                            "generated_media": [
+                                item.model_dump()
+                                for item in _generated_media_views(
+                                    db,
+                                    tenant_id=tenant.id,
+                                    user_id=principal.user.id,
+                                    conversation_id=conversation.id,
+                                    channel="web",
+                                )
+                            ],
+                        },
+                    )
+                )
+            except HTTPException as exc:
+                events.put(
+                    (
+                        "error",
+                        {
+                            "code": "agent_unavailable",
+                            "message": str(exc.detail)[:300],
+                            "retryable": exc.status_code >= 500,
+                        },
+                    )
+                )
+            except Exception:
+                db.rollback()
+                events.put(
+                    (
+                        "error",
+                        {
+                            "code": "internal_error",
+                            "message": "The assistant could not complete this request.",
+                            "retryable": True,
+                        },
+                    )
+                )
+
+        worker = Thread(target=run_agent, name="chat-stream-agent", daemon=True)
+        worker.start()
+        terminal = False
+        while not terminal:
+            try:
+                name, data = events.get(timeout=15)
+            except Empty:
+                if not worker.is_alive():
+                    yield _sse(
+                        "error",
+                        {
+                            "code": "stream_ended",
+                            "message": "The assistant stream ended unexpectedly.",
+                            "retryable": True,
+                        },
+                    )
+                    break
+                yield ": keep-alive\n\n"
+                continue
+            yield _sse(name, data)
+            terminal = name in {"message.completed", "error"}
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/media/{media_id}")
+def generated_media(
+    media_id: str,
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    assert principal.tenant is not None
+    media = db.scalar(
+        select(GeneratedAgentMedia).where(
+            GeneratedAgentMedia.id == media_id,
+            GeneratedAgentMedia.tenant_id == principal.tenant.id,
+            GeneratedAgentMedia.user_id == principal.user.id,
+            GeneratedAgentMedia.channel == "web",
+            GeneratedAgentMedia.status == "pending",
+        )
+    )
+    if media is None:
+        raise HTTPException(status_code=404, detail="Generated media not found")
+    try:
+        content = generated_media_path(settings, media).read_bytes()
+    except (GeneratedMediaError, OSError):
+        raise HTTPException(status_code=404, detail="Generated media not found") from None
+    if (
+        len(content) != media.byte_size
+        or hashlib.sha256(content).hexdigest() != media.checksum_sha256
+    ):
+        raise HTTPException(status_code=404, detail="Generated media not found")
+    return Response(
+        content=content,
+        media_type=media.mime_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="bumpa-bestie-{media.id}.png"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/actions", response_model=list[PendingAgentActionView])
+def pending_actions(
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    status: str = Query(default="pending", pattern="^(pending|succeeded|failed|denied|expired)$"),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[PendingAgentActionView]:
+    assert principal.tenant is not None
+    rows = db.scalars(
+        select(PendingAgentAction)
+        .where(
+            PendingAgentAction.tenant_id == principal.tenant.id,
+            PendingAgentAction.user_id == principal.user.id,
+            PendingAgentAction.status == status,
+        )
+        .order_by(PendingAgentAction.created_at.desc(), PendingAgentAction.id.desc())
+        .limit(limit)
+    ).all()
+    return [_pending_action_view(row, settings) for row in rows]
+
+
+@router.post(
+    "/actions/{action_id}/confirm",
+    response_model=PendingAgentActionView,
+)
+def confirm_pending_action(
+    action_id: str,
+    payload: AgentActionDecision,
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PendingAgentActionView:
+    assert principal.tenant is not None
+    try:
+        action = decide_pending_action(
+            db,
+            settings,
+            action_id=action_id,
+            tenant_id=principal.tenant.id,
+            user_id=principal.user.id,
+            supplied_token=payload.confirmation_token,
+            decision="confirm",
+        )
+    except AgentActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _pending_action_view(action, settings)
+
+
+@router.post(
+    "/actions/{action_id}/deny",
+    response_model=PendingAgentActionView,
+)
+def deny_pending_action(
+    action_id: str,
+    payload: AgentActionDecision,
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> PendingAgentActionView:
+    assert principal.tenant is not None
+    try:
+        action = decide_pending_action(
+            db,
+            settings,
+            action_id=action_id,
+            tenant_id=principal.tenant.id,
+            user_id=principal.user.id,
+            supplied_token=payload.confirmation_token,
+            decision="deny",
+        )
+    except AgentActionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _pending_action_view(action, settings)
 
 
 @router.get("/conversations")
@@ -247,6 +585,64 @@ def conversation_messages(
             for item in messages
         ],
     }
+
+
+def _pending_action_view(
+    action: PendingAgentAction,
+    settings: Settings,
+) -> PendingAgentActionView:
+    return PendingAgentActionView(
+        id=action.id,
+        conversation_id=action.conversation_id,
+        tool_name=action.tool_name,
+        target_summary=action.target_summary,
+        exact_input=action.action_input,
+        status=action.status,
+        expires_at=action.expires_at,
+        confirmation_token=(
+            confirmation_token(settings, action) if action.status == "pending" else None
+        ),
+        action_result=action.action_result,
+    )
+
+
+def _generated_media_views(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    conversation_id: str,
+    channel: str,
+) -> list[GeneratedMediaView]:
+    rows = db.scalars(
+        select(GeneratedAgentMedia)
+        .where(
+            GeneratedAgentMedia.tenant_id == tenant_id,
+            GeneratedAgentMedia.user_id == user_id,
+            GeneratedAgentMedia.conversation_id == conversation_id,
+            GeneratedAgentMedia.channel == channel,
+            GeneratedAgentMedia.status == "pending",
+        )
+        .order_by(GeneratedAgentMedia.created_at)
+    ).all()
+    return [
+        GeneratedMediaView(
+            id=row.id,
+            media_type="image",
+            mime_type=row.mime_type,
+            byte_size=row.byte_size,
+            url=f"/v1/chat/media/{row.id}",
+        )
+        for row in rows
+    ]
+
+
+def _sse(event: str, data: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def _text_deltas(value: str, size: int = 240) -> list[str]:
+    return [value[index : index + size] for index in range(0, len(value), size)]
 
 
 @router.get(

@@ -33,7 +33,10 @@ done
 for secret_name in \
   ops_alert_hmac_secret \
   google_oauth_client_secret \
-  meta_ads_oauth_client_secret
+  meta_ads_oauth_client_secret \
+  tavily_api_key \
+  elevenlabs_api_key \
+  sandbox_service_token
 do
   optional_source="${OPTIONAL_SECRET_DIR:-/run/optional-secrets}/$secret_name"
   optional_target="$target_dir/$secret_name"
@@ -56,6 +59,9 @@ find "$target_dir" -mindepth 1 -maxdepth 1 -type f \
   ! -name ops_alert_hmac_secret \
   ! -name google_oauth_client_secret \
   ! -name meta_ads_oauth_client_secret \
+  ! -name tavily_api_key \
+  ! -name elevenlabs_api_key \
+  ! -name sandbox_service_token \
   -delete
 chown "$runtime_uid:$runtime_gid" "$target_dir"
 chmod 0500 "$target_dir"

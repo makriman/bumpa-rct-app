@@ -29,7 +29,7 @@ for source in "$staging_root"/tenant_*; do
     echo "Hermes staging profiles must not contain symlinks" >&2
     exit 1
   fi
-  for required in .no-skills .env config.yaml SOUL.md; do
+  for required in .bumpa-capabilities-v2 .env config.yaml SOUL.md; do
     [ -f "$source/$required" ] || {
       echo "Staged Hermes profile is incomplete" >&2
       exit 1
@@ -49,10 +49,11 @@ for source in "$staging_root"/tenant_*; do
   fi
   mkdir -p "$destination" "$destination/skills" "$destination/memories" \
     "$destination/sessions" "$destination/cron"
-  install -m 0600 "$source/.no-skills" "$destination/.no-skills"
   install -m 0600 "$source/.env" "$destination/.env"
   install -m 0600 "$source/config.yaml" "$destination/config.yaml"
   install -m 0600 "$source/SOUL.md" "$destination/SOUL.md"
+  install -m 0600 "$source/.bumpa-capabilities-v2" "$destination/.bumpa-capabilities-v2"
+  rm -f "$destination/.no-skills"
   chown -R hermes:hermes "$destination"
   find "$destination" -type d -exec chmod 0700 {} +
   imported=$((imported + 1))

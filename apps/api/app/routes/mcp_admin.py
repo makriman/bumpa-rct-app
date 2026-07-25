@@ -177,6 +177,7 @@ def _admin_view(
         provider=provider,
         status=connection.status,
         scopes=list(connection.scopes),
+        allowed_resources=list(connection.allowed_resources),
         read_only=connection.read_only,
         admin_approved=connection.admin_approved,
         oauth_available=oauth_client(settings, provider) is not None,

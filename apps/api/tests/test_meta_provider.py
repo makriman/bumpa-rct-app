@@ -97,6 +97,126 @@ def test_meta_text_and_otp_template_requests_are_bounded_and_typed() -> None:
         provider.send_otp("+2348000000000", "not-code")
 
 
+def test_meta_interactive_media_read_typing_and_download_paths() -> None:
+    requests: list[httpx.Request] = []
+    media_content = b"verified-media"
+    media_sha = hashlib.sha256(media_content).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/media") and request.method == "POST":
+            return httpx.Response(200, json={"id": "media-12345"})
+        if request.url.path.endswith("/media-12345") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "url": "https://lookaside.fbsbx.com/whatsapp_business/attachments/media",
+                    "mime_type": "image/png",
+                    "sha256": media_sha,
+                },
+            )
+        if request.url.host == "lookaside.fbsbx.com":
+            return httpx.Response(200, content=media_content)
+        body = json.loads(request.content)
+        if body.get("status") == "read":
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(
+            200,
+            json={
+                "contacts": [{"wa_id": "2348000000000"}],
+                "messages": [{"id": "wamid.media-reply"}],
+            },
+        )
+
+    provider = _client(handler)
+    assert (
+        provider.send_interactive_buttons(
+            "+2348000000000",
+            body="Send this exact quotation?",
+            buttons=[("confirm:1", "Confirm"), ("deny:1", "Cancel")],
+            reply_to_message_id="wamid.inbound-1",
+        )
+        == "wamid.media-reply"
+    )
+    media_id = provider.upload_media(
+        content=b"png-bytes",
+        mime_type="image/png",
+        filename="poster unsafe?.png",
+    )
+    assert media_id == "media-12345"
+    assert (
+        provider.send_media(
+            "+2348000000000",
+            media_type="image",
+            media_id=media_id,
+            caption="Your poster",
+            reply_to_message_id="wamid.inbound-1",
+        )
+        == "wamid.media-reply"
+    )
+    provider.mark_read("wamid.inbound-1", typing=True)
+    downloaded = provider.download_media(media_id, max_bytes=65_536)
+
+    assert downloaded["content"] == media_content
+    assert downloaded["sha256"] == media_sha
+    interactive = json.loads(requests[0].content)
+    assert interactive["context"]["message_id"] == "wamid.inbound-1"
+    assert interactive["interactive"]["action"]["buttons"][0]["reply"]["title"] == "Confirm"
+    control = next(
+        json.loads(request.content)
+        for request in requests
+        if request.url.path.endswith("/messages")
+        and json.loads(request.content).get("status") == "read"
+    )
+    assert control["typing_indicator"] == {"type": "text"}
+
+    with pytest.raises(ValueError, match="one to three"):
+        provider.send_interactive_buttons(
+            "+2348000000000",
+            body="Invalid",
+            buttons=[],
+        )
+    with pytest.raises(ValueError, match="Only audio"):
+        provider.send_media(
+            "+2348000000000",
+            media_type="image",
+            media_id=media_id,
+            voice=True,
+        )
+    with pytest.raises(ValueError, match="safe limit"):
+        provider.upload_media(content=b"", mime_type="image/png", filename="empty.png")
+
+
+def test_meta_rejects_untrusted_media_locations_and_checksum_mismatch() -> None:
+    def untrusted(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media-12345"):
+            return httpx.Response(
+                200,
+                json={"url": "https://attacker.example/private", "mime_type": "image/png"},
+            )
+        raise AssertionError("Untrusted media URL must never be fetched")
+
+    with pytest.raises(MetaProviderError) as unsafe:
+        _client(untrusted).download_media("media-12345", max_bytes=65_536)
+    assert unsafe.value.category == "invalid_response"
+
+    def mismatch(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media-12345"):
+            return httpx.Response(
+                200,
+                json={
+                    "url": "https://lookaside.fbsbx.com/media",
+                    "mime_type": "image/png",
+                    "sha256": "0" * 64,
+                },
+            )
+        return httpx.Response(200, content=b"different")
+
+    with pytest.raises(MetaProviderError) as checksum:
+        _client(mismatch).download_media("media-12345", max_bytes=65_536)
+    assert checksum.value.category == "invalid_response"
+
+
 def test_meta_errors_are_sanitized_and_classified() -> None:
     secret_marker = "customer-phone-and-provider-secret"
 

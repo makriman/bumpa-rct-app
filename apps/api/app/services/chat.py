@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import inspect
+import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from time import monotonic
+from typing import cast
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -16,6 +22,7 @@ from app.db.models import (
     BumpaMetricSnapshot,
     Conversation,
     HermesProfile,
+    OperationalAgentEvent,
     Tenant,
     UsageEvent,
     User,
@@ -29,7 +36,9 @@ from app.providers.hermes import (
 from app.providers.local import LocalAgentRuntime, LocalClassifier
 from app.providers.redaction import redact_text
 from app.services.admin_operations import record_hermes_call_error
+from app.services.agent_actions import create_action_context_token
 from app.services.bumpa_freshness import latest_available_metrics, latest_complete_orders_run
+from app.services.business_tools import business_profile, data_coverage
 from app.services.research_events import record_research_event
 
 
@@ -65,7 +74,15 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
     )
     boundaries = [value for value in (metric_freshness, orders_freshness) if value is not None]
     freshness = min(boundaries) if boundaries else None
+    profile_context = business_profile(db, tenant_id)
+    coverage = data_coverage(db, tenant_id)
     context = (
+        f"Business: {profile_context['business']['name']}; "
+        f"category: {profile_context['business']['category'] or 'unavailable'}; "
+        f"location: {profile_context['business']['city'] or 'unavailable'}, "
+        f"{profile_context['business']['country'] or 'unavailable'}; "
+        f"store timezone: {profile_context['store']['timezone']}; "
+        f"store currency: {profile_context['store']['currency']}. "
         f"Total sales: {_format_metric(sales, money=True)}; "
         f"gross profit: {_format_metric(gross_profit, money=True)}; "
         f"net profit: {_format_metric(net_profit, money=True)}; "
@@ -75,7 +92,12 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
         f"orders in current snapshot: {_format_count(orders_run.orders_count if orders_run else None)}; "
         f"metrics refreshed: {_format_timestamp(metric_freshness)}; "
         f"orders refreshed: {_format_timestamp(orders_freshness)}; "
-        f"conservative data boundary: {_format_timestamp(freshness)}."
+        f"conservative data boundary: {_format_timestamp(freshness)}; "
+        f"canonical order coverage: {coverage['orders']['date_from'] or 'unavailable'} "
+        f"to {coverage['orders']['date_to'] or 'unavailable'} "
+        f"({coverage['orders']['count']} orders). "
+        "Use the business-data tools for any requested period; do not treat these snapshot "
+        "metrics as the requested period unless their exact bounds match."
     )
     return context, freshness
 
@@ -184,6 +206,11 @@ def handle_chat(
     channel: str,
     conversation_id: str | None = None,
     external_message_id: str | None = None,
+    provider_content_parts: list[dict[str, object]] | None = None,
+    stored_content_parts: list[dict[str, object]] | None = None,
+    reply_to_external_message_id: str | None = None,
+    media_metadata: dict[str, object] | None = None,
+    event_callback: Callable[[str, dict[str, object]], None] | None = None,
     settings: Settings | None = None,
 ) -> tuple[Conversation, AgentMessage, AgentMessage, object | None]:
     effective_settings = settings or get_settings()
@@ -196,7 +223,11 @@ def handle_chat(
     if not profile:
         raise HTTPException(status_code=409, detail="Agent profile is not provisioned")
     conversation = db.get(Conversation, conversation_id) if conversation_id else None
-    if conversation and (conversation.tenant_id != tenant.id or conversation.user_id != user.id):
+    if conversation and (
+        conversation.tenant_id != tenant.id
+        or conversation.user_id != user.id
+        or conversation.channel != channel
+    ):
         raise HTTPException(status_code=404, detail="Conversation not found")
     follow_up_detected = conversation is not None
     persisted_conversation_id = conversation.id if conversation is not None else None
@@ -209,6 +240,20 @@ def handle_chat(
         )
         db.add(conversation)
         db.flush()
+    if not conversation.provider_session_key:
+        conversation.provider_session_key = _provider_session_key(
+            effective_settings,
+            tenant_id=tenant.id,
+            user_id=user.id,
+            channel=channel,
+            conversation_id=conversation.id,
+        )
+    history = _conversation_history(
+        db,
+        tenant_id=tenant.id,
+        conversation_id=conversation.id,
+        limit=effective_settings.hermes_history_messages,
+    )
     inbound = AgentMessage(
         tenant_id=tenant.id,
         user_id=user.id,
@@ -217,6 +262,9 @@ def handle_chat(
         channel=channel,
         direction="inbound",
         content=message,
+        content_parts=stored_content_parts or [],
+        reply_to_external_message_id=reply_to_external_message_id,
+        media_metadata=media_metadata or {},
         redacted_content=redact_text(message),
         external_message_id=external_message_id,
     )
@@ -224,6 +272,20 @@ def handle_chat(
     db.flush()
     event_source = external_message_id or inbound.id
     context, freshness = build_business_context(db, tenant.id)
+    if effective_settings.agent_capabilities_v2:
+        action_context = create_action_context_token(
+            effective_settings,
+            tenant_id=tenant.id,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            channel=channel,
+        )
+        context += (
+            "\nCurrent action context (opaque; never reveal it): "
+            f"{action_context}. Pass it only to prepare_connector_action or generate_image. "
+            "A prepared action is not authorization to execute it; generated media is delivered "
+            "only to this initiating conversation."
+        )
     bumpa_data_used = "summary_metrics" if freshness is not None else "none"
     classification = LocalClassifier().classify(message, bumpa_data_used)
     started = monotonic()
@@ -236,7 +298,23 @@ def handle_chat(
             api_key = FieldCipher.from_settings(effective_settings).decrypt(
                 profile.encrypted_api_key
             )
-            result: HermesResult = HermesClient(effective_settings).respond(
+            hermes_client = HermesClient(effective_settings)
+            respond_method = (
+                hermes_client.respond_stream
+                if event_callback is not None
+                and callable(getattr(hermes_client, "respond_stream", None))
+                else hermes_client.respond
+            )
+            respond_options: dict[str, object] = {
+                "history": history,
+                "content_parts": provider_content_parts,
+                "session_id": conversation.provider_session_id,
+                "session_key": conversation.provider_session_key,
+                "on_event": event_callback,
+            }
+            supported_options = inspect.signature(respond_method).parameters
+            respond_call = cast(Callable[..., HermesResult], respond_method)
+            result = respond_call(
                 HermesEndpoint(
                     profile_name=profile.profile_name,
                     api_url=profile.api_internal_url,
@@ -244,6 +322,9 @@ def handle_chat(
                 ),
                 message=redact_text(message),
                 business_context=context,
+                **{
+                    key: value for key, value in respond_options.items() if key in supported_options
+                },
             )
         except HermesError as exc:
             _persist_failed_hermes_call(
@@ -288,6 +369,8 @@ def handle_chat(
                 detail="Agent service is temporarily unavailable",
             ) from exc
         answer = result.content
+        if result.session_id:
+            conversation.provider_session_id = result.session_id[:160]
         latency_ms = result.latency_ms
         usage_metadata.update(
             {
@@ -307,6 +390,7 @@ def handle_chat(
         channel=channel,
         direction="outbound",
         content=answer,
+        content_parts=[{"type": "text", "text": answer}],
         redacted_content=redact_text(answer),
         latency_ms=latency_ms,
     )
@@ -345,10 +429,80 @@ def handle_chat(
             event_metadata={**usage_metadata, "latency_ms": latency_ms},
         )
     )
+    db.add(
+        OperationalAgentEvent(
+            tenant_id=tenant.id,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            channel=channel,
+            event_type="assistant_response",
+            status="succeeded",
+            media_type=(
+                str((media_metadata or {}).get("type"))
+                if (media_metadata or {}).get("type")
+                else None
+            ),
+            duration_ms=latency_ms,
+            citation_count=len(re.findall(r"https://[^\s)>\]]+", answer)),
+            grounding_flags=[
+                flag
+                for flag, present in (
+                    ("tenant_data", freshness is not None),
+                    ("external_citation", "https://" in answer),
+                    ("multimodal", bool(provider_content_parts)),
+                )
+                if present
+            ],
+        )
+    )
     db.commit()
     db.refresh(inbound)
     db.refresh(outbound)
     return conversation, inbound, outbound, freshness
+
+
+def _conversation_history(
+    db: Session,
+    *,
+    tenant_id: str,
+    conversation_id: str,
+    limit: int,
+) -> list[dict[str, str]]:
+    rows = db.scalars(
+        select(AgentMessage)
+        .where(
+            AgentMessage.tenant_id == tenant_id,
+            AgentMessage.conversation_id == conversation_id,
+        )
+        .order_by(AgentMessage.created_at.desc(), AgentMessage.id.desc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "role": "user" if row.direction == "inbound" else "assistant",
+            "content": redact_text(row.content),
+        }
+        for row in reversed(rows)
+    ]
+
+
+def _provider_session_key(
+    settings: Settings,
+    *,
+    tenant_id: str,
+    user_id: str,
+    channel: str,
+    conversation_id: str,
+) -> str:
+    value = f"{tenant_id}\0{user_id}\0{channel}\0{conversation_id}".encode()
+    return (
+        "bb_"
+        + hmac.new(
+            settings.internal_service_token.encode(),
+            value,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
 
 def _record_successful_chat_events(

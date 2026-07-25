@@ -1,0 +1,8 @@
+node_modules
+.wrangler
+worker-configuration.d.ts
+test
+src
+package-lock.json
+package.json
+tsconfig.json

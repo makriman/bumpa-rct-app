@@ -6,11 +6,12 @@ import logging
 from hashlib import sha256
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import PlainTextResponse
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
+from app.services.whatsapp import acknowledge_inbound_receipts
 from app.services.whatsapp_webhook_ingress import (
     InlineWebhookProcessingError,
     WebhookClaimConflict,
@@ -42,6 +43,7 @@ def verify_webhook(
 @router.post("")
 async def receive_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """Verify, persist, and atomically enqueue before acknowledging Meta."""
@@ -64,6 +66,9 @@ async def receive_webhook(
         claimed = await run_in_threadpool(claim_webhook_events, payload, raw)
     except WebhookClaimConflict:
         raise HTTPException(status_code=409, detail="Webhook event could not be claimed") from None
+
+    if not settings.is_local:
+        background_tasks.add_task(acknowledge_inbound_receipts, payload, settings)
 
     if settings.is_local:
         try:

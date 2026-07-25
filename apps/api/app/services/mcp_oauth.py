@@ -361,6 +361,70 @@ def exchange_authorization_code(
     return bundle
 
 
+def refresh_access_token(
+    *,
+    settings: Settings,
+    provider: McpProvider,
+    credential_bundle: dict[str, Any],
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """Refresh a Google access token through the provider's fixed token host."""
+
+    client_config = oauth_client(settings, provider)
+    refresh_token = credential_bundle.get("refresh_token")
+    if (
+        client_config is None
+        or provider == "meta_ads"
+        or not isinstance(refresh_token, str)
+        or not 8 <= len(refresh_token) <= 16_384
+    ):
+        raise McpOAuthError("The connector authorization has expired; reconnect it.")
+    try:
+        with httpx.Client(
+            timeout=settings.mcp_oauth_request_timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+            transport=transport,
+        ) as client:
+            response = client.post(
+                client_config.definition.exchange_url,
+                data={
+                    "client_id": client_config.client_id,
+                    "client_secret": client_config.client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                headers={"Accept": "application/json", "User-Agent": "BumpaBestie/1.0"},
+            )
+    except httpx.HTTPError as exc:
+        raise McpOAuthError("The connector authorization service is unavailable.") from exc
+    if not 200 <= response.status_code < 300 or len(response.content) > (
+        settings.mcp_oauth_max_response_bytes
+    ):
+        raise McpOAuthError("The connector authorization has expired; reconnect it.")
+    try:
+        payload = response.json()
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise McpOAuthError("The connector authorization returned an invalid response.") from exc
+    if not isinstance(payload, dict):
+        raise McpOAuthError("The connector authorization returned an invalid response.")
+    access_token = payload.get("access_token")
+    if not isinstance(access_token, str) or not 8 <= len(access_token) <= 16_384:
+        raise McpOAuthError("The connector authorization returned an invalid response.")
+    refreshed = dict(credential_bundle)
+    refreshed["access_token"] = access_token
+    refreshed["refresh_token"] = refresh_token
+    refreshed["obtained_at"] = int(utcnow().timestamp())
+    expires_in = payload.get("expires_in")
+    if isinstance(expires_in, int) and 0 <= expires_in <= 31_536_000:
+        refreshed["expires_in"] = expires_in
+    for key in ("token_type", "scope"):
+        value = payload.get(key)
+        if isinstance(value, str) and len(value) <= 16_384:
+            refreshed[key] = value
+    return refreshed
+
+
 def revoke_oauth_token(
     *,
     settings: Settings,

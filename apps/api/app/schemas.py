@@ -217,12 +217,21 @@ class ChatRequest(BaseModel):
     client_message_id: str | None = Field(default=None, max_length=160)
 
 
+class GeneratedMediaView(BaseModel):
+    id: str
+    media_type: Literal["image"]
+    mime_type: str
+    byte_size: int
+    url: str
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     inbound_message_id: str
     outbound_message_id: str
     answer: str
     data_freshness: datetime | None = None
+    generated_media: list[GeneratedMediaView] = Field(default_factory=list)
 
 
 class ConversationSummary(BaseModel):
@@ -258,6 +267,7 @@ class ConsentUpdate(BaseModel):
 class McpConnectionCreate(BaseModel):
     provider: McpProvider
     scopes: list[str] = Field(default_factory=list, max_length=20)
+    allowed_resources: list[str] = Field(default_factory=list, max_length=100)
     read_only: bool = True
 
 
@@ -266,6 +276,7 @@ class McpConnectionView(BaseModel):
     provider: McpProvider
     status: str
     scopes: list[str]
+    allowed_resources: list[str]
     read_only: bool
     admin_approved: bool
     oauth_available: bool
@@ -293,6 +304,26 @@ class McpToolPermissionUpdate(BaseModel):
         if self.permission == "write_with_confirmation" and not self.acknowledge_write_confirmation:
             raise ValueError("Write permission requires confirmation-policy acknowledgement")
         return self
+
+
+class McpAllowedResourcesUpdate(BaseModel):
+    allowed_resources: list[str] = Field(max_length=100)
+
+
+class AgentActionDecision(BaseModel):
+    confirmation_token: str = Field(min_length=32, max_length=512)
+
+
+class PendingAgentActionView(BaseModel):
+    id: str
+    conversation_id: str | None
+    tool_name: str
+    target_summary: str
+    exact_input: dict[str, Any]
+    status: str
+    expires_at: datetime
+    confirmation_token: str | None = None
+    action_result: dict[str, Any] | None = None
 
 
 class McpAdminDecision(BaseModel):
