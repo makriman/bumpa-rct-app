@@ -796,6 +796,57 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/chat/actions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Pending Actions */
+    get: operations["pending_actions_v1_chat_actions_get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/chat/actions/{action_id}/confirm": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Confirm Pending Action */
+    post: operations["confirm_pending_action_v1_chat_actions__action_id__confirm_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/chat/actions/{action_id}/deny": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Deny Pending Action */
+    post: operations["deny_pending_action_v1_chat_actions__action_id__deny_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/chat/conversations": {
     parameters: {
       query?: never;
@@ -864,6 +915,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/chat/media/{media_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Generated Media */
+    get: operations["generated_media_v1_chat_media__media_id__get"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/chat/web": {
     parameters: {
       query?: never;
@@ -875,6 +943,26 @@ export interface paths {
     put?: never;
     /** Web Chat */
     post: operations["web_chat_v1_chat_web_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/v1/chat/web/stream": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Web Chat Stream
+     * @description Stream durable assistant and tool lifecycle events as SSE.
+     */
+    post: operations["web_chat_stream_v1_chat_web_stream_post"];
     delete?: never;
     options?: never;
     head?: never;
@@ -1220,6 +1308,23 @@ export interface paths {
     patch: operations["update_mcp_permission_v1_settings_mcp_connections__connection_id__permissions__tool_name__patch"];
     trace?: never;
   };
+  "/v1/settings/mcp-connections/{connection_id}/resources": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    /** Update Mcp Allowed Resources */
+    patch: operations["update_mcp_allowed_resources_v1_settings_mcp_connections__connection_id__resources_patch"];
+    trace?: never;
+  };
   "/v1/settings/mcp-oauth/callback": {
     parameters: {
       query?: never;
@@ -1469,6 +1574,11 @@ export interface components {
       /** Status */
       status: string;
     };
+    /** AgentActionDecision */
+    AgentActionDecision: {
+      /** Confirmation Token */
+      confirmation_token: string;
+    };
     /** AsyncJobReplayRequest */
     AsyncJobReplayRequest: {
       /** Max Attempts */
@@ -1634,6 +1744,8 @@ export interface components {
       conversation_id: string;
       /** Data Freshness */
       data_freshness?: string | null;
+      /** Generated Media */
+      generated_media?: components["schemas"]["GeneratedMediaView"][];
       /** Inbound Message Id */
       inbound_message_id: string;
       /** Outbound Message Id */
@@ -1674,6 +1786,22 @@ export interface components {
       items: components["schemas"]["ConversationSummary"][];
       /** Next Cursor */
       next_cursor?: string | null;
+    };
+    /** GeneratedMediaView */
+    GeneratedMediaView: {
+      /** Byte Size */
+      byte_size: number;
+      /** Id */
+      id: string;
+      /**
+       * Media Type
+       * @constant
+       */
+      media_type: "image";
+      /** Mime Type */
+      mime_type: string;
+      /** Url */
+      url: string;
     };
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -1744,6 +1872,8 @@ export interface components {
     McpAdminConnectionView: {
       /** Admin Approved */
       admin_approved: boolean;
+      /** Allowed Resources */
+      allowed_resources: string[];
       /**
        * Created At
        * Format: date-time
@@ -1790,8 +1920,15 @@ export interface components {
       /** Reason */
       reason: string;
     };
+    /** McpAllowedResourcesUpdate */
+    McpAllowedResourcesUpdate: {
+      /** Allowed Resources */
+      allowed_resources: string[];
+    };
     /** McpConnectionCreate */
     McpConnectionCreate: {
+      /** Allowed Resources */
+      allowed_resources?: string[];
       /**
        * Provider
        * @enum {string}
@@ -1814,6 +1951,8 @@ export interface components {
     McpConnectionView: {
       /** Admin Approved */
       admin_approved: boolean;
+      /** Allowed Resources */
+      allowed_resources: string[];
       /** Id */
       id: string;
       /** Oauth Available */
@@ -2171,6 +2310,34 @@ export interface components {
       code: string;
       /** Phone E164 */
       phone_e164: string;
+    };
+    /** PendingAgentActionView */
+    PendingAgentActionView: {
+      /** Action Result */
+      action_result?: {
+        [key: string]: unknown;
+      } | null;
+      /** Confirmation Token */
+      confirmation_token?: string | null;
+      /** Conversation Id */
+      conversation_id: string | null;
+      /** Exact Input */
+      exact_input: {
+        [key: string]: unknown;
+      };
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string;
+      /** Id */
+      id: string;
+      /** Status */
+      status: string;
+      /** Target Summary */
+      target_summary: string;
+      /** Tool Name */
+      tool_name: string;
     };
     /** PhoneCreate */
     PhoneCreate: {
@@ -4394,6 +4561,123 @@ export interface operations {
       };
     };
   };
+  pending_actions_v1_chat_actions_get: {
+    parameters: {
+      query?: {
+        status?: string;
+        limit?: number;
+      };
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PendingAgentActionView"][];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  confirm_pending_action_v1_chat_actions__action_id__confirm_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        action_id: string;
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AgentActionDecision"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PendingAgentActionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  deny_pending_action_v1_chat_actions__action_id__deny_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        action_id: string;
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AgentActionDecision"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PendingAgentActionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   conversations_v1_chat_conversations_get: {
     parameters: {
       query?: {
@@ -4546,6 +4830,42 @@ export interface operations {
       };
     };
   };
+  generated_media_v1_chat_media__media_id__get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        media_id: string;
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
   web_chat_v1_chat_web_post: {
     parameters: {
       query?: never;
@@ -4571,6 +4891,44 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ChatResponse"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  web_chat_stream_v1_chat_web_stream_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ChatRequest"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": unknown;
         };
       };
       /** @description Validation Error */
@@ -5375,6 +5733,46 @@ export interface operations {
     requestBody: {
       content: {
         "application/json": components["schemas"]["McpToolPermissionUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["McpConnectionView"];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  update_mcp_allowed_resources_v1_settings_mcp_connections__connection_id__resources_patch: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        connection_id: string;
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["McpAllowedResourcesUpdate"];
       };
     };
     responses: {

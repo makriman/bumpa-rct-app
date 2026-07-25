@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from typing import cast
 
@@ -23,6 +24,7 @@ from app.db.models import (
 )
 from app.db.session import get_db, set_security_context
 from app.schemas import (
+    McpAllowedResourcesUpdate,
     McpConnectionCreate,
     McpConnectionView,
     McpOAuthStartView,
@@ -402,6 +404,7 @@ def create_mcp_connection(
         provider=payload.provider,
         status="admin_pending",
         scopes=expected_scopes,
+        allowed_resources=_validated_allowed_resources(payload.allowed_resources),
         read_only=payload.read_only,
     )
     db.add(connection)
@@ -423,6 +426,7 @@ def create_mcp_connection(
             "provider": payload.provider,
             "read_only": payload.read_only,
             "scopes": expected_scopes,
+            "allowed_resources": connection.allowed_resources,
         },
     )
     try:
@@ -433,6 +437,38 @@ def create_mcp_connection(
             status_code=409, detail="This connector has already been requested"
         ) from exc
     return _mcp_connection_view(connection, settings, {})
+
+
+@router.patch(
+    "/mcp-connections/{connection_id}/resources",
+    response_model=McpConnectionView,
+)
+def update_mcp_allowed_resources(
+    connection_id: str,
+    payload: McpAllowedResourcesUpdate,
+    principal: Principal = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> McpConnectionView:
+    connection = _tenant_mcp_connection(db, principal, connection_id)
+    before = list(connection.allowed_resources)
+    connection.allowed_resources = _validated_allowed_resources(payload.allowed_resources)
+    audit(
+        db,
+        actor_user_id=principal.user.id,
+        tenant_id=connection.tenant_id,
+        action="mcp.allowed_resources.updated",
+        resource_type="mcp_connection",
+        resource_id=connection.id,
+        before={"allowed_resources": before},
+        after={"allowed_resources": connection.allowed_resources},
+    )
+    db.commit()
+    return _mcp_connection_view(
+        connection,
+        settings,
+        _connection_permissions(db, connection.id),
+    )
 
 
 @router.delete("/mcp-connections/{connection_id}", status_code=204)
@@ -726,11 +762,24 @@ def _mcp_connection_view(
         provider=provider,
         status=connection.status,
         scopes=list(connection.scopes),
+        allowed_resources=list(connection.allowed_resources),
         read_only=connection.read_only,
         admin_approved=connection.admin_approved,
         oauth_available=oauth_client(settings, provider) is not None,
         permissions=permissions,
     )
+
+
+def _validated_allowed_resources(values: list[str]) -> list[str]:
+    normalized = sorted({value.strip() for value in values if value.strip()})
+    pattern = re.compile(
+        r"(?:drive:file|drive:folder|sheets:spreadsheet|gmail:label|"
+        r"gmail:recipient-domain|calendar:calendar|meta_ads:account):"
+        r"[A-Za-z0-9@._-]+"
+    )
+    if any(len(value) > 300 or not pattern.fullmatch(value) for value in normalized):
+        raise HTTPException(status_code=422, detail="A connector resource is invalid")
+    return normalized
 
 
 def _mcp_redirect(settings: Settings, outcome: str) -> RedirectResponse:

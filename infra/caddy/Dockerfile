@@ -9,10 +9,15 @@ ADD --checksum=sha256:33777097f666d60d78bfb74df06978c933f32aa5a0d4ce0b0c5d028489
     /tmp/caddy.tar.gz
 RUN mkdir -p /out \
     && tar -xzf /tmp/caddy.tar.gz -C /src/caddy \
+    && go get google.golang.org/grpc@v1.82.1 \
+    && go mod vendor \
     && go build -mod=vendor -trimpath -buildvcs=false \
       -tags=nobadger,nomysql,nopgx \
       -ldflags='-s -w' \
       -o /out/caddy . \
+    && go version -m /out/caddy \
+      | grep -F 'google.golang.org/grpc' \
+      | grep -F 'v1.82.1' \
     && /out/caddy version
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runtime
@@ -36,7 +41,7 @@ ENV CADDY_VERSION=v2.11.4 \
     XDG_DATA_HOME=/data
 
 LABEL org.opencontainers.image.title="BumpaBestie Caddy" \
-      org.opencontainers.image.description="Caddy 2.11.4 rebuilt with patched Go 1.26.5" \
+      org.opencontainers.image.description="Caddy 2.11.4 rebuilt with patched Go 1.26.5 and gRPC-Go 1.82.1" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/makriman/bumpa-rct-app"
 

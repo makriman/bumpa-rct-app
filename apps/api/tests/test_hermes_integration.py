@@ -35,6 +35,8 @@ from app.providers.hermes import (
     activate_reserved_profile,
     materialize_profile,
     provision_profile,
+    reconcile_profile_bundle,
+    refresh_profile_status,
     reserve_profile,
 )
 from tests.conftest import auth_headers
@@ -606,3 +608,238 @@ def test_hermes_profile_url_cannot_escape_private_runtime(tmp_path: Path) -> Non
             message="question",
             business_context="summary",
         )
+
+
+def test_stream_accepts_native_and_openai_events_without_leaking_tool_payloads(
+    tmp_path: Path,
+) -> None:
+    captured: list[httpx.Request] = []
+    stream = "\n".join(
+        (
+            "ignored: keepalive",
+            'data: ["not", "an", "event"]',
+            "event: message.delta",
+            'data: {"type":"message.delta","delta":"Native "}',
+            "",
+            'data: {"choices":[{"delta":{"tool_calls":[{"function":'
+            '{"name":"get_business_overview","arguments":"private"}}]}}]}',
+            'data: {"choices":[{"delta":{"content":"answer"}}],'
+            '"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}',
+            "data: [DONE]",
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            text=stream,
+            headers={
+                "content-type": "text/event-stream",
+                "x-hermes-session-id": "session-two",
+                "x-hermes-session-key": "key-two",
+            },
+        )
+
+    events: list[tuple[str, dict[str, object]]] = []
+    result = HermesClient(
+        _settings(tmp_path, hermes_temperature=None),
+        transport=httpx.MockTransport(handler),
+    ).respond_stream(
+        HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
+        message="Continue",
+        business_context="Exact period: 2026-07-01 to 2026-07-25.",
+        history=[{"role": "user", "content": "This must not be replayed."}],
+        content_parts=[{"type": "text", "text": "Continue with the attached image."}],
+        session_id="existing-session",
+        session_key="existing-key",
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    payload = json.loads(captured[0].content)
+    assert payload["stream_options"] == {"include_usage": True}
+    assert "temperature" not in payload
+    assert "This must not be replayed." not in json.dumps(payload)
+    assert captured[0].headers["x-hermes-session-id"] == "existing-session"
+    assert captured[0].headers["x-hermes-session-key"] == "existing-key"
+    assert result.content == "Native answer"
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (12, 3, 15)
+    assert result.session_id == "session-two"
+    assert result.session_key == "key-two"
+    assert (
+        "tool.progress",
+        {"tool": "get_business_overview", "status": "working"},
+    ) in events
+    assert "private" not in json.dumps(events)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    (
+        (401, HermesAuthenticationError),
+        (429, HermesRateLimited),
+        (503, HermesUnavailable),
+        (422, HermesInvalidResponse),
+    ),
+)
+def test_stream_maps_provider_statuses(
+    tmp_path: Path,
+    status_code: int,
+    expected: type[Exception],
+) -> None:
+    client = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(lambda _request: httpx.Response(status_code)),
+        breaker=HermesCircuitBreaker(threshold=20, recovery_seconds=30),
+    )
+    with pytest.raises(expected):
+        client.respond_stream(
+            HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
+            message="question",
+            business_context="bounded",
+            on_event=lambda _name, _data: None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "max_bytes", "match"),
+    (
+        ("data: not-json\n", 4096, "invalid stream event"),
+        ('data: {"choices":[{"delta":{}}]}\n', 4096, "empty response"),
+        ('data: {"type":"message.delta","delta":"' + ("x" * 5000) + '"}\n', 4096, "limit"),
+    ),
+)
+def test_stream_rejects_invalid_empty_and_oversized_responses(
+    tmp_path: Path,
+    body: str,
+    max_bytes: int,
+    match: str,
+) -> None:
+    client = HermesClient(
+        _settings(tmp_path, hermes_max_response_bytes=max_bytes),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                text=body,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+    )
+    with pytest.raises(HermesInvalidResponse, match=match):
+        client.respond_stream(
+            HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
+            message="question",
+            business_context="bounded",
+            on_event=lambda _name, _data: None,
+        )
+
+
+def test_non_streaming_sessions_multimodal_readiness_and_validation(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/health/detailed":
+            return httpx.Response(200, json={"status": "degraded"})
+        return httpx.Response(
+            200,
+            json=_completion("Multimodal answer"),
+            headers={
+                "x-hermes-session-id": "continued-session",
+                "x-hermes-session-key": "continued-key",
+            },
+        )
+
+    client = HermesClient(
+        _settings(tmp_path, hermes_temperature=None),
+        transport=httpx.MockTransport(handler),
+    )
+    endpoint = HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key")
+    result = client.respond(
+        endpoint,
+        message="fallback",
+        business_context="bounded",
+        history=[{"role": "assistant", "content": "must be omitted"}],
+        content_parts=[{"type": "text", "text": "inspect this"}],
+        session_id="existing-session",
+        session_key="existing-key",
+    )
+    payload = json.loads(requests[0].content)
+    assert "must be omitted" not in json.dumps(payload)
+    assert payload["messages"][-1]["content"] == [{"type": "text", "text": "inspect this"}]
+    assert "temperature" not in payload
+    assert requests[0].headers["x-hermes-session-id"] == "existing-session"
+    assert result.session_id == "continued-session"
+    assert result.session_key == "continued-key"
+
+    readiness = client.readiness(endpoint)
+    assert readiness.ready is False
+    assert readiness.status == "degraded"
+    with pytest.raises(HermesProfileError, match="name"):
+        client.respond(
+            HermesEndpoint("!", endpoint.api_url, endpoint.api_key),
+            message="question",
+            business_context="bounded",
+        )
+    with pytest.raises(HermesProfileError, match="key"):
+        client.respond(
+            HermesEndpoint("tenant_profile", endpoint.api_url, "short"),
+            message="question",
+            business_context="bounded",
+        )
+    with pytest.raises(HermesProfileError, match="invalid port"):
+        client.respond(
+            HermesEndpoint(
+                "tenant_profile",
+                "http://hermes:999999999999999999999/v1",
+                endpoint.api_key,
+            ),
+            message="question",
+            business_context="bounded",
+        )
+
+
+def test_profile_reconciliation_refresh_and_capacity_guards(tmp_path: Path) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    settings = _settings(tmp_path, hermes_profile_port_start=8700, hermes_profile_port_end=8700)
+
+    class NotReadyClient:
+        def readiness(self, _endpoint: HermesEndpoint) -> HermesReadiness:
+            return HermesReadiness(False, "degraded", 5)
+
+    with factory() as db:
+        tenant = Tenant(slug="reconcile", name="Reconcile")
+        second = Tenant(slug="capacity", name="Capacity")
+        db.add_all((tenant, second))
+        db.flush()
+        profile = provision_profile(db, tenant, settings)
+        target = Path(profile.profile_path or "")
+        (target / "SOUL.md").write_text("stale", encoding="utf-8")
+        (target / ".no-skills").write_text("legacy", encoding="utf-8")
+
+        reconciled = reconcile_profile_bundle(profile, tenant, settings)
+        assert reconciled == target
+        assert "business consultant" in (target / "SOUL.md").read_text()
+        assert not (target / ".no-skills").exists()
+        readiness = refresh_profile_status(profile, settings, client=NotReadyClient())  # type: ignore[arg-type]
+        assert readiness.ready is False
+        assert profile.status == "degraded"
+        assert reserve_profile(db, tenant, settings).id == profile.id
+        with pytest.raises(HermesProfileError, match="ports"):
+            reserve_profile(db, second, settings)
+
+        profile.provider = "other"
+        with pytest.raises(HermesProfileError, match="non-Hermes"):
+            reserve_profile(db, tenant, settings)
+
+    production = _settings(tmp_path, app_env="staging")
+    with factory() as db:
+        tenant = Tenant(slug="production-wrapper", name="Production Wrapper")
+        db.add(tenant)
+        db.flush()
+        with pytest.raises(HermesProfileError, match="DB-first"):
+            provision_profile(db, tenant, production)

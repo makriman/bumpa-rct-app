@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
-.PHONY: help bootstrap install lint format-check typecheck build bundle-isolation test test-api test-web test-ops react-doctor lighthouse e2e e2e-linux temporary-auth-e2e integration load-failure \
+.PHONY: help bootstrap install lint format-check typecheck build bundle-isolation test test-api test-web test-ops sandbox-check deploy-sandbox react-doctor lighthouse e2e e2e-linux temporary-auth-e2e integration load-failure \
 	quality dev down logs migrate seed-demo reset-demo compose-config compose-prod-config \
 	compose-up compose-down compose-smoke smoke backup restore deploy shellcheck production-contract \
 	api-contract api-contract-check clean
@@ -19,6 +19,7 @@ install: ## Install Python and web development dependencies
 	npm --prefix apps/web ci
 	npm --prefix apps/admin-web ci
 	npm --prefix apps/research-web ci
+	npm --prefix apps/sandbox-worker ci
 
 lint: ## Run backend and frontend linters
 	cd apps/api && uv run ruff check app tests
@@ -38,6 +39,7 @@ typecheck: ## Run strict backend and frontend type checking
 	npm --prefix apps/web run typecheck
 	npm --prefix apps/admin-web run typecheck
 	npm --prefix apps/research-web run typecheck
+	npm --prefix apps/sandbox-worker run typecheck
 
 build: ## Build all three production frontends
 	npm --prefix apps/web run build
@@ -47,7 +49,7 @@ build: ## Build all three production frontends
 bundle-isolation: build ## Prove emitted client bundles and route manifests stay surface-isolated
 	node scripts/check_frontend_bundle_isolation.mjs
 
-test: test-api test-web test-ops ## Run unit and integration tests
+test: test-api test-web test-ops sandbox-check ## Run unit and integration tests
 
 test-api: ## Run backend tests with branch coverage
 	cd apps/api && uv run pytest --cov=app --cov-branch --cov-fail-under=85 --cov-report=term-missing --cov-report=xml
@@ -59,6 +61,13 @@ test-web: ## Run frontend unit tests with coverage
 
 test-ops: ## Run host operational-control unit tests
 	python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
+sandbox-check: ## Type-check and test the isolated Cloudflare Sandbox Worker
+	npm --prefix apps/sandbox-worker run typecheck
+	npm --prefix apps/sandbox-worker test
+
+deploy-sandbox: ## Deploy the isolated Cloudflare Worker using a host secret file
+	./scripts/deploy_sandbox_worker.sh
 
 react-doctor: ## Require zero React Doctor errors or warnings across all frontends
 	npx --yes react-doctor@0.8.3 . --project apps/web,apps/admin-web,apps/research-web --yes --blocking warning --no-telemetry

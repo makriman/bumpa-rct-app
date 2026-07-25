@@ -18,9 +18,14 @@ from app.main import app
 from app.services.mcp_oauth import (
     McpOAuthError,
     build_authorization_url,
+    connection_scopes,
     decode_oauth_state,
+    default_permissions,
     exchange_authorization_code,
+    refresh_access_token,
+    registry,
     revoke_oauth_token,
+    validate_tool_permission,
 )
 from app.services.mcp_permissions import McpPermissionDenied, authorize_mcp_tool
 from tests.conftest import auth_headers
@@ -381,3 +386,147 @@ def test_oauth_state_remains_readable_during_old_key_ttl_grace() -> None:
     after_grace = during_grace.model_copy(update={"field_encryption_old_keys": {}})
     with pytest.raises(McpOAuthError, match="invalid or expired"):
         decode_oauth_state(state, after_grace)
+
+
+def test_connector_registry_permissions_and_google_refresh_are_bounded() -> None:
+    configured = Settings(
+        app_env="test",
+        field_encryption_key="oauth-refresh-field-key-material-0001",
+        mcp_google_oauth_enabled=True,
+        google_oauth_client_id="google-client-id",
+        google_oauth_client_secret=secrets.token_urlsafe(24),
+    )
+    rows = registry(configured)
+    assert {row["provider"] for row in rows} == {
+        "google_drive",
+        "google_sheets",
+        "gmail",
+        "calendar",
+        "meta_ads",
+    }
+    assert next(row for row in rows if row["provider"] == "gmail")["enabled"] is True
+    assert next(row for row in rows if row["provider"] == "meta_ads")["enabled"] is False
+    assert any(
+        scope.endswith("/gmail.send") for scope in connection_scopes("gmail", read_only=False)
+    )
+    assert default_permissions("gmail", read_only=True) == {
+        "search_messages": "read",
+        "read_message": "read",
+    }
+    assert default_permissions("gmail", read_only=False)["send_message"] == "deny"
+    validate_tool_permission("gmail", "read_message", "read", read_only=True)
+    validate_tool_permission(
+        "gmail",
+        "send_message",
+        "write_with_confirmation",
+        read_only=False,
+    )
+    with pytest.raises(ValueError, match="approved provider"):
+        validate_tool_permission("gmail", "shell", "read", read_only=True)
+    with pytest.raises(ValueError, match="Write tools"):
+        validate_tool_permission("gmail", "send_message", "read", read_only=False)
+    with pytest.raises(ValueError, match="Read tools"):
+        validate_tool_permission(
+            "gmail",
+            "read_message",
+            "write_with_confirmation",
+            read_only=False,
+        )
+    with pytest.raises(ValueError, match="read-only"):
+        validate_tool_permission(
+            "gmail",
+            "send_message",
+            "write_with_confirmation",
+            read_only=True,
+        )
+
+    captured: list[httpx.Request] = []
+
+    def success(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "refreshed-access-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "scope-a scope-b",
+            },
+        )
+
+    original = {
+        "access_token": "old-access-token",
+        "refresh_token": "persistent-refresh-token",
+        "custom": "preserved",
+    }
+    refreshed = refresh_access_token(
+        settings=configured,
+        provider="gmail",
+        credential_bundle=original,
+        transport=httpx.MockTransport(success),
+    )
+    assert captured[0].url == httpx.URL("https://oauth2.googleapis.com/token")
+    form = parse_qs(captured[0].content.decode())
+    assert form["grant_type"] == ["refresh_token"]
+    assert form["refresh_token"] == ["persistent-refresh-token"]
+    assert refreshed["access_token"] == "refreshed-access-token"
+    assert refreshed["refresh_token"] == "persistent-refresh-token"
+    assert refreshed["custom"] == "preserved"
+    assert refreshed["expires_in"] == 3600
+    assert refreshed["token_type"] == "Bearer"
+
+
+@pytest.mark.parametrize(
+    ("response", "match"),
+    (
+        (httpx.Response(401), "expired"),
+        (httpx.Response(200, text="not-json"), "invalid response"),
+        (httpx.Response(200, json=["not", "a", "mapping"]), "invalid response"),
+        (httpx.Response(200, json={"access_token": "short"}), "invalid response"),
+    ),
+)
+def test_google_refresh_rejects_provider_failures(
+    response: httpx.Response,
+    match: str,
+) -> None:
+    configured = Settings(
+        app_env="test",
+        mcp_google_oauth_enabled=True,
+        google_oauth_client_id="google-client-id",
+        google_oauth_client_secret=secrets.token_urlsafe(24),
+    )
+    with pytest.raises(McpOAuthError, match=match):
+        refresh_access_token(
+            settings=configured,
+            provider="google_drive",
+            credential_bundle={"refresh_token": "persistent-refresh-token"},
+            transport=httpx.MockTransport(lambda _request: response),
+        )
+
+    with pytest.raises(McpOAuthError, match="reconnect"):
+        refresh_access_token(
+            settings=configured,
+            provider="meta_ads",
+            credential_bundle={"refresh_token": "persistent-refresh-token"},
+        )
+
+
+def test_google_refresh_maps_transport_failure_without_exposing_details() -> None:
+    configured = Settings(
+        app_env="test",
+        mcp_google_oauth_enabled=True,
+        google_oauth_client_id="google-client-id",
+        google_oauth_client_secret=secrets.token_urlsafe(24),
+    )
+
+    def unavailable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("private-provider-detail", request=request)
+
+    with pytest.raises(McpOAuthError, match="unavailable") as raised:
+        refresh_access_token(
+            settings=configured,
+            provider="google_sheets",
+            credential_bundle={"refresh_token": "persistent-refresh-token"},
+            transport=httpx.MockTransport(unavailable),
+        )
+    assert "private-provider-detail" not in str(raised.value)

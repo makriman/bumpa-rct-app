@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 base="${E2E_BASE_URL:-http://bumpabestie.localhost:8080}"
+research_base="${E2E_RESEARCH_BASE_URL:-http://research.bumpabestie.localhost:8080}"
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
@@ -20,14 +21,15 @@ wait_for_stack() {
 login() {
   local phone="$1"
   local jar="$2"
+  local origin="${3:-$base}"
   curl -fsS -c "$jar" \
     -H 'Content-Type: application/json' \
     -d "{\"phone_e164\":\"$phone\"}" \
-    "$base/api/backend/auth/request-otp" >/dev/null
+    "$origin/api/backend/auth/request-otp" >/dev/null
   curl -fsS -b "$jar" -c "$jar" \
     -H 'Content-Type: application/json' \
     -d "{\"phone_e164\":\"$phone\",\"code\":\"246810\"}" \
-    "$base/api/backend/auth/verify-otp" >/dev/null
+    "$origin/api/backend/auth/verify-otp" >/dev/null
 }
 
 wait_for_stack
@@ -50,20 +52,20 @@ chat_answer="$(curl -fsS -b "$owner_jar" \
 [[ "$chat_answer" == *"Sales:"* ]]
 
 researcher_jar="$work_dir/researcher.cookies"
-login "+2348099990002" "$researcher_jar"
+login "+2348099990002" "$researcher_jar" "$research_base"
 event_count="$(curl -fsS -b "$researcher_jar" \
-  "$base/api/backend/research/overview" | jq -r '.research_events')"
+  "$research_base/api/backend/research/overview" | jq -r '.research_events')"
 ((event_count >= 1))
 
 report="$(curl -fsS -b "$researcher_jar" \
   -H 'Content-Type: application/json' \
   -d '{"report_type":"question_taxonomy","formats":["csv","jsonl","pdf"]}' \
-  "$base/api/backend/research/reports")"
+  "$research_base/api/backend/research/reports")"
 report_id="$(jq -r '.id' <<<"$report")"
 [[ "$(jq -r '.status' <<<"$report")" == "success" ]]
 curl -fsS -b "$researcher_jar" \
   -o "$work_dir/report.pdf" \
-  "$base/api/backend/research/reports/$report_id/download/pdf"
+  "$research_base/api/backend/research/reports/$report_id/download/pdf"
 head -c 8 "$work_dir/report.pdf" | grep -q '%PDF-1.4'
 
 echo "PASS local integration: OTP, tenant session, Bumpa sync, chat, research event, and PDF report"

@@ -1378,6 +1378,56 @@ def _fixture_pair(
             )
         )
         add(
+            models.PendingAgentAction(
+                id=f"pending-action-{suffix}",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation.id,
+                mcp_connection_id=mcp_connection.id,
+                tool_name="rls_gate.write",
+                target_summary="RLS integration fixture",
+                action_input={"fixture": True},
+                status="pending",
+                idempotency_key=f"pending-action-{suffix}",
+                confirmation_token_hash=("e" if side == "a" else "f") * 64,
+                expires_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
+            models.OperationalAgentEvent(
+                id=f"operational-event-{suffix}",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation.id,
+                channel="web",
+                event_type="rls_gate",
+                status="success",
+                citation_count=0,
+                grounding_flags=["store_data"],
+                event_metadata={},
+                created_at=now,
+            )
+        )
+        add(
+            models.GeneratedAgentMedia(
+                id=f"generated-media-{suffix}",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation.id,
+                channel="web",
+                media_type="image",
+                mime_type="image/png",
+                storage_path=f"rls/{suffix}.png",
+                byte_size=1,
+                checksum_sha256=("1" if side == "a" else "2") * 64,
+                status="pending",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
             models.AuditLog(
                 id=f"audit-{suffix}",
                 tenant_id=tenant_id,

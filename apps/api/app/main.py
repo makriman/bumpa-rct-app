@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import lru_cache
 from time import monotonic
 from uuid import RFC_4122, UUID, uuid4
@@ -31,6 +31,7 @@ from app.routes import (
     tenants,
     whatsapp,
 )
+from app.services.mcp_business import business_mcp, business_mcp_app
 from app.services.production_readiness import check_production_readiness
 from app.services.seed import seed_demo
 
@@ -75,7 +76,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         with SessionLocal() as db:
             set_security_context(db, privileged=True)
             seed_demo(db, settings_config)
-    yield
+    async with AsyncExitStack() as stack:
+        # FastMCP's manager is intentionally process-singleton and may only be
+        # started once. A nested TestClient can share the already-running
+        # manager; production starts one ASGI lifespan per worker process.
+        if not getattr(business_mcp.session_manager, "_has_started", False):
+            await stack.enter_async_context(business_mcp.session_manager.run())
+        yield
 
 
 def create_app(*, settings_config: Settings | None = None) -> FastAPI:
@@ -214,6 +221,7 @@ def create_app(*, settings_config: Settings | None = None) -> FastAPI:
     ):
         application.include_router(module.router, prefix=config.api_prefix)
     application.include_router(whatsapp.router)
+    application.mount("/internal/mcp", business_mcp_app)
     return application
 
 

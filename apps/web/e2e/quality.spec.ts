@@ -105,7 +105,7 @@ async function mockChatVisualData(
               {
                 id: "conversation-visual",
                 title: "Weekly business review",
-                updated_at: "2026-07-21T08:00:00Z",
+                updated_at: new Date().toISOString(),
                 channel: "web",
                 last_message_preview:
                   "Focus on fast-moving products and overdue follow-ups.",

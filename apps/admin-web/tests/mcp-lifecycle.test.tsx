@@ -55,6 +55,7 @@ describe("MCP approval lifecycle", () => {
         provider: "google_sheets",
         status: "admin_pending",
         scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        allowed_resources: [],
         read_only: true,
         admin_approved: false,
         oauth_available: true,

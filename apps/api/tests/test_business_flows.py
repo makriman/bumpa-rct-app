@@ -56,6 +56,29 @@ def test_sync_chat_research_report_flow(client: TestClient) -> None:
     assert pdf.content.startswith(b"%PDF-1.4")
 
 
+def test_streaming_chat_emits_durable_events_and_replays_idempotently(
+    client: TestClient,
+) -> None:
+    owner = auth_headers(client, "+2348012345678")
+    payload = {
+        "message": "Show this month's sales and suggest one action.",
+        "client_message_id": "stream-contract-1",
+    }
+    streamed = client.post("/v1/chat/web/stream", headers=owner, json=payload)
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    assert "event: message.started" in streamed.text
+    assert "event: message.delta" in streamed.text
+    assert "event: message.completed" in streamed.text
+    assert '"answer":"' in streamed.text
+    assert "event: error" not in streamed.text
+
+    replay = client.post("/v1/chat/web/stream", headers=owner, json=payload)
+    assert replay.status_code == 200
+    assert '"replayed":true' in replay.text
+    assert "event: message.completed" in replay.text
+
+
 def test_admin_can_onboard_tenant_and_all_mutations_are_audited(client: TestClient) -> None:
     operator = auth_headers(client, "+2348099990001")
     created = client.post(

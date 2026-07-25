@@ -56,6 +56,7 @@ write_env() {
     "TEMPORARY_WEB_PIN_EXPIRES_AT=$([[ "$mode" == temporary_static_pin ]] && printf %s "$future_expiry")" \
     "WHATSAPP_BACKEND=$whatsapp_backend" \
     "META_PRIMARY_SENDER_ENABLED=$meta_primary_sender_enabled" \
+    'WHATSAPP_PRIMARY_PILOT_ENABLED=false' \
     "META_TEST_SENDER_VERIFICATION_MODE=$meta_test_sender_mode" \
     'PROACTIVE_INSIGHTS_ENABLED=false' \
     'DAILY_INSIGHTS_ENABLED=false' \

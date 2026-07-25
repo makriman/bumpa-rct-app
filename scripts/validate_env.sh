@@ -128,6 +128,26 @@ if [[ "$expected_environment" == "production" ]]; then
   validate_image_ref BACKUP_IMAGE bumpabestie-backup
   validate_image_ref HERMES_IMAGE bumpabestie-hermes
 
+  validate_runtime_secret_host() {
+    local key="$1"
+    local secret_file
+    secret_file="$(value_for "$key")"
+    if [[ "$secret_file" != /* || "$secret_file" == "/dev/null" \
+      || ! -f "$secret_file" || -L "$secret_file" ]]; then
+      echo "$key must be an absolute regular non-symlink file" >&2
+      failed=1
+      return
+    fi
+    if [[ ! "$(stat -c %a "$secret_file")" =~ ^(400|600)$ ]]; then
+      echo "$key must have mode 0400 or 0600" >&2
+      failed=1
+    fi
+    if [[ ! -s "$secret_file" || "$(wc -l < "$secret_file")" -gt 1 ]]; then
+      echo "$key must contain one non-empty line" >&2
+      failed=1
+    fi
+  }
+
   secrets_dir="$(value_for SECRETS_DIR)"
   if [[ "$secrets_dir" != /* ]]; then
     echo "SECRETS_DIR must be an absolute host path in production" >&2
@@ -261,8 +281,10 @@ for old_id, secret in old_keys.items():
       failed=1
     fi
     if [[ "$whatsapp_backend" == "meta" \
-      && "$(value_for META_PRIMARY_SENDER_ENABLED)" != "false" ]]; then
-      echo "Temporary static-PIN authentication requires the Meta primary sender to be disabled" >&2
+      && "$(value_for META_PRIMARY_SENDER_ENABLED)" != "false" \
+      && ("$(value_for META_PRIMARY_SENDER_ENABLED)" != "true" \
+        || "$(value_for WHATSAPP_PRIMARY_PILOT_ENABLED)" != "true") ]]; then
+      echo "Temporary static-PIN authentication permits the Meta primary sender only for the explicit primary-number pilot" >&2
       failed=1
     fi
     if [[ "$(value_for PROACTIVE_INSIGHTS_ENABLED)" != "false" || \
@@ -497,6 +519,100 @@ PY
       echo "HERMES_CONTROL_PORT must be outside the profile port range" >&2
       failed=1
     fi
+  fi
+  for key in \
+    AGENT_CAPABILITIES_V2 HERMES_TOOLS_ENABLED EXTERNAL_CONNECTORS_ENABLED \
+    WEB_RESEARCH_ENABLED SANDBOX_TOOLS_ENABLED MANAGED_IMAGE_GENERATION_ENABLED \
+    WHATSAPP_PRIMARY_PILOT_ENABLED \
+    WHATSAPP_MULTIMODAL_ENABLED WHATSAPP_SPEECH_ENABLED WHATSAPP_PROGRESS_ENABLED; do
+    capability_value="$(value_for "$key")"
+    if [[ -n "$capability_value" && ! "$capability_value" =~ ^(true|false)$ ]]; then
+      echo "$key must be true or false" >&2
+      failed=1
+    fi
+  done
+  agent_capabilities_v2="$(value_for AGENT_CAPABILITIES_V2)"
+  hermes_tools_enabled="$(value_for HERMES_TOOLS_ENABLED)"
+  external_connectors_enabled="$(value_for EXTERNAL_CONNECTORS_ENABLED)"
+  web_research_enabled="$(value_for WEB_RESEARCH_ENABLED)"
+  sandbox_tools_enabled="$(value_for SANDBOX_TOOLS_ENABLED)"
+  managed_image_generation_enabled="$(value_for MANAGED_IMAGE_GENERATION_ENABLED)"
+  whatsapp_primary_pilot_enabled="$(value_for WHATSAPP_PRIMARY_PILOT_ENABLED)"
+  whatsapp_multimodal_enabled="$(value_for WHATSAPP_MULTIMODAL_ENABLED)"
+  whatsapp_speech_enabled="$(value_for WHATSAPP_SPEECH_ENABLED)"
+  whatsapp_progress_enabled="$(value_for WHATSAPP_PROGRESS_ENABLED)"
+  agent_capabilities_v2="${agent_capabilities_v2:-false}"
+  hermes_tools_enabled="${hermes_tools_enabled:-false}"
+  external_connectors_enabled="${external_connectors_enabled:-false}"
+  web_research_enabled="${web_research_enabled:-false}"
+  sandbox_tools_enabled="${sandbox_tools_enabled:-false}"
+  managed_image_generation_enabled="${managed_image_generation_enabled:-false}"
+  whatsapp_primary_pilot_enabled="${whatsapp_primary_pilot_enabled:-false}"
+  whatsapp_multimodal_enabled="${whatsapp_multimodal_enabled:-false}"
+  whatsapp_speech_enabled="${whatsapp_speech_enabled:-false}"
+  whatsapp_progress_enabled="${whatsapp_progress_enabled:-false}"
+  if [[ "$agent_capabilities_v2" == "true" && "$agent_backend" != "hermes" ]]; then
+    echo "AGENT_CAPABILITIES_V2 requires AGENT_BACKEND=hermes" >&2
+    failed=1
+  fi
+  for key in \
+    HERMES_TOOLS_ENABLED EXTERNAL_CONNECTORS_ENABLED WEB_RESEARCH_ENABLED \
+    SANDBOX_TOOLS_ENABLED MANAGED_IMAGE_GENERATION_ENABLED \
+    WHATSAPP_MULTIMODAL_ENABLED WHATSAPP_SPEECH_ENABLED WHATSAPP_PROGRESS_ENABLED; do
+    if [[ "$(value_for "$key")" == "true" && "$agent_capabilities_v2" != "true" ]]; then
+      echo "$key requires AGENT_CAPABILITIES_V2=true" >&2
+      failed=1
+    fi
+  done
+  if [[ "$whatsapp_primary_pilot_enabled" == "true" \
+    && ("$whatsapp_backend" != "meta" || "$meta_primary_sender_enabled" != "true") ]]; then
+    echo "The primary-number pilot requires the enabled Meta primary sender" >&2
+    failed=1
+  fi
+  if [[ "$web_research_enabled" == "true" ]]; then
+    if [[ -n "$(value_for TAVILY_API_KEY)" ]]; then
+      echo "Tavily must use the production host secret file" >&2
+      failed=1
+    fi
+    validate_runtime_secret_host TAVILY_API_KEY_FILE_HOST
+  fi
+  if [[ "$whatsapp_speech_enabled" == "true" ]]; then
+    if [[ "$whatsapp_multimodal_enabled" != "true" ]]; then
+      echo "WHATSAPP_SPEECH_ENABLED requires WHATSAPP_MULTIMODAL_ENABLED=true" >&2
+      failed=1
+    fi
+    if [[ -n "$(value_for ELEVENLABS_API_KEY)" ]]; then
+      echo "ElevenLabs must use the production host secret file" >&2
+      failed=1
+    fi
+    validate_runtime_secret_host ELEVENLABS_API_KEY_FILE_HOST
+    if [[ ! "$(value_for ELEVENLABS_TTS_VOICE_ID)" =~ ^[A-Za-z0-9_-]{6,128}$ ]]; then
+      echo "ELEVENLABS_TTS_VOICE_ID is required for WhatsApp speech" >&2
+      failed=1
+    fi
+  fi
+  if [[ "$sandbox_tools_enabled" == "true" ]]; then
+    sandbox_worker_url="$(value_for SANDBOX_WORKER_URL)"
+    if [[ ! "$sandbox_worker_url" =~ ^https://[^/@:]+([:][0-9]+)?/?$ \
+      || "$sandbox_worker_url" == *\?* || "$sandbox_worker_url" == *\#* ]]; then
+      echo "SANDBOX_WORKER_URL must be an uncredentialed HTTPS origin" >&2
+      failed=1
+    fi
+    if [[ -n "$(value_for SANDBOX_SERVICE_TOKEN)" ]]; then
+      echo "Sandbox authentication must use the production host secret file" >&2
+      failed=1
+    fi
+    validate_runtime_secret_host SANDBOX_SERVICE_TOKEN_FILE_HOST
+  fi
+  if [[ "$managed_image_generation_enabled" == "true" \
+    && "$sandbox_tools_enabled" != "true" ]]; then
+    echo "MANAGED_IMAGE_GENERATION_ENABLED requires SANDBOX_TOOLS_ENABLED=true" >&2
+    failed=1
+  fi
+  if [[ "$external_connectors_enabled" == "true" \
+    && "$google_oauth_enabled" != "true" && "$meta_ads_oauth_enabled" != "true" ]]; then
+    echo "External connectors require an enabled Google or Meta Ads OAuth provider" >&2
+    failed=1
   fi
   if [[ "$(value_for ASYNC_RUNTIME_ENABLED)" != "true" ]]; then
     echo "ASYNC_RUNTIME_ENABLED must be true in production" >&2

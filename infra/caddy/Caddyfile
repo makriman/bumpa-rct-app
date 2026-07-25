@@ -111,6 +111,8 @@
 	import security_headers
 	import non_document_csp
 	encode zstd gzip
+	@privateControlPlane path /internal /internal/*
+	respond @privateControlPlane 404
 	request_body {
 		max_size 10MB
 	}

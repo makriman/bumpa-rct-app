@@ -35,7 +35,7 @@ def _write_staged_profile(
         path.mkdir(mode=0o750)
         path.chmod(0o750)
     files = {
-        ".no-skills": "",
+        ".bumpa-capabilities-v2": "",
         ".env": (
             "API_SERVER_ENABLED=true\n"
             "API_SERVER_HOST=0.0.0.0\n"

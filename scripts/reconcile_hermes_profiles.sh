@@ -36,7 +36,7 @@ runtime_profile_count="$(
       case "$name" in
         *[!a-z0-9_]*) echo "Invalid staged Hermes profile name" >&2; exit 1 ;;
       esac
-      for required in .no-skills .env config.yaml SOUL.md; do
+      for required in .bumpa-capabilities-v2 .env config.yaml SOUL.md; do
         [ -f "$directory/$required" ] || {
           echo "Staged Hermes profile is incomplete" >&2
           exit 1

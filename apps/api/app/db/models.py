@@ -450,6 +450,7 @@ class HermesProfile(IdMixin, TimestampMixin, Base):
     api_internal_url: Mapped[str] = mapped_column(String(300), default="local://agent")
     api_port: Mapped[int | None] = mapped_column(Integer)
     encrypted_api_key: Mapped[str] = mapped_column(Text)
+    mcp_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(24), default="active")
 
 
@@ -553,6 +554,8 @@ class Conversation(IdMixin, TimestampMixin, Base):
     channel: Mapped[str] = mapped_column(String(24))
     status: Mapped[str] = mapped_column(String(24), default="open")
     title: Mapped[str | None] = mapped_column(String(200))
+    provider_session_id: Mapped[str | None] = mapped_column(String(160))
+    provider_session_key: Mapped[str | None] = mapped_column(String(160))
 
 
 class AgentMessage(IdMixin, Base):
@@ -586,6 +589,9 @@ class AgentMessage(IdMixin, Base):
     channel: Mapped[str] = mapped_column(String(24))
     direction: Mapped[str] = mapped_column(String(24))
     content: Mapped[str] = mapped_column(Text)
+    content_parts: Mapped[list[JsonDict]] = mapped_column(JSON, default=list)
+    reply_to_external_message_id: Mapped[str | None] = mapped_column(String(160))
+    media_metadata: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     redacted_content: Mapped[str | None] = mapped_column(Text)
     external_message_id: Mapped[str | None] = mapped_column(String(160))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
@@ -624,6 +630,86 @@ class AgentToolCall(IdMixin, TimestampMixin, Base):
     correlation_id: Mapped[str | None] = mapped_column(String(80))
 
 
+class PendingAgentAction(IdMixin, TimestampMixin, Base):
+    __tablename__ = "pending_agent_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'confirmed', 'denied', 'expired', 'executing', "
+            "'succeeded', 'failed')",
+            name="ck_pending_agent_actions_status",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_pending_agent_actions_tenant_idempotency",
+        ),
+        Index(
+            "ix_pending_agent_actions_tenant_user_status",
+            "tenant_id",
+            "user_id",
+            "status",
+            "expires_at",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    mcp_connection_id: Mapped[str | None] = mapped_column(
+        ForeignKey("mcp_connections.id", ondelete="SET NULL")
+    )
+    tool_name: Mapped[str] = mapped_column(String(160))
+    target_summary: Mapped[str] = mapped_column(Text)
+    action_input: Mapped[JsonDict] = mapped_column(JSON, default=dict)
+    action_result: Mapped[JsonDict | None] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    confirmation_token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    correlation_id: Mapped[str | None] = mapped_column(String(80))
+
+
+class OperationalAgentEvent(IdMixin, Base):
+    __tablename__ = "operational_agent_events"
+    __table_args__ = (
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms >= 0",
+            name="ck_operational_agent_events_duration_nonnegative",
+        ),
+        Index(
+            "ix_operational_agent_events_tenant_created",
+            "tenant_id",
+            "created_at",
+        ),
+        Index(
+            "ix_operational_agent_events_type_created",
+            "event_type",
+            "created_at",
+        ),
+    )
+
+    tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
+    user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
+    channel: Mapped[str] = mapped_column(String(24))
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(32))
+    media_type: Mapped[str | None] = mapped_column(String(40))
+    tool_name: Mapped[str | None] = mapped_column(String(160))
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    citation_count: Mapped[int] = mapped_column(Integer, default=0)
+    grounding_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    event_metadata: Mapped[JsonDict] = mapped_column("metadata", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class WhatsappMessage(IdMixin, Base):
     __tablename__ = "whatsapp_messages"
     __table_args__ = (
@@ -642,8 +728,11 @@ class WhatsappMessage(IdMixin, Base):
     direction: Mapped[str] = mapped_column(String(24))
     message_type: Mapped[str | None] = mapped_column(String(40))
     text_body: Mapped[str | None] = mapped_column(Text)
+    reply_to_meta_message_id: Mapped[str | None] = mapped_column(String(160))
+    media_metadata: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     payload: Mapped[JsonDict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(24), default="received")
+    status_rank: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -768,6 +857,39 @@ class Artifact(IdMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class GeneratedAgentMedia(IdMixin, TimestampMixin, Base):
+    __tablename__ = "generated_agent_media"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'delivered', 'failed')",
+            name="ck_generated_agent_media_status",
+        ),
+        CheckConstraint(
+            "byte_size > 0 AND byte_size <= 8388608",
+            name="ck_generated_agent_media_byte_size",
+        ),
+        Index(
+            "ix_generated_agent_media_delivery",
+            "tenant_id",
+            "user_id",
+            "conversation_id",
+            "status",
+        ),
+    )
+
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    channel: Mapped[str] = mapped_column(String(24))
+    media_type: Mapped[str] = mapped_column(String(24), default="image")
+    mime_type: Mapped[str] = mapped_column(String(100))
+    storage_path: Mapped[str] = mapped_column(String(500))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    checksum_sha256: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class McpConnection(IdMixin, TimestampMixin, Base):
     __tablename__ = "mcp_connections"
     __table_args__ = (
@@ -789,6 +911,7 @@ class McpConnection(IdMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(24), default="disabled")
     encrypted_credentials: Mapped[str | None] = mapped_column(Text)
     scopes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    allowed_resources: Mapped[list[str]] = mapped_column(JSON, default=list)
     read_only: Mapped[bool] = mapped_column(Boolean, default=True)
     admin_approved: Mapped[bool] = mapped_column(Boolean, default=False)
 

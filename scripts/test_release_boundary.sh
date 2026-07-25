@@ -213,10 +213,26 @@ rewrite_release_boundary "$env_file" \
   2099-01-01T00:00:00Z meta
 grep -Fxq 'WHATSAPP_BACKEND=meta' "$env_file"
 grep -Fxq 'META_PRIMARY_SENDER_ENABLED=false' "$env_file"
+grep -Fxq 'WHATSAPP_PRIMARY_PILOT_ENABLED=false' "$env_file"
 grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only' "$env_file"
 grep -Fxq 'PROACTIVE_INSIGHTS_ENABLED=false' "$env_file"
 grep -Fxq 'DAILY_INSIGHTS_ENABLED=false' "$env_file"
 grep -Fxq 'WEEKLY_INSIGHTS_ENABLED=false' "$env_file"
+
+sed -i.bak \
+  -e 's/^META_PRIMARY_SENDER_ENABLED=false$/META_PRIMARY_SENDER_ENABLED=true/' \
+  -e 's/^WHATSAPP_PRIMARY_PILOT_ENABLED=false$/WHATSAPP_PRIMARY_PILOT_ENABLED=true/' \
+  "$env_file"
+rm -f "$env_file.bak"
+rewrite_release_boundary "$env_file" \
+  "$new_revision" "sha-$new_revision" "$new_infra" \
+  "$new_api" "$new_web" "$new_admin_web" "$new_research_web" \
+  "$new_caddy" "$new_postgres" "$new_backup" "$new_hermes" \
+  temporary_static_pin /run/auth-secret/temporary_web_pin_verifier \
+  "$versioned_verifier_path" \
+  2099-01-01T00:00:00Z meta
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=true' "$env_file"
+grep -Fxq 'WHATSAPP_PRIMARY_PILOT_ENABLED=true' "$env_file"
 
 boundary_before="$(shasum -a 256 "$env_file")"
 if rewrite_release_boundary "$env_file" \

@@ -61,6 +61,7 @@ write_boundary() {
     'TEMPORARY_WEB_PIN_EXPIRES_AT=' \
     'WHATSAPP_BACKEND=disabled' \
     'META_PRIMARY_SENDER_ENABLED=true' \
+    'WHATSAPP_PRIMARY_PILOT_ENABLED=false' \
     'META_TEST_SENDER_VERIFICATION_MODE=disabled' \
     'PROACTIVE_INSIGHTS_ENABLED=false' \
     'DAILY_INSIGHTS_ENABLED=false' \
@@ -82,15 +83,19 @@ make_legacy_surface_boundary() {
 }
 
 stage_temporary_auth_activation() {
-  local whatsapp_backend="${1:-disabled}" auth_env_tmp
+  local whatsapp_backend="${1:-disabled}" primary_pilot="${2:-false}" auth_env_tmp
   local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
   if [[ "$whatsapp_backend" == "meta" ]]; then
     meta_primary_sender_enabled=false
     meta_test_sender_mode=inbound_replies_only
+    if [[ "$primary_pilot" == "true" ]]; then
+      meta_primary_sender_enabled=true
+    fi
   fi
   auth_env_tmp="$(mktemp "$repo/.env.production.phase-two.XXXXXX")"
   awk -F= \
     -v whatsapp_backend="$whatsapp_backend" \
+    -v primary_pilot="$primary_pilot" \
     -v meta_primary_sender_enabled="$meta_primary_sender_enabled" \
     -v meta_test_sender_mode="$meta_test_sender_mode" '
     $1 == "AUTH_LOGIN_MODE" { print "AUTH_LOGIN_MODE=temporary_static_pin"; next }
@@ -106,6 +111,9 @@ stage_temporary_auth_activation() {
     $1 == "WHATSAPP_BACKEND" { print "WHATSAPP_BACKEND=" whatsapp_backend; next }
     $1 == "META_PRIMARY_SENDER_ENABLED" {
       print "META_PRIMARY_SENDER_ENABLED=" meta_primary_sender_enabled; next
+    }
+    $1 == "WHATSAPP_PRIMARY_PILOT_ENABLED" {
+      print "WHATSAPP_PRIMARY_PILOT_ENABLED=" primary_pilot; next
     }
     $1 == "META_TEST_SENDER_VERIFICATION_MODE" {
       print "META_TEST_SENDER_VERIFICATION_MODE=" meta_test_sender_mode; next
@@ -268,8 +276,28 @@ grep -Fxq 'META_PRIMARY_SENDER_ENABLED=false' "$repo/.env.production"
 grep -Fxq 'META_TEST_SENDER_VERIFICATION_MODE=inbound_replies_only' "$repo/.env.production"
 test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 4
 
+# The temporary web PIN and primary WhatsApp number may coexist only when the
+# dedicated pilot selector is exact, and rollback must preserve that pair.
+write_boundary
+stage_temporary_auth_activation meta true
+record_temporary_boundary meta
+commit_target_bundle 'exit 45'
+set +e
+BUMPABESTIE_REPOSITORY="$repo" BUMPABESTIE_STATE_DIRECTORY="$state" \
+  "$launcher" "$target_revision" "sha-$target_revision" \
+  "$image" "$image" "$image" "$image" "$image" "$image" "$image" "$image"
+result=$?
+set -e
+test "$result" = 45
+grep -Fxq 'META_PRIMARY_SENDER_ENABLED=true' "$repo/.env.production"
+grep -Fxq 'WHATSAPP_PRIMARY_PILOT_ENABLED=true' "$repo/.env.production"
+test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 5
+
 # An unsafe widening of the reply-only Meta boundary must fail before the
 # target child starts and restore the exact canonical prior environment itself.
+write_boundary
+stage_temporary_auth_activation meta
+record_temporary_boundary meta
 prior_environment_sha256="$(sha256sum "$repo/.env.production" | awk '{print $1}')"
 commit_target_bundle 'exit 99'
 sed -i 's/^META_PRIMARY_SENDER_ENABLED=false$/META_PRIMARY_SENDER_ENABLED=true/' \
@@ -286,7 +314,7 @@ test "$(sha256sum "$repo/.env.production" | awk '{print $1}')" = \
 test "$(git -C "$repo" rev-parse HEAD)" = "$previous_revision"
 test ! -e "$state/maintenance.lock.coordinator-state.json"
 test ! -e "$state/maintenance.lock.maintenance-required"
-test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 5
+test "$(find "$state/promotion-history" -name '*-PREVIOUS_RESTORED.json' | wc -l | tr -d ' ')" = 6
 
 # A target worker that partially mutates release state can never be labelled
 # restored. The stable journal and maintenance interlock survive, and a later

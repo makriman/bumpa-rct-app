@@ -9,6 +9,16 @@ release_file_mode() {
   stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
+release_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local count value
+  count="$(awk -F= -v key="$key" '$1 == key {count++} END {print count+0}' "$env_file")"
+  [[ "$count" == "1" ]] || return 1
+  value="$(awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$env_file")"
+  printf '%s\n' "$value"
+}
+
 temporary_verifier_host_path_is_legacy() {
   [[ "$1" == "/var/lib/bumpabestie-auth-secret/temporary_web_pin_verifier" ]]
 }
@@ -246,6 +256,7 @@ _rewrite_release_environment() (
   local whatsapp_backend="${17:-}"
   local canonicalize_whatsapp_cadences=0
   local meta_primary_sender_enabled=true meta_test_sender_mode=disabled
+  local whatsapp_primary_pilot_enabled=false
   local env_tmp env_uid env_gid
   env_tmp=""
   trap 'if [[ -n "$env_tmp" ]]; then rm -f -- "$env_tmp"; fi' EXIT
@@ -265,7 +276,18 @@ _rewrite_release_environment() (
       "$whatsapp_backend" || return 1
     if [[ "$auth_login_mode" == "temporary_static_pin" \
       && "$whatsapp_backend" == "meta" ]]; then
-      meta_primary_sender_enabled=false
+      meta_primary_sender_enabled="$(
+        release_env_value "$env_file" META_PRIMARY_SENDER_ENABLED
+      )" || return 1
+      whatsapp_primary_pilot_enabled="$(
+        release_env_value "$env_file" WHATSAPP_PRIMARY_PILOT_ENABLED
+      )" || return 1
+      if [[ "$whatsapp_primary_pilot_enabled" == "true" ]]; then
+        [[ "$meta_primary_sender_enabled" == "true" ]] || return 1
+      else
+        whatsapp_primary_pilot_enabled=false
+        meta_primary_sender_enabled=false
+      fi
       meta_test_sender_mode=inbound_replies_only
     fi
     if [[ "$auth_login_mode" == "temporary_static_pin" \
@@ -301,6 +323,7 @@ _rewrite_release_environment() (
     -v whatsapp_backend="$whatsapp_backend" \
     -v canonicalize_whatsapp_cadences="$canonicalize_whatsapp_cadences" \
     -v meta_primary_sender_enabled="$meta_primary_sender_enabled" \
+    -v whatsapp_primary_pilot_enabled="$whatsapp_primary_pilot_enabled" \
     -v meta_test_sender_mode="$meta_test_sender_mode" '
       BEGIN {
         replacement["DEPLOY_REF"] = deploy_ref
@@ -322,6 +345,7 @@ _rewrite_release_environment() (
           replacement["TEMPORARY_WEB_PIN_EXPIRES_AT"] = expires_at
           replacement["WHATSAPP_BACKEND"] = whatsapp_backend
           replacement["META_PRIMARY_SENDER_ENABLED"] = meta_primary_sender_enabled
+          replacement["WHATSAPP_PRIMARY_PILOT_ENABLED"] = whatsapp_primary_pilot_enabled
           replacement["META_TEST_SENDER_VERIFICATION_MODE"] = meta_test_sender_mode
           if (canonicalize_whatsapp_cadences == 1) {
             replacement["PROACTIVE_INSIGHTS_ENABLED"] = "false"
@@ -354,6 +378,11 @@ _rewrite_release_environment() (
         if (seen["RESEARCH_WEB_IMAGE"] == 0) {
           print "RESEARCH_WEB_IMAGE=" replacement["RESEARCH_WEB_IMAGE"]
           seen["RESEARCH_WEB_IMAGE"] = 1
+        }
+        if (include_auth == 1 && seen["WHATSAPP_PRIMARY_PILOT_ENABLED"] == 0) {
+          print "WHATSAPP_PRIMARY_PILOT_ENABLED=" \
+            replacement["WHATSAPP_PRIMARY_PILOT_ENABLED"]
+          seen["WHATSAPP_PRIMARY_PILOT_ENABLED"] = 1
         }
         for (key in replacement) {
           if (seen[key] != 1) {
