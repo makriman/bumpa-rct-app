@@ -794,6 +794,54 @@ jq --exit-status '
 compose=(docker compose --env-file "$contract_env" -f compose.yaml -f compose.prod.yaml --profile async --profile tools --profile restore)
 "${compose[@]}" config --quiet
 rendered="$("${compose[@]}" config --format json)"
+capability_rendered="$(
+  AGENT_CAPABILITIES_V2=true \
+    HERMES_TOOLS_ENABLED=true \
+    EXTERNAL_CONNECTORS_ENABLED=true \
+    MCP_GOOGLE_OAUTH_ENABLED=true \
+    MCP_META_ADS_OAUTH_ENABLED=true \
+    WEB_RESEARCH_ENABLED=true \
+    SANDBOX_TOOLS_ENABLED=true \
+    MANAGED_IMAGE_GENERATION_ENABLED=true \
+    WHATSAPP_MULTIMODAL_ENABLED=true \
+    WHATSAPP_SPEECH_ENABLED=true \
+    WHATSAPP_PROGRESS_ENABLED=true \
+    PROACTIVE_INSIGHTS_ENABLED=true \
+    DAILY_INSIGHTS_ENABLED=true \
+    WEEKLY_INSIGHTS_ENABLED=true \
+    OPS_ALERTS_ENABLED=true \
+    "${compose[@]}" config --format json
+)"
+
+if ! jq --exit-status '
+  .services.api.environment.AGENT_CAPABILITIES_V2 == "true" and
+  .services.api.environment.SANDBOX_TOOLS_ENABLED == "true" and
+  .services.migrate.environment.AGENT_CAPABILITIES_V2 == "false" and
+  .services.migrate.environment.HERMES_TOOLS_ENABLED == "false" and
+  .services.migrate.environment.EXTERNAL_CONNECTORS_ENABLED == "false" and
+  .services.migrate.environment.MCP_GOOGLE_OAUTH_ENABLED == "false" and
+  .services.migrate.environment.MCP_META_ADS_OAUTH_ENABLED == "false" and
+  .services.migrate.environment.WEB_RESEARCH_ENABLED == "false" and
+  .services.migrate.environment.SANDBOX_TOOLS_ENABLED == "false" and
+  .services.migrate.environment.MANAGED_IMAGE_GENERATION_ENABLED == "false" and
+  .services.migrate.environment.WHATSAPP_PRIMARY_PILOT_ENABLED == "false" and
+  .services.migrate.environment.WHATSAPP_MULTIMODAL_ENABLED == "false" and
+  .services.migrate.environment.WHATSAPP_SPEECH_ENABLED == "false" and
+  .services.migrate.environment.WHATSAPP_PROGRESS_ENABLED == "false" and
+  .services.migrate.environment.PROACTIVE_INSIGHTS_ENABLED == "false" and
+  .services.migrate.environment.DAILY_INSIGHTS_ENABLED == "false" and
+  .services.migrate.environment.WEEKLY_INSIGHTS_ENABLED == "false" and
+  .services.migrate.environment.OPS_ALERTS_ENABLED == "false" and
+  (.services.migrate.volumes | map(select(.target == "/run/runtime-secrets")) | length) == 0
+' <<<"$capability_rendered" >/dev/null; then
+  jq '{
+    api_capabilities: (.services.api.environment | {
+      AGENT_CAPABILITIES_V2, SANDBOX_TOOLS_ENABLED
+    }),
+    migrate: (.services.migrate | {environment, volumes})
+  }' <<<"$capability_rendered" >&2
+  exit 1
+fi
 
 if ! jq --exit-status '
   .services.caddy.image == "ghcr.io/makriman/bumpabestie-caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" and
