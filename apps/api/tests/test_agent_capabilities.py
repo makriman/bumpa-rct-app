@@ -452,6 +452,40 @@ def test_keyless_search_evidence_is_citable_untrusted_and_outages_are_honest() -
         )
 
 
+def test_ghana_research_defaults_to_official_primary_sources() -> None:
+    captured: dict[str, Any] = {}
+
+    def searcher(query: str, limit: int) -> list[dict[str, object]]:
+        captured.update({"query": query, "limit": limit})
+        return [
+            {
+                "title": "Ghana Statistical Service [official]",
+                "url": "https://statsghana.gov.gh/",
+                "body": "Official statistics.",
+            },
+            {
+                "title": "Secondary market blog",
+                "url": "https://example.com/ghana-market",
+                "body": "Secondary material.",
+            },
+        ]
+
+    result = search_web(
+        _settings(),
+        query="Ghana retail expansion market requirements",
+        searcher=searcher,
+    )
+
+    assert "site:statsghana.gov.gh" in str(captured["query"])
+    assert "site:gipc.gov.gh" in str(captured["query"])
+    assert result["source_policy"] == "official_primary"
+    assert [source["url"] for source in result["sources"]] == ["https://statsghana.gov.gh/"]
+    assert result["citation_markdown"] == [
+        "- [Ghana Statistical Service official](https://statsghana.gov.gh/)"
+    ]
+    assert "bare domain" in result["citation_requirement"]
+
+
 def test_hermes_stream_preserves_context_and_hides_tool_arguments() -> None:
     requests: list[httpx.Request] = []
     secret_argument = "private-customer-payload"
@@ -461,7 +495,9 @@ def test_hermes_stream_preserves_context_and_hides_tool_arguments() -> None:
             f'data: {{"type":"tool.started","tool_name":"research_web",'
             f'"arguments":{{"query":"{secret_argument}"}}}}',
             'data: {"choices":[{"delta":{"content":"Ghana evidence "}}]}',
-            'data: {"choices":[{"delta":{"content":"with citations."}}],'
+            'data: {"choices":[{"delta":{"content":"with citations. Sources: '
+            "https://gipc.gov.gh/invest-in-ghana/ "
+            'https://statsghana.gov.gh/"}}],'
             '"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}',
             "data: [DONE]",
         )
@@ -498,7 +534,10 @@ def test_hermes_stream_preserves_context_and_hides_tool_arguments() -> None:
     assert "NGN 300 sales" in serialized
     assert "Use my actual numbers." in serialized
     assert payload["temperature"] == 0
-    assert result.content == "Ghana evidence with citations."
+    assert result.content == (
+        "Ghana evidence with citations. Sources: "
+        "https://gipc.gov.gh/invest-in-ghana/ https://statsghana.gov.gh/"
+    )
     assert result.session_id == "stable-session"
     assert any(name == "tool.progress" and data["tool"] == "research_web" for name, data in events)
     assert secret_argument not in json.dumps(events)

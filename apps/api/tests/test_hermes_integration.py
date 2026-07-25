@@ -102,6 +102,110 @@ def test_authenticated_bounded_client_and_cross_profile_isolation(tmp_path: Path
     assert all(request.url.path == "/v1/chat/completions" for request in requests)
 
 
+def test_external_research_answer_is_repaired_with_exact_clickable_citations(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json=_completion("Ghana draft with bare domains only.", input_tokens=10),
+                headers={"x-hermes-session-id": "draft-session"},
+            )
+        return httpx.Response(
+            200,
+            json=_completion(
+                "Corrected answer.\n\nSources\n"
+                "- https://gipc.gov.gh/invest-in-ghana/\n"
+                "- https://statsghana.gov.gh/",
+                input_tokens=20,
+                output_tokens=9,
+            ),
+            headers={
+                "x-hermes-session-id": "repair-session",
+                "x-hermes-session-key": "repair-key",
+            },
+        )
+
+    result = HermesClient(
+        _settings(tmp_path, hermes_temperature=0),
+        transport=httpx.MockTransport(handler),
+    ).respond(
+        HermesEndpoint("tenant_a", "http://hermes:8700/v1", "tenant-a-key"),
+        message="Should I expand to Ghana? Cite authoritative sources.",
+        business_context="NGN 300 from 2026-07-01 to 2026-07-07.",
+    )
+
+    assert len(requests) == 2
+    repair_payload = json.loads(requests[1].content)
+    assert repair_payload["messages"][-2]["content"] == "Ghana draft with bare domains only."
+    assert "at least 2 exact clickable HTTPS URLs" in repair_payload["messages"][-1]["content"]
+    assert "https://gipc.gov.gh/" in result.content
+    assert "https://statsghana.gov.gh/" in result.content
+    assert result.input_tokens == 30
+    assert result.output_tokens == 16
+    assert result.total_tokens == 46
+    assert result.session_id == "repair-session"
+    assert result.session_key == "repair-key"
+
+
+def test_external_research_answer_fails_closed_after_citation_repair_omits_urls(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=_completion("Still only a bare source name."))
+
+    client = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(HermesInvalidResponse, match="required external citations"):
+        client.respond(
+            HermesEndpoint("tenant_a", "http://hermes:8700/v1", "tenant-a-key"),
+            message="Research Ghana expansion and cite sources.",
+            business_context="bounded",
+        )
+    assert calls == 2
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "What is my main source of revenue?",
+        "Show my latest sales.",
+        "Export this answer as a document.",
+    ),
+)
+def test_internal_business_requests_do_not_trigger_external_citation_repair(
+    tmp_path: Path,
+    message: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_completion("Grounded internal answer."))
+
+    result = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+    ).respond(
+        HermesEndpoint("tenant_a", "http://hermes:8700/v1", "tenant-a-key"),
+        message=message,
+        business_context="bounded",
+    )
+
+    assert result.content == "Grounded internal answer."
+    assert len(requests) == 1
+
+
 def test_client_circuit_breaker_rejects_repeated_profile_failure(tmp_path: Path) -> None:
     calls = 0
     now = [0.0]
@@ -688,6 +792,64 @@ def test_stream_accepts_native_and_openai_events_without_leaking_tool_payloads(
         {"tool": "get_business_overview", "status": "working"},
     ) in events
     assert "private" not in json.dumps(events)
+
+
+def test_stream_buffers_external_draft_until_citation_repair_passes(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+    stream = "\n".join(
+        (
+            "event: tool.started",
+            'data: {"type":"tool.started","tool_name":"research_web"}',
+            "",
+            'data: {"type":"message.delta","delta":"Unsafe draft without links."}',
+            "",
+            'data: {"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}',
+            "data: [DONE]",
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                text=stream,
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            json=_completion(
+                "Safe answer. Sources: https://gipc.gov.gh/ https://statsghana.gov.gh/",
+                input_tokens=20,
+                output_tokens=8,
+            ),
+        )
+
+    events: list[tuple[str, dict[str, object]]] = []
+    result = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+    ).respond_stream(
+        HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
+        message="Should I expand to Ghana? Cite sources.",
+        business_context="bounded",
+        on_event=lambda name, data: events.append((name, data)),
+    )
+
+    streamed = "".join(
+        str(data["delta"])
+        for name, data in events
+        if name == "message.delta" and isinstance(data.get("delta"), str)
+    )
+    assert len(requests) == 2
+    assert "Unsafe draft" not in streamed
+    assert streamed == result.content
+    assert "https://gipc.gov.gh/" in result.content
+    assert (
+        "tool.progress",
+        {"tool": "research_web", "status": "verifying_citations"},
+    ) in events
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (30, 12, 42)
 
 
 @pytest.mark.parametrize(
