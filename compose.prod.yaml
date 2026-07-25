@@ -277,6 +277,20 @@ services:
       WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:?Set WHATSAPP_BACKEND}
       BUMPA_BACKEND: disabled
       AGENT_BACKEND: disabled
+      # The scheduler only dispatches durable jobs. It must not inherit
+      # tenant-facing tool or media capabilities from the shared API
+      # environment when those capabilities are enabled for API/worker.
+      AGENT_CAPABILITIES_V2: "false"
+      HERMES_TOOLS_ENABLED: "false"
+      EXTERNAL_CONNECTORS_ENABLED: "false"
+      MCP_GOOGLE_OAUTH_ENABLED: "false"
+      MCP_META_ADS_OAUTH_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      SANDBOX_TOOLS_ENABLED: "false"
+      MANAGED_IMAGE_GENERATION_ENABLED: "false"
+      WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_SPEECH_ENABLED: "false"
+      WHATSAPP_PROGRESS_ENABLED: "false"
       META_APP_SECRET: ""
       META_APP_SECRET_FILE: /run/runtime-secrets/meta_app_secret
       META_SYSTEM_USER_ACCESS_TOKEN: ""

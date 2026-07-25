@@ -816,6 +816,17 @@ capability_rendered="$(
 if ! jq --exit-status '
   .services.api.environment.AGENT_CAPABILITIES_V2 == "true" and
   .services.api.environment.SANDBOX_TOOLS_ENABLED == "true" and
+  .services.scheduler.environment.AGENT_CAPABILITIES_V2 == "false" and
+  .services.scheduler.environment.HERMES_TOOLS_ENABLED == "false" and
+  .services.scheduler.environment.EXTERNAL_CONNECTORS_ENABLED == "false" and
+  .services.scheduler.environment.MCP_GOOGLE_OAUTH_ENABLED == "false" and
+  .services.scheduler.environment.MCP_META_ADS_OAUTH_ENABLED == "false" and
+  .services.scheduler.environment.WEB_RESEARCH_ENABLED == "false" and
+  .services.scheduler.environment.SANDBOX_TOOLS_ENABLED == "false" and
+  .services.scheduler.environment.MANAGED_IMAGE_GENERATION_ENABLED == "false" and
+  .services.scheduler.environment.WHATSAPP_MULTIMODAL_ENABLED == "false" and
+  .services.scheduler.environment.WHATSAPP_SPEECH_ENABLED == "false" and
+  .services.scheduler.environment.WHATSAPP_PROGRESS_ENABLED == "false" and
   .services.migrate.environment.AGENT_CAPABILITIES_V2 == "false" and
   .services.migrate.environment.HERMES_TOOLS_ENABLED == "false" and
   .services.migrate.environment.EXTERNAL_CONNECTORS_ENABLED == "false" and
@@ -869,6 +880,7 @@ if ! jq --exit-status '
     api_capabilities: (.services.api.environment | {
       AGENT_CAPABILITIES_V2, SANDBOX_TOOLS_ENABLED
     }),
+    scheduler: (.services.scheduler | {environment}),
     migrate: (.services.migrate | {environment, volumes}),
     hermes_profile_reconcile:
       (.services["hermes-profile-reconcile"] | {environment, volumes})
