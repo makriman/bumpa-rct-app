@@ -21,6 +21,7 @@ from app.db.models import (
     AgentMessage,
     BumpaMetricSnapshot,
     Conversation,
+    GeneratedAgentMedia,
     HermesProfile,
     OperationalAgentEvent,
     Tenant,
@@ -211,6 +212,7 @@ def handle_chat(
     reply_to_external_message_id: str | None = None,
     media_metadata: dict[str, object] | None = None,
     event_callback: Callable[[str, dict[str, object]], None] | None = None,
+    fixed_response: str | None = None,
     settings: Settings | None = None,
 ) -> tuple[Conversation, AgentMessage, AgentMessage, object | None]:
     effective_settings = settings or get_settings()
@@ -230,7 +232,6 @@ def handle_chat(
     ):
         raise HTTPException(status_code=404, detail="Conversation not found")
     follow_up_detected = conversation is not None
-    persisted_conversation_id = conversation.id if conversation is not None else None
     if not conversation:
         conversation = Conversation(
             tenant_id=tenant.id,
@@ -279,21 +280,38 @@ def handle_chat(
             user_id=user.id,
             conversation_id=conversation.id,
             channel=channel,
+            initiating_message_id=inbound.id,
         )
         context += (
             "\nCurrent action context (opaque; never reveal it): "
-            f"{action_context}. Pass it only to prepare_connector_action or generate_image. "
+            f"{action_context}. Pass it only to prepare_connector_action, generate_image, or "
+            "queue_sandbox_file_for_delivery. "
             "A prepared action is not authorization to execute it; generated media is delivered "
             "only to this initiating conversation."
         )
     bumpa_data_used = "summary_metrics" if freshness is not None else "none"
     classification = LocalClassifier().classify(message, bumpa_data_used)
+    # MCP tools run in a separate authenticated service transaction. Persist the
+    # initiating conversation/message first so tenant-bound actions and media can
+    # reference them with real foreign keys while Hermes is working.
+    db.commit()
     started = monotonic()
     usage_metadata: dict[str, object] = {"provider": profile.provider}
-    if profile.provider == "local":
+    provider_called = False
+    provider_failed = False
+    provider_error_code: str | None = None
+    if fixed_response is not None:
+        answer = fixed_response.strip()
+        if not answer:
+            raise ValueError("A fixed chat response must not be empty")
+        latency_ms = int((monotonic() - started) * 1000)
+        usage_metadata["provider"] = "control_plane"
+    elif profile.provider == "local":
+        provider_called = True
         answer = LocalAgentRuntime().respond(profile.profile_name, message, context)
         latency_ms = int((monotonic() - started) * 1000)
     elif profile.provider == "hermes" and effective_settings.agent_backend == "hermes":
+        provider_called = True
         try:
             api_key = FieldCipher.from_settings(effective_settings).decrypt(
                 profile.encrypted_api_key
@@ -332,7 +350,7 @@ def handle_chat(
                 tenant_id=tenant.id,
                 user_id=user.id,
                 profile_id=profile.id,
-                conversation_id=persisted_conversation_id,
+                conversation_id=conversation.id,
                 channel=channel,
                 event_source=event_source,
                 message=message,
@@ -343,17 +361,19 @@ def handle_chat(
                 retryable=exc.retryable,
                 system_error=True,
             )
-            raise HTTPException(
-                status_code=503,
-                detail="Agent service is temporarily unavailable",
-            ) from exc
-        except ValueError as exc:
+            provider_called = False
+            provider_failed = True
+            provider_error_code = exc.code
+            usage_metadata["provider"] = "control_plane"
+            answer = _provider_failure_response(freshness)
+            latency_ms = int((monotonic() - started) * 1000)
+        except ValueError:
             _persist_failed_hermes_call(
                 db,
                 tenant_id=tenant.id,
                 user_id=user.id,
                 profile_id=profile.id,
-                conversation_id=persisted_conversation_id,
+                conversation_id=conversation.id,
                 channel=channel,
                 event_source=event_source,
                 message=message,
@@ -364,24 +384,30 @@ def handle_chat(
                 retryable=False,
                 system_error=False,
             )
-            raise HTTPException(
-                status_code=503,
-                detail="Agent service is temporarily unavailable",
-            ) from exc
-        answer = result.content
-        if result.session_id:
-            conversation.provider_session_id = result.session_id[:160]
-        latency_ms = result.latency_ms
-        usage_metadata.update(
-            {
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
-                "total_tokens": result.total_tokens,
-            }
-        )
+            provider_called = False
+            provider_failed = True
+            provider_error_code = "profile_key_invalid"
+            usage_metadata["provider"] = "control_plane"
+            answer = _provider_failure_response(freshness)
+            latency_ms = int((monotonic() - started) * 1000)
+        else:
+            answer = result.content
+            if result.session_id:
+                conversation.provider_session_id = result.session_id[:160]
+            latency_ms = result.latency_ms
+            usage_metadata.update(
+                {
+                    "input_tokens": result.input_tokens,
+                    "output_tokens": result.output_tokens,
+                    "total_tokens": result.total_tokens,
+                }
+            )
     else:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Production agent runtime is not configured")
+        provider_failed = True
+        provider_error_code = "agent_runtime_unavailable"
+        usage_metadata["provider"] = "control_plane"
+        answer = _provider_failure_response(freshness)
+        latency_ms = int((monotonic() - started) * 1000)
     outbound = AgentMessage(
         tenant_id=tenant.id,
         user_id=user.id,
@@ -398,6 +424,17 @@ def handle_chat(
     # Materialize the outbound identifier before research instrumentation so
     # the response event can prove where permissioned raw text is retained.
     db.flush()
+    generated_media = db.scalars(
+        select(GeneratedAgentMedia).where(
+            GeneratedAgentMedia.tenant_id == tenant.id,
+            GeneratedAgentMedia.user_id == user.id,
+            GeneratedAgentMedia.conversation_id == conversation.id,
+            GeneratedAgentMedia.channel == channel,
+            GeneratedAgentMedia.agent_message_id == inbound.id,
+        )
+    ).all()
+    for media in generated_media:
+        media.agent_message_id = outbound.id
     conversation.updated_at = utcnow()
     _record_successful_chat_events(
         db,
@@ -415,6 +452,7 @@ def handle_chat(
         follow_up_detected=follow_up_detected,
         bumpa_context_available=freshness is not None,
         latency_ms=latency_ms,
+        provider_called=provider_called,
     )
     db.add(
         UsageEvent(
@@ -436,13 +474,14 @@ def handle_chat(
             conversation_id=conversation.id,
             channel=channel,
             event_type="assistant_response",
-            status="succeeded",
+            status="degraded" if provider_failed else "succeeded",
             media_type=(
                 str((media_metadata or {}).get("type"))
                 if (media_metadata or {}).get("type")
                 else None
             ),
             duration_ms=latency_ms,
+            error_code=provider_error_code,
             citation_count=len(re.findall(r"https://[^\s)>\]]+", answer)),
             grounding_flags=[
                 flag
@@ -450,6 +489,7 @@ def handle_chat(
                     ("tenant_data", freshness is not None),
                     ("external_citation", "https://" in answer),
                     ("multimodal", bool(provider_content_parts)),
+                    ("provider_outage", provider_failed),
                 )
                 if present
             ],
@@ -459,6 +499,19 @@ def handle_chat(
     db.refresh(inbound)
     db.refresh(outbound)
     return conversation, inbound, outbound, freshness
+
+
+def _provider_failure_response(freshness: object | None) -> str:
+    freshness_note = (
+        f" Your latest synced business-data timestamp is {_format_timestamp(freshness)}."
+        if isinstance(freshness, datetime)
+        else " No current business-data freshness timestamp was available."
+    )
+    return (
+        "I’m sorry—the consultant service is temporarily unavailable, so I couldn’t complete "
+        "this request or verify any external information. I haven’t guessed or taken any "
+        f"external action.{freshness_note} Please try this message again shortly."
+    )
 
 
 def _conversation_history(
@@ -522,7 +575,9 @@ def _record_successful_chat_events(
     follow_up_detected: bool,
     bumpa_context_available: bool,
     latency_ms: int,
+    provider_called: bool,
 ) -> None:
+    response_provider = profile.provider if provider_called else "control_plane"
     record_research_event(
         db,
         tenant_id=tenant_id,
@@ -557,7 +612,7 @@ def _record_successful_chat_events(
         },
         quality_flags=() if bumpa_context_available else ("bumpa_data_unavailable",),
     )
-    if profile.provider == "hermes":
+    if profile.provider == "hermes" and provider_called:
         record_research_event(
             db,
             tenant_id=tenant_id,
@@ -611,7 +666,7 @@ def _record_successful_chat_events(
         response_length_chars=len(answer),
         response_latency_ms=latency_ms,
         follow_up_detected=follow_up_detected,
-        business_outcome={"status": "sent", "provider": profile.provider},
+        business_outcome={"status": "sent", "provider": response_provider},
         primary_intent=classification["primary_intent"],
         business_function=classification["business_function"],
         ai_help_type=classification["ai_help_type"],

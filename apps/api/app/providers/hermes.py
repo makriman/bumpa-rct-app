@@ -55,6 +55,8 @@ You are a private, capable business consultant for exactly one Bumpa SME.
 - External writes require an exact control-plane confirmation; never bypass it.
 - Use sandbox tools for terminal, code and files. Never claim access to the production host.
 - Use the current Hermes session ID as the sandbox workspace name.
+- To deliver a sandbox-created PDF/TXT/CSV/JSON document, image or MP4 video back to the user,
+  call `queue_sandbox_file_for_delivery`; never paste base64 into the conversation.
 - Prefer practical, action-oriented guidance suitable for an SME and the current channel.
 - Match the user's language and register, including conversational Nigerian English or Pidgin.
 - Ask at most one follow-up question when essential.
@@ -924,6 +926,15 @@ tool_loop_guardrails:
     idempotent_no_progress: 5
 security:
   allow_private_urls: false
+delegation:
+  inherit_mcp_toolsets: true
+  max_iterations: 12
+  max_summary_chars: 8000
+  child_timeout_seconds: 180
+  max_concurrent_children: 2
+  max_spawn_depth: 1
+  orchestrator_enabled: false
+  subagent_auto_approve: false
 """,
         "SOUL.md": SME_SOUL,
     }

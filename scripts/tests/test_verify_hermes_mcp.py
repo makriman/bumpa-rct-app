@@ -64,7 +64,7 @@ class VerifyHermesMcpTests(unittest.TestCase):
                 MODULE.load_profile_key(profiles[0])
 
     def test_required_surface_contains_business_research_and_sandbox_tools(self) -> None:
-        self.assertEqual(len(MODULE.REQUIRED_TOOLS), 18)
+        self.assertEqual(len(MODULE.REQUIRED_TOOLS), 19)
         self.assertTrue(
             {
                 "get_business_overview",
@@ -72,6 +72,7 @@ class VerifyHermesMcpTests(unittest.TestCase):
                 "research_web",
                 "sandbox_exec",
                 "generate_image",
+                "queue_sandbox_file_for_delivery",
                 "prepare_connector_action",
             }.issubset(MODULE.REQUIRED_TOOLS)
         )

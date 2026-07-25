@@ -35,7 +35,7 @@ from app.services.business_tools import (
     sales_trend,
 )
 from app.services.connector_executor import execute_connector_read
-from app.services.generated_media import generate_and_queue_image
+from app.services.generated_media import generate_and_queue_image, queue_sandbox_file
 from app.services.sandbox import SandboxClient
 from app.services.web_research import search_web
 
@@ -429,6 +429,36 @@ def generate_image(
             settings,
             tenant_id=tenant_id,
             prompt=prompt,
+            action_context_token=action_context_token,
+        ),
+    )
+
+
+@business_mcp.tool()
+def queue_sandbox_file_for_delivery(
+    workspace: str,
+    path: str,
+    filename: str,
+    mime_type: str,
+    action_context_token: str,
+) -> dict[str, Any]:
+    """Sanitize and queue a sandbox file in the initiating web or WhatsApp conversation."""
+
+    if not settings.sandbox_tools_enabled:
+        return {
+            "availability": "unavailable",
+            "warning": "Isolated file delivery is currently disabled.",
+        }
+    return _run_tool(
+        "queue_sandbox_file_for_delivery",
+        lambda db, tenant_id: queue_sandbox_file(
+            db,
+            settings,
+            tenant_id=tenant_id,
+            workspace=workspace,
+            path=path,
+            filename=filename,
+            mime_type=mime_type,
             action_context_token=action_context_token,
         ),
     )

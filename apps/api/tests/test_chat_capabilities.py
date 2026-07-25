@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.ids import new_id
 from app.core.time import utcnow
 from app.db.models import (
+    AgentMessage,
     Conversation,
     GeneratedAgentMedia,
     PendingAgentAction,
@@ -100,15 +101,27 @@ def test_generated_media_download_is_integrity_checked_and_tenant_bound(
         conversation = Conversation(tenant_id=tenant_id, user_id=user_id, channel="web")
         db.add(conversation)
         db.flush()
+        outbound = AgentMessage(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            conversation_id=conversation.id,
+            channel="web",
+            direction="outbound",
+            content="Your inventory export is ready.",
+        )
+        db.add(outbound)
+        db.flush()
         db.add(
             GeneratedAgentMedia(
                 id=media_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
                 conversation_id=conversation.id,
+                agent_message_id=outbound.id,
                 channel="web",
                 media_type="image",
                 mime_type="image/png",
+                filename="inventory-plan.png",
                 storage_path=relative.as_posix(),
                 byte_size=len(content),
                 checksum_sha256=hashlib.sha256(content).hexdigest(),
@@ -116,11 +129,34 @@ def test_generated_media_download_is_integrity_checked_and_tenant_bound(
             )
         )
         db.commit()
+        conversation_id = conversation.id
 
     response = client.get(f"/v1/chat/media/{media_id}", headers=headers)
     assert response.status_code == 200
     assert response.content == content
     assert response.headers["cache-control"] == "private, no-store"
+    assert 'filename="inventory-plan.png"' in response.headers["content-disposition"]
+    page = client.get(
+        f"/v1/chat/conversations/{conversation_id}/messages",
+        headers=headers,
+    )
+    assert page.status_code == 200, page.text
+    assert page.json()["items"][0]["generated_media"] == [
+        {
+            "id": media_id,
+            "media_type": "image",
+            "mime_type": "image/png",
+            "filename": "inventory-plan.png",
+            "byte_size": len(content),
+            "url": f"/v1/chat/media/{media_id}",
+        }
+    ]
+    legacy = client.get(
+        f"/v1/chat/conversations/{conversation_id}",
+        headers=headers,
+    )
+    assert legacy.status_code == 200
+    assert legacy.json()["messages"][0]["generated_media"][0]["id"] == media_id
     path.write_bytes(b"tampered")
     rejected = client.get(f"/v1/chat/media/{media_id}", headers=headers)
     assert rejected.status_code == 404

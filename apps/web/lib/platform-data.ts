@@ -431,7 +431,8 @@ export type McpProvider =
   | "google_sheets"
   | "gmail"
   | "calendar"
-  | "meta_ads";
+  | "meta_ads"
+  | "home_assistant";
 
 export type McpConnection = {
   id: string;
@@ -456,6 +457,7 @@ export type McpRegistryItem = {
   provider: McpProvider;
   name: string;
   enabled: boolean;
+  connection_method: "oauth" | "manual_token";
   default_mode: "read_only";
   tools: McpRegistryTool[];
 };

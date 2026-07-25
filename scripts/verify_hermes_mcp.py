@@ -29,6 +29,7 @@ REQUIRED_TOOLS = frozenset(
         "get_sales_trend",
         "list_connected_services",
         "prepare_connector_action",
+        "queue_sandbox_file_for_delivery",
         "read_connected_service",
         "research_web",
         "sandbox_destroy",

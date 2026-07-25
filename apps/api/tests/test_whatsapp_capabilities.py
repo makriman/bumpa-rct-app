@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -141,6 +142,20 @@ def test_whatsapp_batch_extraction_reply_context_and_progress_language() -> None
     assert whatsapp.extract_message({}) is None
     assert whatsapp.extract_delivery_status({}) is None
     assert whatsapp.split_inbox_events({}) == [({}, "root")]
+    clarification = whatsapp._low_confidence_clarification(
+        SimpleNamespace(
+            metadata={"language_probability": 0.41, "language": "eng"},
+            stored_content_parts=[
+                {
+                    "type": "transcript",
+                    "text": "send the customer quote",
+                }
+            ],
+        )
+    )
+    assert clarification is not None
+    assert "send the customer quote" in clarification
+    assert "haven’t acted on it" in clarification
 
 
 def test_delivery_status_is_monotonic_and_failure_is_separate() -> None:
@@ -369,6 +384,7 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
         internal_service_token="whatsapp-capability-service-token-0001",  # noqa: S106
     )
     generated_content = b"\x89PNG\r\n\x1a\ngenerated-whatsapp"
+    generated_document = b"product,restock\\nAnkara,20\\n"
 
     def fake_chat(
         db: Session,
@@ -417,12 +433,34 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
                 tenant_id=tenant.id,
                 user_id=user.id,
                 conversation_id=conversation.id,
+                agent_message_id=outgoing.id,
                 channel="whatsapp",
                 media_type="image",
                 mime_type="image/png",
                 storage_path=relative.as_posix(),
                 byte_size=len(generated_content),
                 checksum_sha256=hashlib.sha256(generated_content).hexdigest(),
+                status="pending",
+            )
+        )
+        document_id = new_id()
+        document_relative = Path("generated-media") / "test" / f"{document_id}.csv"
+        document_destination = tmp_path / document_relative
+        document_destination.write_bytes(generated_document)
+        db.add(
+            GeneratedAgentMedia(
+                id=document_id,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                conversation_id=conversation.id,
+                agent_message_id=outgoing.id,
+                channel="whatsapp",
+                media_type="document",
+                mime_type="text/csv",
+                filename="restock-plan.csv",
+                storage_path=document_relative.as_posix(),
+                byte_size=len(generated_document),
+                checksum_sha256=hashlib.sha256(generated_document).hexdigest(),
                 status="pending",
             )
         )
@@ -469,14 +507,19 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
         assert text_deliveries[0]["body"].startswith("Your generated poster")
         assert any("External action:" in delivery["body"] for delivery in text_deliveries)
         assert media_deliveries[0]["content"] == generated_content
+        assert media_deliveries[0]["media_type"] == "image"
+        assert media_deliveries[1]["content"] == generated_document
+        assert media_deliveries[1]["media_type"] == "document"
+        assert media_deliveries[1]["filename"] == "restock-plan.csv"
         assert any(delivery.get("interactive_buttons") for delivery in direct_deliveries)
         assert any(
             delivery["purpose"].startswith("research-consent-request:")
             for delivery in direct_deliveries
         )
         assert tenant.research_consent_status == "pending"
-        media = db.scalar(select(GeneratedAgentMedia))
-        assert media is not None and media.status == "delivered"
+        media = db.scalars(select(GeneratedAgentMedia)).all()
+        assert len(media) == 2
+        assert {item.status for item in media} == {"delivered"}
 
 
 def _meta_settings() -> Settings:
@@ -852,7 +895,20 @@ def test_immediate_read_receipts_and_basic_event_guards(
         payload,
         Settings(app_env="test", whatsapp_backend="mock"),
     )
-    assert reads == [("wamid.inbound.receipt", True)]
+    progress = whatsapp._WhatsAppProgress(
+        settings=_meta_settings(),
+        event_id="event-id",
+        inbound_message_id="wamid.inbound.receipt",
+        phone="+2348000000044",
+        tenant_id="tenant-id",
+        user_id="user-id",
+        meta_sender=("123456789", "987654321"),
+    )
+    progress._refresh_typing()
+    assert reads == [
+        ("wamid.inbound.receipt", True),
+        ("wamid.inbound.receipt", True),
+    ]
 
     with factory() as db:
         with pytest.raises(PermanentJobError, match="does not exist"):

@@ -54,6 +54,16 @@ describe("chat state", () => {
         inbound_message_id: "inbound-2",
         outbound_message_id: "outbound-2",
         data_freshness: null,
+        generated_media: [
+          {
+            id: "media-1",
+            media_type: "document",
+            mime_type: "text/csv",
+            filename: "restock.csv",
+            byte_size: 42,
+            url: "/v1/chat/media/media-1",
+          },
+        ],
       },
       source: "Workspace data",
     });
@@ -64,6 +74,7 @@ describe("chat state", () => {
       "saved",
     ]);
     expect(ready.messages[1].source).toBe("Workspace data");
+    expect(ready.messages[1].generatedMedia?.[0].filename).toBe("restock.csv");
   });
 
   it("preserves a draft while loading a selected conversation", () => {

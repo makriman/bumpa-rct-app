@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from queue import Empty, Queue
 from threading import Thread
+from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
@@ -122,6 +123,14 @@ def web_chat(
                         tenant_id=principal.tenant.id,
                         message_created_at=existing.created_at,
                     ),
+                    generated_media=_generated_media_views(
+                        db,
+                        tenant_id=principal.tenant.id,
+                        user_id=principal.user.id,
+                        conversation_id=existing.conversation_id,
+                        channel="web",
+                        agent_message_id=outbound.id,
+                    ),
                 )
     enforce_operation_rate_limit(
         settings,
@@ -152,6 +161,7 @@ def web_chat(
             user_id=principal.user.id,
             conversation_id=conversation.id,
             channel="web",
+            agent_message_id=outbound.id,
         ),
     )
 
@@ -226,6 +236,7 @@ def web_chat_stream(
                             user_id=principal.user.id,
                             conversation_id=incoming.conversation_id,
                             channel="web",
+                            agent_message_id=outgoing.id,
                         )
                     ],
                     "replayed": True,
@@ -297,6 +308,7 @@ def web_chat_stream(
                                     user_id=principal.user.id,
                                     conversation_id=conversation.id,
                                     channel="web",
+                                    agent_message_id=outbound.id,
                                 )
                             ],
                         },
@@ -386,12 +398,20 @@ def generated_media(
         or hashlib.sha256(content).hexdigest() != media.checksum_sha256
     ):
         raise HTTPException(status_code=404, detail="Generated media not found")
+    requested_name = media.filename or f"bumpa-bestie-{media.id}"
+    download_name = "".join(
+        character if character.isascii() and (character.isalnum() or character in "._-") else "_"
+        for character in requested_name
+    )[:200]
     return Response(
         content=content,
         media_type=media.mime_type,
         headers={
             "Cache-Control": "private, no-store",
-            "Content-Disposition": f'inline; filename="bumpa-bestie-{media.id}.png"',
+            "Content-Disposition": (
+                f"{'attachment' if media.media_type == 'document' else 'inline'}; "
+                f'filename="{download_name}"'
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -573,6 +593,14 @@ def conversation_messages(
         .where(AgentMessage.conversation_id == conversation.id)
         .order_by(AgentMessage.created_at)
     ).all()
+    media_by_message = _generated_media_by_message(
+        db,
+        tenant_id=principal.tenant.id,
+        user_id=principal.user.id,
+        conversation_id=conversation.id,
+        channel="web",
+        agent_message_ids=[item.id for item in messages],
+    )
     return {
         "id": conversation.id,
         "messages": [
@@ -581,6 +609,9 @@ def conversation_messages(
                 "direction": item.direction,
                 "content": item.content,
                 "created_at": item.created_at,
+                "generated_media": [
+                    view.model_dump() for view in media_by_message.get(item.id, [])
+                ],
             }
             for item in messages
         ],
@@ -613,7 +644,34 @@ def _generated_media_views(
     user_id: str,
     conversation_id: str,
     channel: str,
+    agent_message_id: str | None = None,
 ) -> list[GeneratedMediaView]:
+    statement = select(GeneratedAgentMedia).where(
+        GeneratedAgentMedia.tenant_id == tenant_id,
+        GeneratedAgentMedia.user_id == user_id,
+        GeneratedAgentMedia.conversation_id == conversation_id,
+        GeneratedAgentMedia.channel == channel,
+        GeneratedAgentMedia.status == "pending",
+    )
+    if agent_message_id is not None:
+        statement = statement.where(
+            GeneratedAgentMedia.agent_message_id == agent_message_id,
+        )
+    rows = db.scalars(statement.order_by(GeneratedAgentMedia.created_at)).all()
+    return [_generated_media_view(row) for row in rows]
+
+
+def _generated_media_by_message(
+    db: Session,
+    *,
+    tenant_id: str,
+    user_id: str,
+    conversation_id: str,
+    channel: str,
+    agent_message_ids: list[str],
+) -> dict[str, list[GeneratedMediaView]]:
+    if not agent_message_ids:
+        return {}
     rows = db.scalars(
         select(GeneratedAgentMedia)
         .where(
@@ -622,19 +680,26 @@ def _generated_media_views(
             GeneratedAgentMedia.conversation_id == conversation_id,
             GeneratedAgentMedia.channel == channel,
             GeneratedAgentMedia.status == "pending",
+            GeneratedAgentMedia.agent_message_id.in_(agent_message_ids),
         )
         .order_by(GeneratedAgentMedia.created_at)
     ).all()
-    return [
-        GeneratedMediaView(
-            id=row.id,
-            media_type="image",
-            mime_type=row.mime_type,
-            byte_size=row.byte_size,
-            url=f"/v1/chat/media/{row.id}",
-        )
-        for row in rows
-    ]
+    result: dict[str, list[GeneratedMediaView]] = {}
+    for row in rows:
+        if row.agent_message_id:
+            result.setdefault(row.agent_message_id, []).append(_generated_media_view(row))
+    return result
+
+
+def _generated_media_view(row: GeneratedAgentMedia) -> GeneratedMediaView:
+    return GeneratedMediaView(
+        id=row.id,
+        media_type=cast(Literal["document", "image", "video"], row.media_type),
+        mime_type=row.mime_type,
+        filename=row.filename,
+        byte_size=row.byte_size,
+        url=f"/v1/chat/media/{row.id}",
+    )
 
 
 def _sse(event: str, data: dict[str, object]) -> str:
@@ -682,12 +747,21 @@ def conversation_message_page(
     ).all()
     has_more = len(rows) > limit
     page_rows = rows[:limit]
+    media_by_message = _generated_media_by_message(
+        db,
+        tenant_id=principal.tenant.id,
+        user_id=principal.user.id,
+        conversation_id=conversation.id,
+        channel="web",
+        agent_message_ids=[item.id for item in page_rows],
+    )
     items = [
         ChatMessageView(
             id=item.id,
             direction=item.direction,
             content=item.content,
             created_at=item.created_at,
+            generated_media=media_by_message.get(item.id, []),
         )
         for item in reversed(page_rows)
     ]

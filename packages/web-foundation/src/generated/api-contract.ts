@@ -1274,6 +1274,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/settings/mcp-connections/{connection_id}/home-assistant/connect": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Connect Home Assistant */
+    post: operations["connect_home_assistant_v1_settings_mcp_connections__connection_id__home_assistant_connect_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/settings/mcp-connections/{connection_id}/oauth/start": {
     parameters: {
       query?: never;
@@ -1724,6 +1741,8 @@ export interface components {
        * @enum {string}
        */
       direction: "inbound" | "outbound";
+      /** Generated Media */
+      generated_media?: components["schemas"]["GeneratedMediaView"][];
       /** Id */
       id: string;
     };
@@ -1791,13 +1810,15 @@ export interface components {
     GeneratedMediaView: {
       /** Byte Size */
       byte_size: number;
+      /** Filename */
+      filename?: string | null;
       /** Id */
       id: string;
       /**
        * Media Type
-       * @constant
+       * @enum {string}
        */
-      media_type: "image";
+      media_type: "document" | "image" | "video";
       /** Mime Type */
       mime_type: string;
       /** Url */
@@ -1868,6 +1889,13 @@ export interface components {
       /** Status */
       status: string;
     };
+    /** HomeAssistantConnect */
+    HomeAssistantConnect: {
+      /** Access Token */
+      access_token: string;
+      /** Base Url */
+      base_url: string;
+    };
     /** McpAdminConnectionView */
     McpAdminConnectionView: {
       /** Admin Approved */
@@ -1898,7 +1926,8 @@ export interface components {
         | "google_sheets"
         | "gmail"
         | "calendar"
-        | "meta_ads";
+        | "meta_ads"
+        | "home_assistant";
       /** Read Only */
       read_only: boolean;
       /** Scopes */
@@ -1938,7 +1967,8 @@ export interface components {
         | "google_sheets"
         | "gmail"
         | "calendar"
-        | "meta_ads";
+        | "meta_ads"
+        | "home_assistant";
       /**
        * Read Only
        * @default true
@@ -1970,7 +2000,8 @@ export interface components {
         | "google_sheets"
         | "gmail"
         | "calendar"
-        | "meta_ads";
+        | "meta_ads"
+        | "home_assistant";
       /** Read Only */
       read_only: boolean;
       /** Scopes */
@@ -5667,6 +5698,46 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  connect_home_assistant_v1_settings_mcp_connections__connection_id__home_assistant_connect_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path: {
+        connection_id: string;
+      };
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["HomeAssistantConnect"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["McpConnectionView"];
+        };
       };
       /** @description Validation Error */
       422: {

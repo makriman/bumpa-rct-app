@@ -156,6 +156,11 @@ def test_mcp_tool_surface_binds_tenant_and_preserves_capability_boundaries(
     )
     monkeypatch.setattr(
         tools,
+        "queue_sandbox_file",
+        lambda _db, _settings, **values: {"queued_file": values},
+    )
+    monkeypatch.setattr(
+        tools,
         "prepare_pending_action",
         lambda _db, _settings, **_values: (
             SimpleNamespace(
@@ -219,6 +224,14 @@ def test_mcp_tool_surface_binds_tenant_and_preserves_capability_boundaries(
     assert tools.generate_image("Create a poster", "context-token")["generated"]["tenant_id"] == (
         tenant_id
     )
+    queued_file = tools.queue_sandbox_file_for_delivery(
+        "session",
+        "/workspace/plan.csv",
+        "plan.csv",
+        "text/csv",
+        "context-token",
+    )
+    assert queued_file["queued_file"]["tenant_id"] == tenant_id
     assert tools.sandbox_run_code("session", "python", "print(1)")["operation"] == "code"
     assert tools.sandbox_exec("session", "pwd")["operation"] == "exec"
     assert tools.sandbox_file("session", "read", "/workspace/a")["operation"] == "file"
@@ -243,6 +256,16 @@ def test_mcp_provider_features_fail_closed_when_disabled(
     )
     assert tools.research_web("Ghana")["availability"] == "unavailable"
     assert tools.generate_image("Poster", "context")["availability"] == "unavailable"
+    assert (
+        tools.queue_sandbox_file_for_delivery(
+            "session",
+            "/workspace/plan.csv",
+            "plan.csv",
+            "text/csv",
+            "context",
+        )["availability"]
+        == "unavailable"
+    )
     assert tools.sandbox_run_code("session", "python", "print(1)")["availability"] == (
         "unavailable"
     )

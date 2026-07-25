@@ -61,7 +61,11 @@ export default {
     if (!WORKSPACE_PATTERN.test(workspace)) {
       return json({ error: "invalid_workspace" }, 400);
     }
-    const sandboxId = await scopedSandboxId(env.SANDBOX_SERVICE_TOKEN, tenantId, workspace);
+    const sandboxId = await scopedSandboxId(
+      env.SANDBOX_SERVICE_TOKEN,
+      tenantId,
+      workspace,
+    );
     const sandbox = getSandbox(env.Sandbox, sandboxId, {
       sleepAfter: "10m",
       enableDefaultSession: false,
@@ -93,6 +97,12 @@ export default {
       }
       if (operation === "video-frames") {
         return json(await extractVideoFrames(sandbox, body));
+      }
+      if (operation === "document-pages") {
+        return json(await extractDocumentPages(sandbox, body));
+      }
+      if (operation === "export") {
+        return json(await exportFile(sandbox, body));
       }
       return json({ error: "not_found" }, 404);
     } catch (error) {
@@ -158,7 +168,8 @@ async function runCommand(
     stderr: result.stderr.slice(0, MAX_TEXT_OUTPUT),
     duration_ms: result.duration,
     truncated:
-      result.stdout.length > MAX_TEXT_OUTPUT || result.stderr.length > MAX_TEXT_OUTPUT,
+      result.stdout.length > MAX_TEXT_OUTPUT ||
+      result.stderr.length > MAX_TEXT_OUTPUT,
   };
 }
 
@@ -180,11 +191,14 @@ async function fileOperation(
   }
   if (action === "write") {
     const content = stringValue(body, "content", 250_000, true);
-    const result = await sandbox.writeFile(path, content, { encoding: "utf-8" });
+    const result = await sandbox.writeFile(path, content, {
+      encoding: "utf-8",
+    });
     return {
       written: result.success,
       path,
-      bytes_written: "bytesWritten" in result ? result.bytesWritten : content.length,
+      bytes_written:
+        "bytesWritten" in result ? result.bytesWritten : content.length,
     };
   }
   if (action === "list") {
@@ -192,7 +206,11 @@ async function fileOperation(
       recursive: false,
       includeHidden: false,
     });
-    return { path, files: result.files.slice(0, 200), truncated: result.files.length > 200 };
+    return {
+      path,
+      files: result.files.slice(0, 200),
+      truncated: result.files.length > 200,
+    };
   }
   if (action === "delete") {
     const result = await sandbox.deleteFile(path);
@@ -210,7 +228,9 @@ async function extractVideoFrames(
     throw new RequestError("invalid_video", 400);
   }
   await sandbox.mkdir("/workspace/.media", { recursive: true });
-  await sandbox.writeFile("/workspace/.media/input", encoded, { encoding: "base64" });
+  await sandbox.writeFile("/workspace/.media/input", encoded, {
+    encoding: "base64",
+  });
   try {
     const result = await sandbox.exec(
       "ffmpeg -v error -i /workspace/.media/input " +
@@ -238,12 +258,183 @@ async function extractVideoFrames(
     }
     return { frames, mime_type: "image/jpeg", count: frames.length };
   } finally {
-    await sandbox.exec("rm -f /workspace/.media/input /workspace/.media/frame-*.jpg", {
+    await sandbox.exec(
+      "rm -f /workspace/.media/input /workspace/.media/frame-*.jpg",
+      {
+        cwd: "/workspace",
+        timeout: 5_000,
+        origin: "internal",
+      },
+    );
+  }
+}
+
+async function extractDocumentPages(
+  sandbox: SandboxBinding,
+  body: JsonObject,
+): Promise<JsonObject> {
+  const encoded = stringValue(body, "content_base64", 24_000_000);
+  if (
+    body.mime_type !== "application/pdf" ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)
+  ) {
+    throw new RequestError("invalid_document", 400);
+  }
+  await sandbox.mkdir("/workspace/.media", { recursive: true });
+  await sandbox.writeFile("/workspace/.media/input.pdf", encoded, {
+    encoding: "base64",
+  });
+  try {
+    const result = await sandbox.exec(
+      "pdftoppm -f 1 -l 4 -jpeg -r 110 -scale-to 1400 " +
+        "/workspace/.media/input.pdf /workspace/.media/page",
+      { cwd: "/workspace", timeout: 30_000, origin: "internal" },
+    );
+    if (!result.success) {
+      throw new RequestError("document_decode_failed", 422);
+    }
+    const pages: string[] = [];
+    for (let index = 1; index <= 4; index += 1) {
+      const path = `/workspace/.media/page-${index}.jpg`;
+      try {
+        const page = await sandbox.readFile(path, { encoding: "base64" });
+        if (page.content.length <= 700_000) {
+          pages.push(page.content);
+        }
+      } catch {
+        break;
+      }
+    }
+    if (pages.length === 0) {
+      throw new RequestError("document_decode_failed", 422);
+    }
+    return { pages, mime_type: "image/jpeg", count: pages.length };
+  } finally {
+    await sandbox.exec(
+      "rm -f /workspace/.media/input.pdf /workspace/.media/page-*.jpg",
+      { cwd: "/workspace", timeout: 5_000, origin: "internal" },
+    );
+  }
+}
+
+async function exportFile(
+  sandbox: SandboxBinding,
+  body: JsonObject,
+): Promise<JsonObject> {
+  const path = workspacePath(stringValue(body, "path", 500));
+  const mimeType = stringValue(body, "mime_type", 100);
+  const textTypes = new Set(["application/json", "text/csv", "text/plain"]);
+  if (textTypes.has(mimeType)) {
+    const source = await sandbox.readFile(path, { encoding: "utf-8" });
+    const size =
+      source.size ?? new TextEncoder().encode(source.content).byteLength;
+    if (size <= 0 || size > 2_000_000) {
+      throw new RequestError("export_size_invalid", 422);
+    }
+    if (mimeType === "application/json") {
+      try {
+        JSON.parse(source.content);
+      } catch {
+        throw new RequestError("invalid_export_content", 422);
+      }
+    }
+    return {
+      content_base64: bytesToBase64(new TextEncoder().encode(source.content)),
+      mime_type: mimeType,
+      size_bytes: size,
+    };
+  }
+  if (
+    !["application/pdf", "image/jpeg", "image/png", "video/mp4"].includes(
+      mimeType,
+    )
+  ) {
+    throw new RequestError("invalid_export_type", 400);
+  }
+  await sandbox.mkdir("/workspace/.exports", { recursive: true });
+  const suffix =
+    mimeType === "application/pdf"
+      ? "pdf"
+      : mimeType === "video/mp4"
+        ? "mp4"
+        : mimeType === "image/png"
+          ? "png"
+          : "jpg";
+  const output = `/workspace/.exports/sanitized.${suffix}`;
+  try {
+    if (mimeType === "application/pdf") {
+      const inspection = await sandbox.exec(
+        `pages=$(pdfinfo ${shellQuote(path)} | awk '/^Pages:/ {print $2}'); ` +
+          'test "$pages" -ge 1 && test "$pages" -le 50',
+        {
+          cwd: "/workspace",
+          timeout: 10_000,
+          origin: "internal",
+        },
+      );
+      if (!inspection.success) {
+        throw new RequestError("export_decode_failed", 422);
+      }
+    }
+    const command =
+      mimeType === "application/pdf"
+        ? `gs -q -dSAFER -dBATCH -dNOPAUSE -dPrinted ` +
+          "-dPreserveAnnots=false -dPreserveMarkedContent=false " +
+          "-sDEVICE=pdfwrite -dCompatibilityLevel=1.7 " +
+          `-sOutputFile=${shellQuote(output)} ${shellQuote(path)}`
+        : mimeType === "video/mp4"
+          ? `ffmpeg -v error -y -i ${shellQuote(path)} -map_metadata -1 ` +
+            "-t 60 -vf 'scale=1280:-2:force_original_aspect_ratio=decrease' " +
+            "-c:v libx264 -preset veryfast -crf 28 -c:a aac -b:a 96k " +
+            "-movflags +faststart " +
+            shellQuote(output)
+          : `ffmpeg -v error -y -i ${shellQuote(path)} -map_metadata -1 ` +
+            "-frames:v 1 -vf 'scale=1600:-2:force_original_aspect_ratio=decrease' " +
+            (mimeType === "image/png" ? "-c:v png " : "-q:v 5 ") +
+            shellQuote(output);
+    const result = await sandbox.exec(command, {
+      cwd: "/workspace",
+      timeout: 30_000,
+      origin: "internal",
+    });
+    if (!result.success) {
+      throw new RequestError("export_decode_failed", 422);
+    }
+    const exported = await sandbox.readFile(output, { encoding: "base64" });
+    const size = exported.size ?? base64DecodedSize(exported.content);
+    if (size <= 0 || size > 8_388_608) {
+      throw new RequestError("export_size_invalid", 422);
+    }
+    return {
+      content_base64: exported.content,
+      mime_type: mimeType,
+      size_bytes: size,
+    };
+  } finally {
+    await sandbox.exec("rm -f /workspace/.exports/sanitized.*", {
       cwd: "/workspace",
       timeout: 5_000,
       origin: "internal",
     });
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function bytesToBase64(value: Uint8Array): string {
+  let binary = "";
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64DecodedSize(value: string): number {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new RequestError("invalid_export_content", 422);
+  }
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
 }
 
 async function boundedJson(request: Request): Promise<JsonObject> {
@@ -325,12 +516,17 @@ async function scopedSandboxId(
 }
 
 async function shortHash(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
   return hex(new Uint8Array(digest)).slice(0, 16);
 }
 
 function hex(value: Uint8Array): string {
-  return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function boundedLines(values: string[]): string[] {

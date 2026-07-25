@@ -168,6 +168,88 @@ def test_operator_approval_permission_confirmation_and_revocation(client: TestCl
         _remove_provider(provider)
 
 
+def test_home_assistant_requires_operator_approval_and_encrypts_manual_token(
+    client: TestClient,
+) -> None:
+    provider = "home_assistant"
+    _remove_provider(provider)
+    owner = auth_headers(client, "+2348012345678")
+    operator = auth_headers(client, "+2348099990001")
+    access_token = "dedicated-home-assistant-pilot-token"
+    try:
+        requested = client.post(
+            "/v1/settings/mcp-connections",
+            headers=owner,
+            json={
+                "provider": provider,
+                "read_only": False,
+                "allowed_resources": [
+                    "home_assistant:entity:light.shop",
+                    "home_assistant:service:light.turn_on",
+                ],
+            },
+        )
+        assert requested.status_code == 201, requested.text
+        connection_id = requested.json()["id"]
+        assert requested.json()["oauth_available"] is False
+
+        blocked = client.post(
+            f"/v1/settings/mcp-connections/{connection_id}/home-assistant/connect",
+            headers=owner,
+            json={
+                "base_url": "https://shop-automation.example.com",
+                "access_token": access_token,
+            },
+        )
+        assert blocked.status_code == 409
+
+        approved = client.patch(
+            f"/v1/admin/mcp-connections/{connection_id}",
+            headers=operator,
+            json={"decision": "approve", "reason": "Approved trusted shop automation"},
+        )
+        assert approved.status_code == 200, approved.text
+
+        private_origin = client.post(
+            f"/v1/settings/mcp-connections/{connection_id}/home-assistant/connect",
+            headers=owner,
+            json={
+                "base_url": "https://192.168.1.10",
+                "access_token": access_token,
+            },
+        )
+        assert private_origin.status_code == 422
+
+        connected = client.post(
+            f"/v1/settings/mcp-connections/{connection_id}/home-assistant/connect",
+            headers=owner,
+            json={
+                "base_url": "https://shop-automation.example.com",
+                "access_token": access_token,
+            },
+        )
+        assert connected.status_code == 200, connected.text
+        assert connected.json()["status"] == "active"
+        assert access_token not in connected.text
+        assert "shop-automation.example.com" not in connected.text
+
+        with SessionLocal() as db:
+            set_security_context(db, privileged=True)
+            connection = db.get(McpConnection, connection_id)
+            assert connection is not None
+            assert connection.encrypted_credentials
+            assert access_token not in connection.encrypted_credentials
+            assert "shop-automation.example.com" not in connection.encrypted_credentials
+            actions = set(
+                db.scalars(
+                    select(AuditLog.action).where(AuditLog.resource_id == connection_id)
+                ).all()
+            )
+            assert "mcp.home_assistant.connected" in actions
+    finally:
+        _remove_provider(provider)
+
+
 def test_oauth_state_callback_encrypts_tokens_and_rejects_replay(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -403,9 +485,13 @@ def test_connector_registry_permissions_and_google_refresh_are_bounded() -> None
         "gmail",
         "calendar",
         "meta_ads",
+        "home_assistant",
     }
     assert next(row for row in rows if row["provider"] == "gmail")["enabled"] is True
     assert next(row for row in rows if row["provider"] == "meta_ads")["enabled"] is False
+    home_assistant = next(row for row in rows if row["provider"] == "home_assistant")
+    assert home_assistant["enabled"] is True
+    assert home_assistant["connection_method"] == "manual_token"
     assert any(
         scope.endswith("/gmail.send") for scope in connection_scopes("gmail", read_only=False)
     )
