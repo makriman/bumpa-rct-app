@@ -358,6 +358,45 @@ services:
       WEEKLY_INSIGHTS_ENABLED: "false"
       OPS_ALERTS_ENABLED: "false"
 
+  hermes-profile-reconcile:
+    image: ${API_IMAGE:?Set immutable API_IMAGE}
+    build: !reset null
+    group_add:
+      - "10000"
+    environment:
+      APP_ENV: production
+      AUTH_LOGIN_MODE: disabled
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:?Set FIELD_ENCRYPTION_KEY}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      WHATSAPP_BACKEND: disabled
+      META_TEST_SENDER_VERIFICATION_MODE: disabled
+      BUMPA_BACKEND: disabled
+      AGENT_BACKEND: disabled
+      # Profile materialization needs the tenant database and private staging
+      # volume, but no provider credentials or runtime capabilities.
+      AGENT_CAPABILITIES_V2: "false"
+      HERMES_TOOLS_ENABLED: "false"
+      EXTERNAL_CONNECTORS_ENABLED: "false"
+      MCP_GOOGLE_OAUTH_ENABLED: "false"
+      MCP_META_ADS_OAUTH_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      SANDBOX_TOOLS_ENABLED: "false"
+      MANAGED_IMAGE_GENERATION_ENABLED: "false"
+      WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
+      WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_SPEECH_ENABLED: "false"
+      WHATSAPP_PROGRESS_ENABLED: "false"
+      PROACTIVE_INSIGHTS_ENABLED: "false"
+      DAILY_INSIGHTS_ENABLED: "false"
+      WEEKLY_INSIGHTS_ENABLED: "false"
+      OPS_ALERTS_ENABLED: "false"
+      HERMES_PROFILE_ROOT: /data/hermes/profiles
+      MCP_INTERNAL_BASE_URL: ${MCP_INTERNAL_BASE_URL:-http://api:8000/internal/mcp/}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
   hermes:
     image: ${HERMES_IMAGE:?Set immutable HERMES_IMAGE}
     build: !reset null

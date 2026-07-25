@@ -393,6 +393,67 @@ services:
     restart: "no"
     profiles: ["tools"]
 
+  hermes-profile-reconcile:
+    image: bumpabestie-api:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    init: true
+    command: ["python", "-m", "app.cli.reconcile_hermes_profiles"]
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      AUTH_LOGIN_MODE: disabled
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://bumpabestie_app:local-app-postgres-only@postgres:5432/bumpabestie}
+      FIELD_ENCRYPTION_KEY: ${FIELD_ENCRYPTION_KEY:-local-only-change-me-field-key}
+      FIELD_ENCRYPTION_KEY_ID: ${FIELD_ENCRYPTION_KEY_ID:-primary}
+      FIELD_ENCRYPTION_WRITE_VERSION: ${FIELD_ENCRYPTION_WRITE_VERSION:-v1}
+      FIELD_ENCRYPTION_OLD_KEYS: ${FIELD_ENCRYPTION_OLD_KEYS:-{}}
+      JWT_SECRET: reconcile-unused-jwt-secret-0000000000000000
+      OTP_SECRET: reconcile-unused-otp-secret-0000000000000000
+      RESEARCH_PSEUDONYM_KEY: reconcile-unused-research-key-000000000000
+      ONBOARDING_INTEGRITY_KEY: reconcile-unused-onboarding-key-0000000000
+      EXPOSE_LOCAL_OTP: "false"
+      SEED_DEMO_DATA: "false"
+      WHATSAPP_BACKEND: disabled
+      META_TEST_SENDER_VERIFICATION_MODE: disabled
+      BUMPA_BACKEND: disabled
+      AGENT_BACKEND: disabled
+      AGENT_CAPABILITIES_V2: "false"
+      HERMES_TOOLS_ENABLED: "false"
+      EXTERNAL_CONNECTORS_ENABLED: "false"
+      MCP_GOOGLE_OAUTH_ENABLED: "false"
+      MCP_META_ADS_OAUTH_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      SANDBOX_TOOLS_ENABLED: "false"
+      MANAGED_IMAGE_GENERATION_ENABLED: "false"
+      WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
+      WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_SPEECH_ENABLED: "false"
+      WHATSAPP_PROGRESS_ENABLED: "false"
+      PROACTIVE_INSIGHTS_ENABLED: "false"
+      DAILY_INSIGHTS_ENABLED: "false"
+      WEEKLY_INSIGHTS_ENABLED: "false"
+      OPS_ALERTS_ENABLED: "false"
+      HERMES_PROFILE_ROOT: ${HERMES_PROFILE_ROOT:-./.data/hermes/profiles}
+      HERMES_PROFILE_PORT_START: ${HERMES_PROFILE_PORT_START:-8700}
+      HERMES_PROFILE_PORT_END: ${HERMES_PROFILE_PORT_END:-8999}
+      HERMES_CONTROL_PORT: ${HERMES_CONTROL_PORT:-8699}
+      HERMES_DEFAULT_MODEL: ${HERMES_DEFAULT_MODEL:-claude-sonnet-5}
+      MCP_INTERNAL_BASE_URL: ${MCP_INTERNAL_BASE_URL:-http://api:8000/internal/mcp/}
+      ARTIFACT_ROOT: /tmp/exports
+    networks:
+      - data
+    volumes:
+      - hermes_staging_data:/data/hermes
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    restart: "no"
+    profiles: ["tools"]
+
   postgres:
     image: bumpabestie-postgres:${INFRA_IMAGE_TAG:-local}
     build:

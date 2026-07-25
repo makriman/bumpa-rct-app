@@ -832,13 +832,46 @@ if ! jq --exit-status '
   .services.migrate.environment.DAILY_INSIGHTS_ENABLED == "false" and
   .services.migrate.environment.WEEKLY_INSIGHTS_ENABLED == "false" and
   .services.migrate.environment.OPS_ALERTS_ENABLED == "false" and
-  (.services.migrate.volumes | map(select(.target == "/run/runtime-secrets")) | length) == 0
+  (.services.migrate.volumes | map(select(.target == "/run/runtime-secrets")) | length) == 0 and
+  .services["hermes-profile-reconcile"].environment.AGENT_CAPABILITIES_V2 == "false" and
+  .services["hermes-profile-reconcile"].environment.HERMES_TOOLS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.EXTERNAL_CONNECTORS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.MCP_GOOGLE_OAUTH_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.MCP_META_ADS_OAUTH_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WEB_RESEARCH_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.SANDBOX_TOOLS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.MANAGED_IMAGE_GENERATION_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WHATSAPP_PRIMARY_PILOT_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WHATSAPP_MULTIMODAL_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WHATSAPP_SPEECH_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WHATSAPP_PROGRESS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.PROACTIVE_INSIGHTS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.DAILY_INSIGHTS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.WEEKLY_INSIGHTS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.OPS_ALERTS_ENABLED == "false" and
+  .services["hermes-profile-reconcile"].environment.JWT_SECRET == "reconcile-unused-jwt-secret-0000000000000000" and
+  .services["hermes-profile-reconcile"].environment.OTP_SECRET == "reconcile-unused-otp-secret-0000000000000000" and
+  .services["hermes-profile-reconcile"].environment.RESEARCH_PSEUDONYM_KEY == "reconcile-unused-research-key-000000000000" and
+  .services["hermes-profile-reconcile"].environment.ONBOARDING_INTEGRITY_KEY == "reconcile-unused-onboarding-key-0000000000" and
+  (.services["hermes-profile-reconcile"].environment | has("MIGRATION_DATABASE_URL") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("INTERNAL_SERVICE_TOKEN") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("COOKIE_SECRET") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("META_APP_SECRET") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("META_SYSTEM_USER_ACCESS_TOKEN") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("TAVILY_API_KEY") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("ELEVENLABS_API_KEY") | not) and
+  (.services["hermes-profile-reconcile"].environment | has("SANDBOX_SERVICE_TOKEN") | not) and
+  (.services["hermes-profile-reconcile"].secrets == null) and
+  ([.services["hermes-profile-reconcile"].volumes[] |
+    select(.target == "/run/runtime-secrets")] | length) == 0
 ' <<<"$capability_rendered" >/dev/null; then
   jq '{
     api_capabilities: (.services.api.environment | {
       AGENT_CAPABILITIES_V2, SANDBOX_TOOLS_ENABLED
     }),
-    migrate: (.services.migrate | {environment, volumes})
+    migrate: (.services.migrate | {environment, volumes}),
+    hermes_profile_reconcile:
+      (.services["hermes-profile-reconcile"] | {environment, volumes})
   }' <<<"$capability_rendered" >&2
   exit 1
 fi
@@ -949,6 +982,15 @@ if ! jq --exit-status '
   .services.hermes.environment.HERMES_STAGING_ROOT == "/staged/profiles" and
   .services.api.environment.HERMES_CONTROL_PORT == "8699" and
   .services.api.group_add == ["10000"] and
+  .services["hermes-profile-reconcile"].image == .services.api.image and
+  .services["hermes-profile-reconcile"].command == ["python", "-m", "app.cli.reconcile_hermes_profiles"] and
+  .services["hermes-profile-reconcile"].group_add == ["10000"] and
+  .services["hermes-profile-reconcile"].environment.HERMES_PROFILE_ROOT == "/data/hermes/profiles" and
+  .services["hermes-profile-reconcile"].read_only == true and
+  .services["hermes-profile-reconcile"].cap_drop == ["ALL"] and
+  (.services["hermes-profile-reconcile"].networks | keys == ["data"]) and
+  ([.services["hermes-profile-reconcile"].volumes[] |
+    select(.target == "/data/hermes" and .read_only != true) | .source] == ["hermes_staging_data"]) and
   (.services.hermes.healthcheck.test[1] | contains("/run/service/main-hermes")) and
   (.services.hermes.healthcheck.test[1] | contains("/etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type")) and
   (.services.hermes.healthcheck.test[1] | contains("/run/service/bumpabestie-hermes-control")) and
@@ -1034,6 +1076,8 @@ if ! jq --exit-status '
 ' <<<"$rendered" >/dev/null; then
   jq '{
     hermes: (.services.hermes | {image, build, cap_drop, read_only, stop_grace_period, ports, networks, environment, secrets, volumes}),
+    hermes_profile_reconcile:
+      (.services["hermes-profile-reconcile"] | {image, command, group_add, networks, read_only, cap_drop, environment, volumes}),
     hermes_import: (.services["hermes-import"] | {image, network_mode, networks, read_only, secrets, volumes}),
     hermes_staging_init: (.services["hermes-staging-init"] | {image, command, network_mode, networks, read_only}),
     app_secrets_init: (.services["app-secrets-init"] | {image, network_mode, networks, read_only, cap_drop, cap_add, secrets, volumes}),
@@ -1120,6 +1164,7 @@ boundary_writer_guard_line="$(sed -n '2p' <<<"$writer_guard_lines")"
 forward_boundary_line="$(grep -n -F 'write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY' scripts/deploy.sh | cut -d: -f1)"
 role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh | cut -d: -f1)"
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
+profile_materialize_line="$(grep -n -F '  hermes-profile-reconcile' scripts/deploy.sh | cut -d: -f1)"
 reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
 # The following patterns intentionally match literal shell source.
 # shellcheck disable=SC2016
@@ -1137,6 +1182,7 @@ require_single_line_number boundary_writer_guard_line "$boundary_writer_guard_li
 require_single_line_number forward_boundary_line "$forward_boundary_line"
 require_single_line_number role_init_line "$role_init_line"
 require_single_line_number migrate_line "$migrate_line"
+require_single_line_number profile_materialize_line "$profile_materialize_line"
 require_single_line_number reconcile_line "$reconcile_line"
 require_single_line_number application_start_line "$application_start_line"
 if [[ -z "$stop_line" || -z "$image_pull_line" \
@@ -1325,8 +1371,10 @@ if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migr
   echo "Deployment does not reconcile the application role before migrations" >&2
   exit 1
 fi
-if [[ -z "$reconcile_line" || -z "$application_start_line" \
-  || "$migrate_line" -ge "$reconcile_line" || "$reconcile_line" -ge "$application_start_line" ]]; then
+if [[ -z "$profile_materialize_line" || -z "$reconcile_line" || -z "$application_start_line" \
+  || "$migrate_line" -ge "$profile_materialize_line" \
+  || "$profile_materialize_line" -ge "$reconcile_line" \
+  || "$reconcile_line" -ge "$application_start_line" ]]; then
   echo "Deployment does not reconcile staged Hermes profiles between migration and application startup" >&2
   exit 1
 fi
