@@ -14,7 +14,7 @@ raw-access reason gates, privacy-bounded audit request context, draining operati
 retention, export expiry/cleanup and dry-run-first credential key rotation are
 implemented and tested. The first dual-reader release deliberately retains v1
 writes for rollback; production v2 rewrapping remains a staged operational gate.
-Exact-registry scan evidence for all six deployed hardened images is complete.
+Exact-registry scan evidence for all eight deployed hardened images is complete.
 Consult the verification ledger before relying on a control.
 
 Production may use explicit `disabled` provider modes while an external account gate
@@ -45,11 +45,13 @@ through connectors and compromised dependencies/images.
 - Authentication responses avoid account enumeration and all login events are
   correlated without logging the raw phone number or OTP.
 
-### Temporary web-only authentication
+### Temporary mapped web authentication
 
 The live contained release uses a deliberately temporary shared six-digit pilot
-PIN while WhatsApp authentication is parked. It is production-evidenced only for
-the five approved mapped collaborators and is not a long-term identity factor.
+PIN alongside the independently gated primary WhatsApp pilot. It is
+production-evidenced only for the five approved mapped collaborators and is not
+a long-term identity factor. The primary pilot does not enable WhatsApp OTP,
+public onboarding or proactive messaging.
 Only an active user whose primary phone has an approved,
 non-opted-out mapping to an active tenant membership can receive a provider-free
 challenge; platform role alone is insufficient. Request/verification responses are
@@ -141,16 +143,14 @@ runtime uses fixed UID/GID `10001`, a read-only root filesystem and only
 `NET_BIND_SERVICE`. Backup runs as UID/GID 70 with a narrow capability set; the
 separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
-required. The release workflow publishes commit-SHA-tagged images with provenance
-and SBOM, then scans each exact registry digest. Brand/data hardening
-[PR 49](https://github.com/makriman/bumpa-rct-app/pull/49), persistence
-[PR 51](https://github.com/makriman/bumpa-rct-app/pull/51), the final timeout
-[PR 52](https://github.com/makriman/bumpa-rct-app/pull/52), protected-main
-[CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
-and [publish run 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
-passed for all six images deployed at application release
-`c0c15443352ab84fde1d2edfde1ed0692ed842f6`. Redis remains pinned to its reviewed
-upstream digest.
+required. The release workflow publishes commit-SHA-tagged images with
+provenance and SBOM, then scans each exact registry digest. Production SME
+consultant [PR 70](https://github.com/makriman/bumpa-rct-app/pull/70),
+[CI 30165914178](https://github.com/makriman/bumpa-rct-app/actions/runs/30165914178)
+and [publish run 30166552591](https://github.com/makriman/bumpa-rct-app/actions/runs/30166552591)
+passed for all eight images deployed at application release
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a`. Redis remains pinned to its
+reviewed upstream digest.
 
 ## Research governance
 
@@ -174,11 +174,11 @@ redaction and export permissions—target complete branch coverage. See
 
 Historical predecessor production evidence confirms ENABLE+FORCE RLS and one
 policy on all 23 tenant tables. Its non-bypass application role exercised 115
-tenant/table contexts across 670 scoped rows and returned zero rows without tenant
-context and zero cross-tenant rows. Current exact-release CI reran the RLS
-contracts; schema-0015 store-boundary reconciliation adds current production
-evidence without relabelling that historical full-catalog audit. All eight services
-are running, all seven configured healthchecks are healthy, and accepted runtime
+tenant/table contexts across 670 scoped rows and returned zero rows without
+tenant context and zero cross-tenant rows. Current reconciliation at schema
+`0018_agent_capability_audit` found 26 tenant tables with RLS enabled and forced
+and zero tenant tables missing the complete boundary. All ten services are
+running, all nine configured health checks are healthy, and accepted runtime
 samples show zero restarts and zero OOM kills.
 
 All five branded records are Cloudflare-proxied with Full (strict), Always Use
@@ -195,18 +195,22 @@ Live-provider evidence does not broaden authorization. Five Hermes profiles each
 completed a current live Claude request from a synthetic prompt; normal
 tenant-scoped redacted context remained inside Hermes and prompt/response bodies
 were omitted from evidence. Five same-profile health checks passed, and all 20
-cross-profile gateway credential attempts were rejected; cleanup left zero active
-canary sessions and no new Hermes errors. WhatsApp channel routing remains
-unproven. Bumpa is accepted partial at 8/10 analytics datasets plus orders for
+cross-profile gateway credential attempts were rejected. Grounded-period,
+multi-turn, delegated-agent and scheduled-task canaries also passed; cleanup
+left zero active canary sessions or jobs. Bumpa is accepted partial at 8/10
+analytics datasets plus orders for
 stores 1–4 and degraded at 7/10 plus orders for store 5. Store 3's slow
 `products.overview` succeeds under the scoped 90-second policy; the same dataset
 alone receives no provider response for store 5 inside that boundary. Current raw
 evidence, 50 metric snapshots, canonical orders/items, ranges, currency, redaction
 and freshness reconcile, but the provider still does not supply 10/10.
-Historical predecessor Graph evidence reported the Meta test lane `PENDING`, with
-five approved non-authentication templates, zero authentication templates and both
-auth-template create paths denied. It was not rerun for this application release
-and is not current sender evidence. WhatsApp is disabled, and no outbound message,
-OTP or receipt is claimed. The Meta sender is not OTP- or launch-ready.
+Current read-only Meta evidence shows the primary Cloud API sender is
+code-verified, its application is subscribed to the WABA, and five mapped pilot
+identities exist. Invalid signed-webhook ingress was rejected; valid synthetic
+ingress and replay dedupe passed without creating an outbound message. The
+primary/multimodal/progress control plane is enabled, but no participant message,
+real media send, OTP or delivery/read receipt is claimed. No approved
+authentication template exists, so the sender is not OTP- or unrestricted-
+launch-ready.
 `OFFSITE_BACKUP_SCRIPT` is unset, external alert delivery is absent, and formal
 privacy/retention approval remains an open security and governance gate.

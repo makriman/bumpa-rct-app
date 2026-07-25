@@ -266,6 +266,23 @@ def test_profile_provisioning_allocates_unique_ports_and_private_files(tmp_path:
             config_text = (profile_path / "config.yaml").read_text()
             assert "disabled_toolsets" in config_text
             assert "hard_stop_enabled: true" in config_text
+            for toolset in hermes_module.DISABLED_SME_TOOLSETS:
+                assert f"    - {toolset}\n" in config_text
+            assert "    - delegation\n" not in config_text
+            assert "    - cronjob\n" not in config_text
+            assert (
+                "delegation:\n"
+                "  inherit_mcp_toolsets: true\n"
+                "  max_iterations: 12\n"
+                "  max_summary_chars: 8000\n"
+                "  child_timeout_seconds: 180\n"
+                "  max_concurrent_children: 2\n"
+                "  max_spawn_depth: 1\n"
+                "  orchestrator_enabled: false\n"
+                "  subagent_auto_approve: false\n"
+            ) in config_text
+            assert stat.S_IMODE((profile_path / "cron").stat().st_mode) == 0o750
+            assert not any((profile_path / "cron").iterdir())
 
 
 def test_profile_reservation_is_db_first_and_materialization_is_retry_safe(tmp_path: Path) -> None:

@@ -66,7 +66,7 @@ publication, clears mutable canonical orders, and retains older evidence for aud
 without exposing it to current product reads. A verified same-boundary key rotation
 preserves the revision and current projections.
 
-The current schema-0015 production canaries persist all five mapped connections.
+The current schema-0018 production canaries persist all five mapped connections.
 Stores 1–4 finish accepted partial with eight available analytics datasets, the
 two typed provider profit limitations, and orders. Store 5 finishes durably as
 degraded with seven available datasets, the same two limitations and orders; its
