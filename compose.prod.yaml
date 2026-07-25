@@ -338,6 +338,25 @@ services:
       META_TEST_SENDER_VERIFICATION_MODE: disabled
       BUMPA_BACKEND: disabled
       AGENT_BACKEND: disabled
+      # Migrations need only the database and encryption boundary. Explicitly
+      # override the shared application flags so enabling tenant tools cannot
+      # make this one-shot container require provider credentials or mounts.
+      AGENT_CAPABILITIES_V2: "false"
+      HERMES_TOOLS_ENABLED: "false"
+      EXTERNAL_CONNECTORS_ENABLED: "false"
+      MCP_GOOGLE_OAUTH_ENABLED: "false"
+      MCP_META_ADS_OAUTH_ENABLED: "false"
+      WEB_RESEARCH_ENABLED: "false"
+      SANDBOX_TOOLS_ENABLED: "false"
+      MANAGED_IMAGE_GENERATION_ENABLED: "false"
+      WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
+      WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_SPEECH_ENABLED: "false"
+      WHATSAPP_PROGRESS_ENABLED: "false"
+      PROACTIVE_INSIGHTS_ENABLED: "false"
+      DAILY_INSIGHTS_ENABLED: "false"
+      WEEKLY_INSIGHTS_ENABLED: "false"
+      OPS_ALERTS_ENABLED: "false"
 
   hermes:
     image: ${HERMES_IMAGE:?Set immutable HERMES_IMAGE}
