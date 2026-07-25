@@ -4,21 +4,19 @@ import base64
 import binascii
 import hashlib
 import io
-import json
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 from pypdf import PdfReader
 
 from app.core.config import Settings
+from app.providers.hermes import HermesEndpoint
+from app.providers.hermes_media import HermesMediaClient, HermesMediaError
 from app.providers.meta import MetaWhatsAppClient
 from app.services.sandbox import SandboxClient, SandboxProviderError
 
-ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
-ELEVENLABS_TTS_BASE_URL = "https://api.elevenlabs.io/v1/text-to-speech"
 SAFE_TEXT_MIME_TYPES = {
     "text/plain",
     "text/csv",
@@ -46,6 +44,7 @@ def process_whatsapp_content(
     transport: httpx.BaseTransport | None = None,
     tenant_id: str | None = None,
     workspace: str | None = None,
+    speech_endpoint: HermesEndpoint | None = None,
 ) -> ProcessedInbound:
     message_type = str(message.get("type", "unknown"))
     if message_type == "text":
@@ -135,8 +134,8 @@ def process_whatsapp_content(
         transcript = transcribe_media(
             settings,
             content=content,
-            filename=f"whatsapp.{_extension_for_mime(mime_type)}",
             mime_type=mime_type,
+            endpoint=speech_endpoint,
             transport=transport,
         )
         probability = transcript.get("language_probability")
@@ -305,115 +304,57 @@ def transcribe_media(
     settings: Settings,
     *,
     content: bytes,
-    filename: str,
     mime_type: str,
+    endpoint: HermesEndpoint | None,
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     if not settings.whatsapp_speech_enabled:
         raise MediaProcessingError("Voice transcription is temporarily unavailable.")
-    headers = {
-        "xi-api-key": settings.effective_elevenlabs_api_key,
-        "Accept": "application/json",
-    }
+    if endpoint is None:
+        raise MediaProcessingError("Voice transcription is temporarily unavailable.")
     try:
-        with httpx.Client(
-            timeout=httpx.Timeout(settings.elevenlabs_request_timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
-            transport=transport,
-        ) as client:
-            with client.stream(
-                "POST",
-                ELEVENLABS_STT_URL,
-                headers=headers,
-                data={
-                    "model_id": "scribe_v2",
-                    "tag_audio_events": "false",
-                    "diarize": "false",
-                },
-                files={"file": (filename, content, mime_type)},
-            ) as response:
-                raw = _read_bounded(response, settings.elevenlabs_max_response_bytes)
-                if response.status_code == 429:
-                    raise MediaProcessingError("Voice transcription is temporarily rate limited.")
-                if response.status_code >= 500:
-                    raise MediaProcessingError("Voice transcription is temporarily unavailable.")
-                if not response.is_success:
-                    raise MediaProcessingError(
-                        "The voice or video attachment could not be transcribed."
-                    )
-    except MediaProcessingError:
-        raise
-    except httpx.HTTPError as exc:
-        raise MediaProcessingError("Voice transcription is temporarily unavailable.") from exc
-    try:
-        decoded = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise MediaProcessingError("Voice transcription returned invalid data.") from exc
-    text = decoded.get("text") if isinstance(decoded, dict) else None
-    if not isinstance(text, str) or not text.strip():
-        raise MediaProcessingError("No speech could be recognised in the attachment.")
-    return {
-        "text": text.strip()[:12_000],
-        "language_code": decoded.get("language_code"),
-        "language_probability": decoded.get("language_probability"),
-    }
+        return HermesMediaClient(settings, transport=transport).transcribe(
+            endpoint,
+            content=content,
+            mime_type=mime_type,
+        )
+    except HermesMediaError as exc:
+        raise MediaProcessingError(str(exc)) from exc
 
 
 def synthesize_voice_note(
     settings: Settings,
     *,
     text: str,
+    endpoint: HermesEndpoint | None,
+    language: str = "en",
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, object]:
     if not settings.whatsapp_speech_enabled:
         raise MediaProcessingError("Voice replies are not configured; the text reply was sent.")
-    voice_id = settings.elevenlabs_tts_voice_id
-    if not voice_id or not re.fullmatch(r"[A-Za-z0-9_-]{5,100}", voice_id):
+    if endpoint is None:
         raise MediaProcessingError("Voice replies are not configured; the text reply was sent.")
     normalized = text.strip()
     if not normalized:
         raise MediaProcessingError("There is no text to convert to a voice note.")
-    headers = {
-        "xi-api-key": settings.effective_elevenlabs_api_key,
-        "Accept": "audio/ogg",
-        "Content-Type": "application/json",
+    supported_languages = {
+        value.strip().lower()
+        for value in settings.hermes_local_tts_languages.split(",")
+        if value.strip()
     }
+    language = language.strip().lower()
+    if language not in supported_languages:
+        raise MediaProcessingError(
+            "A reliable local voice is not available for that language; the text reply was sent."
+        )
     try:
-        with httpx.Client(
-            timeout=httpx.Timeout(settings.elevenlabs_request_timeout_seconds),
-            follow_redirects=False,
-            trust_env=False,
-            transport=transport,
-        ) as client:
-            with client.stream(
-                "POST",
-                f"{ELEVENLABS_TTS_BASE_URL}/{quote(voice_id, safe='')}",
-                params={"output_format": "opus_48000_128"},
-                headers=headers,
-                json={
-                    "text": normalized[:5_000],
-                    "model_id": settings.elevenlabs_tts_model_id,
-                },
-            ) as response:
-                if response.status_code == 429:
-                    raise MediaProcessingError("Voice replies are temporarily rate limited.")
-                if response.status_code >= 500:
-                    raise MediaProcessingError("Voice replies are temporarily unavailable.")
-                if not response.is_success:
-                    raise MediaProcessingError(
-                        "This answer could not be converted to a reliable voice note."
-                    )
-                content = _read_bounded(
-                    response,
-                    min(settings.elevenlabs_max_response_bytes, 16_777_216),
-                )
-    except MediaProcessingError:
-        raise
-    except httpx.HTTPError as exc:
-        raise MediaProcessingError("Voice replies are temporarily unavailable.") from exc
-    if not content:
-        raise MediaProcessingError("The voice provider returned an empty response.")
+        content = HermesMediaClient(settings, transport=transport).synthesize(
+            endpoint,
+            text=normalized,
+            language=language,
+        )
+    except HermesMediaError as exc:
+        raise MediaProcessingError(str(exc)) from exc
     return {
         "content": content,
         "mime_type": "audio/ogg",
@@ -482,26 +423,3 @@ def _structured_result(text: str, message_type: str) -> ProcessedInbound:
         stored_content_parts=[{"type": message_type, "description": text}],
         metadata={"type": message_type},
     )
-
-
-def _extension_for_mime(mime_type: str) -> str:
-    return {
-        "audio/ogg": "ogg",
-        "audio/mpeg": "mp3",
-        "audio/mp4": "m4a",
-        "audio/aac": "aac",
-        "video/mp4": "mp4",
-        "video/3gpp": "3gp",
-        "video/webm": "webm",
-    }.get(mime_type, "bin")
-
-
-def _read_bounded(response: httpx.Response, max_bytes: int) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in response.iter_bytes():
-        total += len(chunk)
-        if total > max_bytes:
-            raise MediaProcessingError("The media provider response exceeded its safety limit.")
-        chunks.append(chunk)
-    return b"".join(chunks)

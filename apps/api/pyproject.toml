@@ -21,6 +21,7 @@ dependencies = [
   "tzdata==2026.3",
   "mcp>=1.20,<2",
   "pypdf>=6,<7",
+  "ddgs==9.14.4",
 ]
 
 [project.optional-dependencies]

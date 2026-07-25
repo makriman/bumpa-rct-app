@@ -60,35 +60,49 @@ afterEach(() => {
 });
 
 describe("consumer connection lifecycle", () => {
-  it("requests read-only access through explicit confirmation", async () => {
-    apiRequest.mockResolvedValue({ status: "admin_pending" });
+  it("keeps reviewed OAuth connectors unavailable until their apps are ready", () => {
     render(<McpPage />);
-    fireEvent.click(screen.getByRole("button", { name: "Request read-only" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm request" }));
-    await waitFor(() =>
-      expect(apiRequest).toHaveBeenCalledWith("/settings/mcp-connections", {
-        method: "POST",
-        body: JSON.stringify({
-          provider: "google_sheets",
-          scopes: [],
-          read_only: true,
-        }),
-      }),
-    );
-    expect(reload).toHaveBeenCalled();
+    expect(
+      screen.getByText("Coming soon", { selector: ".badge" }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /Google Workspace and Meta Ads connections stay unavailable/,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Request read-only" }),
+    ).not.toBeInTheDocument();
+    expect(apiRequest).not.toHaveBeenCalled();
   });
 
   it("requires confirmation before enabling a write tool", async () => {
+    registryRows = [
+      {
+        provider: "home_assistant",
+        name: "Home Assistant",
+        enabled: true,
+        connection_method: "manual_token",
+        default_mode: "read_only",
+        tools: [
+          {
+            name: "call_service",
+            label: "Call an approved service",
+            kind: "write",
+          },
+        ],
+      },
+    ];
     connectionRows = [
       {
         id: "connection-live",
-        provider: "google_sheets",
+        provider: "home_assistant",
         status: "active",
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+        scopes: [],
         read_only: false,
         admin_approved: true,
-        oauth_available: true,
-        permissions: { read_sheet: "read", append_rows: "deny" },
+        oauth_available: false,
+        permissions: { call_service: "deny" },
       },
     ];
     apiRequest.mockResolvedValue(connectionRows[0]);
@@ -99,7 +113,7 @@ describe("consumer connection lifecycle", () => {
     );
     await waitFor(() =>
       expect(apiRequest).toHaveBeenCalledWith(
-        "/settings/mcp-connections/connection-live/permissions/append_rows",
+        "/settings/mcp-connections/connection-live/permissions/call_service",
         {
           method: "PATCH",
           body: JSON.stringify({

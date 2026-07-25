@@ -25,6 +25,7 @@ from app.db.models import (
     AgentMessage,
     Conversation,
     GeneratedAgentMedia,
+    HermesProfile,
     OperationalAgentEvent,
     PendingAgentAction,
     PhoneIdentity,
@@ -39,6 +40,7 @@ from app.db.models import (
 from app.db.session import SessionLocal, set_security_context
 from app.jobs.runtime import PermanentJobError
 from app.providers.contracts import MessagingProvider
+from app.providers.hermes import HermesProfileError, endpoint_for
 from app.providers.local import LocalMessagingProvider
 from app.providers.meta import MAX_TEXT_LENGTH, MetaProviderError, MetaWhatsAppClient
 from app.services.agent_actions import (
@@ -582,6 +584,20 @@ def _process_message(
         db.commit()
         return {"status": f"research_consent_{consent_decision}"}
     voice_reply_requested = False
+    voice_reply_language = "en"
+    speech_endpoint = None
+    if settings.whatsapp_speech_enabled:
+        profile = db.scalar(
+            select(HermesProfile).where(
+                HermesProfile.tenant_id == tenant.id,
+                HermesProfile.status == "active",
+            )
+        )
+        if profile is not None:
+            try:
+                speech_endpoint = endpoint_for(profile, settings)
+            except HermesProfileError:
+                speech_endpoint = None
     existing_agent_message = db.scalar(
         select(AgentMessage).where(
             AgentMessage.tenant_id == tenant.id,
@@ -616,6 +632,7 @@ def _process_message(
                     ),
                     tenant_id=tenant.id,
                     workspace=f"media-{hashlib.sha256(external_id.encode()).hexdigest()[:24]}",
+                    speech_endpoint=speech_endpoint,
                 )
             elif text:
                 processed = process_whatsapp_content(
@@ -678,6 +695,7 @@ def _process_message(
                 )
         inbound.media_metadata = processed.metadata
         voice_reply_requested = _voice_reply_requested(processed.prompt)
+        voice_reply_language = _voice_reply_language(processed)
         clarification = _low_confidence_clarification(processed)
         if clarification is not None:
             voice_reply_requested = False
@@ -744,7 +762,12 @@ def _process_message(
         and settings.whatsapp_backend == "meta"
     ):
         try:
-            voice_note = synthesize_voice_note(settings, text=outgoing.content)
+            voice_note = synthesize_voice_note(
+                settings,
+                text=outgoing.content,
+                endpoint=speech_endpoint,
+                language=voice_reply_language,
+            )
             voice_content = voice_note["content"]
             if not isinstance(voice_content, bytes):
                 raise MediaProcessingError("The voice provider returned invalid media.")
@@ -1281,6 +1304,24 @@ def _voice_reply_requested(prompt: str) -> bool:
             flags=re.IGNORECASE | re.DOTALL,
         )
     )
+
+
+def _voice_reply_language(processed: Any) -> str:
+    prompt = str(getattr(processed, "prompt", ""))
+    explicit = (
+        ("yo", ("yoruba",)),
+        ("ig", ("igbo",)),
+        ("ha", ("hausa",)),
+        ("en", ("english", "pidgin")),
+    )
+    normalized = prompt.lower()
+    for code, names in explicit:
+        if any(re.search(rf"\b{re.escape(name)}\b", normalized) for name in names):
+            return code
+    detected = getattr(processed, "metadata", {}).get("language")
+    if isinstance(detected, str) and re.fullmatch(r"[a-z]{2,3}", detected.lower()):
+        return detected.lower()
+    return "en"
 
 
 def _low_confidence_clarification(processed: Any) -> str | None:

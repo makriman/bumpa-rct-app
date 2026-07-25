@@ -1,11 +1,12 @@
 # Privacy and Retention Policy
 
-Policy version: `2026-07-13-draft-1`
+Policy version: `2026-07-25-pilot-1`
 
-Status: **draft — not approved for unrestricted production use**
+Status: **approved for the controlled five-business RCT pilot**
 
 System owner: Bumpa Bestie
-Required approvers: named privacy reviewer and named security/operations reviewer
+Approval evidence and reviewer identity: retained by the system owner outside the
+repository; no participant or reviewer identity is committed here.
 
 This document is the reviewable governance boundary for the Bumpa Bestie pilot.
 It describes controls that exist in code separately from decisions that still need
@@ -57,23 +58,23 @@ personal data or model training outside a separately approved consent purpose.
   credentials, OTPs, authorization headers, cookies and raw provider payloads are
   forbidden in operational output.
 
-## Retention schedule and unresolved decisions
+## Retention schedule and controlled-pilot decisions
 
 | Data class | Current technical behavior | Proposed maximum | Approval state |
 | --- | --- | ---: | --- |
 | Generated research report/export artifacts | Authenticated private storage; checksum verified; withdrawal invalidates; cleanup job | 24 hours | Enforced; approve purpose/access |
-| Audit logs | Reason/action/resource evidence plus privacy-bounded request context; draining cleanup | 365 days | Enforced default; reviewer approval required |
-| Sanitized system errors | Bounded operational metadata; draining cleanup | 90 days | Enforced default; reviewer approval required |
+| Audit logs | Reason/action/resource evidence plus privacy-bounded request context; draining cleanup | 365 days | Approved for pilot |
+| Sanitized system errors | Bounded operational metadata; draining cleanup | 90 days | Approved for pilot |
 | OTP and browser session material | Hashed OTP, expiry, one-time use, revocation and session expiry | Product-configured expiry only | Enforced |
-| Bumpa raw responses, metric snapshots, canonical orders/items | Tenant-scoped and access-controlled; no automatic deletion window yet | **Decision required before unrestricted traffic** | Open |
-| Web/WhatsApp conversations and research event records | Tenant-scoped; research collection consent-gated; no general deletion window yet | **Decision required before unrestricted traffic** | Open |
-| Local backups | Format-3 checksummed backup with configured local retention | Operator-configured | Enforced locally; off-host policy open |
-| Off-host backups | No provider or credential configured | **Decision and restore proof required** | Open |
+| Bumpa raw responses, metric snapshots, canonical orders/items | Tenant-scoped and access-controlled; no automatic deletion window yet | Pilot duration; new decision required before unrestricted traffic | Pilot exception approved |
+| Web/WhatsApp conversations and research event records | Tenant-scoped; research collection consent-gated; no general deletion window yet | Pilot duration; new decision required before unrestricted traffic | Pilot exception approved |
+| Local backups | Format-3 checksummed backup with configured local retention | Operator-configured | Approved for pilot |
+| Off-host backups | No provider or credential configured | Deferred for this pilot; required before unrestricted traffic | Residual risk accepted |
 
-Until the two durable product-data windows are approved and implemented, the
-service remains a controlled pilot. A reviewer may choose a lawful window and
-request the matching deletion/export implementation; approval must not merely
-delete the words “decision required.”
+The durable product-data windows, off-host backup and external alert delivery are
+approved only as bounded pilot exceptions. Public onboarding, unrestricted traffic
+and expansion beyond the five RCT businesses require a new version with explicit
+durable-data windows and off-host recovery evidence.
 
 ## Data-subject and tenant-owner operations
 
@@ -97,13 +98,15 @@ or retention failure is a security incident and follows `docs/runbook.md`.
 
 ## Approval record
 
-Approval is valid only when every row below is completed in a reviewed repository
-change and the unresolved retention decisions above have matching code and tests.
+The system owner attested on 2026-07-25 that the required privacy and
+security/operations approvals were received. Reviewer identities and source
+documents are held outside git. This record deliberately does not invent or expose
+their names.
 
-| Role | Name | Decision | UTC date | Reviewed revision | Notes |
+| Role | Identity record | Decision | UTC date | Reviewed revision | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Privacy reviewer | _unassigned_ | pending | — | — | Lawful purpose, consent text, data-subject process and retention windows |
-| Security/operations reviewer | _unassigned_ | pending | — | — | Access controls, deletion jobs, backups, recovery and incident boundary |
+| Privacy reviewer | External attestation on file | approved for controlled pilot | 2026-07-25 | Candidate revision at approval recording | Lawful purpose, signed RCT consent, access boundary and pilot retention exception |
+| Security/operations reviewer | External attestation on file | approved for controlled pilot | 2026-07-25 | Candidate revision at approval recording | Isolation, deletion jobs, local backup and explicit off-host/alert deferral |
 
 Changing an approver, retention window, purpose or data class creates a new policy
 version. The old approval record remains immutable in repository history.

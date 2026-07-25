@@ -212,6 +212,30 @@ def test_existing_runtime_must_match_every_policy_file(tmp_path: Path) -> None:
     assert str(failure.value) == "Runtime profile conflicts with staging"
 
 
+def test_profile_lifecycle_accepts_only_connected_degraded_gateway() -> None:
+    control = _module()
+
+    assert control._profile_health_is_usable({"status": "healthy"})
+    assert control._profile_health_is_usable(
+        {
+            "status": "degraded",
+            "gateway_state": "running",
+            "platforms": {"api_server": {"state": "connected"}},
+        }
+    )
+    assert not control._profile_health_is_usable(
+        {
+            "status": "degraded",
+            "gateway_state": "running",
+            "platforms": {"api_server": {"state": "failed"}},
+        }
+    )
+    assert not control._profile_health_is_usable(
+        {"status": "degraded", "gateway_state": "stopped", "platforms": {}}
+    )
+    assert not control._profile_health_is_usable("invalid")
+
+
 def test_staged_environment_rejects_unknown_or_malformed_lines(tmp_path: Path) -> None:
     control = _module()
     staging_root = tmp_path / "staging"
@@ -278,3 +302,79 @@ def test_failed_atomic_import_removes_temporary_profile(
     assert failure.value.status == control.HTTPStatus.SERVICE_UNAVAILABLE
     assert not (runtime_root / "tenant_safe").exists()
     assert list(runtime_root.iterdir()) == []
+
+
+def test_local_whisper_returns_language_confidence_without_exposing_audio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _module()
+    media = tmp_path / "private-note.ogg"
+    media.write_bytes(b"private-audio")
+
+    class Segment:
+        text = "  Grow sales carefully. "
+
+    class Info:
+        language = "en"
+        language_probability = 0.93
+
+    class Model:
+        def transcribe(self, filename: str, **kwargs: object) -> tuple[list[Segment], Info]:
+            assert filename == str(media)
+            assert kwargs == {"beam_size": 5, "vad_filter": True}
+            return [Segment()], Info()
+
+    monkeypatch.setattr(control, "_audio_duration_seconds", lambda _media: 12.5)
+    monkeypatch.setattr(control, "_whisper_model", lambda: Model())
+
+    result = control._transcribe_local(media)
+
+    assert result == {
+        "text": "Grow sales carefully.",
+        "language": "en",
+        "language_probability": 0.93,
+        "provider": "hermes_local_whisper",
+    }
+    assert "private-audio" not in repr(result)
+
+
+def test_local_piper_generates_bounded_ogg_without_shell_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _module()
+    captured: dict[str, object] = {}
+
+    class Voice:
+        def synthesize_wav(self, text: str, wav_file: object) -> None:
+            captured["text"] = text
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16_000)
+            wav_file.writeframes(b"\x00\x00" * 160)
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(command: list[str], **kwargs: object) -> Completed:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        Path(command[-1]).write_bytes(b"ogg-opus")
+        return Completed()
+
+    monkeypatch.setattr(control, "_piper_voice", lambda: Voice())
+    monkeypatch.setattr(control.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(control.subprocess, "run", fake_run)
+
+    result = control._synthesize_local("Sales are up.")
+
+    assert result == b"ogg-opus"
+    assert captured["text"] == "Sales are up."
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[0] == "/usr/bin/ffmpeg"
+    assert "Sales are up." not in command
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["stdin"] == control.subprocess.DEVNULL

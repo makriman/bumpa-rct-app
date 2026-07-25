@@ -153,16 +153,11 @@ class Settings(BaseSettings):
     sandbox_tools_enabled: bool = False
     managed_image_generation_enabled: bool = False
     mcp_internal_base_url: str = Field(default_factory=_default_mcp_endpoint)
-    tavily_api_key: str | None = None
-    tavily_api_key_file: Path | None = None
-    tavily_request_timeout_seconds: float = Field(default=20.0, ge=1.0, le=60.0)
-    tavily_max_response_bytes: int = Field(default=1_048_576, ge=4096, le=4_194_304)
-    elevenlabs_api_key: str | None = None
-    elevenlabs_api_key_file: Path | None = None
-    elevenlabs_request_timeout_seconds: float = Field(default=45.0, ge=1.0, le=120.0)
-    elevenlabs_max_response_bytes: int = Field(default=4_194_304, ge=4096, le=16_777_216)
-    elevenlabs_tts_voice_id: str | None = None
-    elevenlabs_tts_model_id: str = "eleven_v3"
+    web_research_provider: Literal["ddgs"] = "ddgs"
+    web_research_request_timeout_seconds: float = Field(default=30.0, ge=3.0, le=60.0)
+    whatsapp_speech_provider: Literal["hermes_local"] = "hermes_local"
+    hermes_media_timeout_seconds: float = Field(default=120.0, ge=10.0, le=300.0)
+    hermes_local_tts_languages: str = "en"
     sandbox_worker_url: str | None = None
     sandbox_service_token: str | None = None
     sandbox_service_token_file: Path | None = None
@@ -207,8 +202,6 @@ class Settings(BaseSettings):
         "meta_test_sender_display_phone_e164",
         "temporary_web_pin_verifier_file",
         "temporary_web_pin_expires_at",
-        "tavily_api_key_file",
-        "elevenlabs_api_key_file",
         "sandbox_service_token_file",
         "sandbox_worker_url",
         mode="before",
@@ -311,22 +304,6 @@ class Settings(BaseSettings):
             "META_SYSTEM_USER_ACCESS_TOKEN",
             self.meta_system_user_access_token,
             self.meta_system_user_access_token_file,
-        )
-
-    @property
-    def effective_tavily_api_key(self) -> str:
-        return self._provider_secret(
-            "TAVILY_API_KEY",
-            self.tavily_api_key,
-            self.tavily_api_key_file,
-        )
-
-    @property
-    def effective_elevenlabs_api_key(self) -> str:
-        return self._provider_secret(
-            "ELEVENLABS_API_KEY",
-            self.elevenlabs_api_key,
-            self.elevenlabs_api_key_file,
         )
 
     @property
@@ -767,17 +744,22 @@ class Settings(BaseSettings):
         ):
             raise ValueError("MCP_INTERNAL_BASE_URL must be the private API MCP endpoint")
         if self.web_research_enabled:
-            if self.tavily_api_key:
-                raise ValueError("TAVILY_API_KEY must use a secret file in production")
-            if self.tavily_api_key_file is None or len(self.effective_tavily_api_key) < 20:
-                raise ValueError("Web research is enabled without a Tavily secret file")
+            if self.web_research_provider != "ddgs":
+                raise ValueError("Web research must use the approved keyless DDGS provider")
         if self.whatsapp_speech_enabled:
             if not self.whatsapp_multimodal_enabled:
                 raise ValueError("WhatsApp speech requires WhatsApp multimodal processing")
-            if self.elevenlabs_api_key:
-                raise ValueError("ELEVENLABS_API_KEY must use a secret file in production")
-            if self.elevenlabs_api_key_file is None or len(self.effective_elevenlabs_api_key) < 20:
-                raise ValueError("WhatsApp speech is enabled without an ElevenLabs secret file")
+            if self.whatsapp_speech_provider != "hermes_local":
+                raise ValueError("WhatsApp speech must use the Hermes-local provider")
+            if self.agent_backend != "hermes":
+                raise ValueError("Hermes-local speech requires AGENT_BACKEND=hermes")
+            languages = {
+                value.strip().lower()
+                for value in self.hermes_local_tts_languages.split(",")
+                if value.strip()
+            }
+            if not languages or any(not re.fullmatch(r"[a-z]{2,3}", value) for value in languages):
+                raise ValueError("HERMES_LOCAL_TTS_LANGUAGES must contain language codes")
         if self.sandbox_tools_enabled:
             parsed = urlsplit(self.sandbox_worker_url or "")
             if not (

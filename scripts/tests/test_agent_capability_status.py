@@ -16,8 +16,6 @@ class AgentCapabilityStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary_directory.name)
-        self.tavily = self.secret("tavily", "tavily-canary")
-        self.elevenlabs = self.secret("elevenlabs", "elevenlabs-canary")
         self.sandbox = self.secret("sandbox", "sandbox-canary")
         self.google = self.secret("google", "google-canary")
         self.meta_ads = self.secret("meta-ads", "meta-ads-canary")
@@ -36,6 +34,7 @@ class AgentCapabilityStatusTests(unittest.TestCase):
             "AGENT_CAPABILITIES_V2": "true",
             "HERMES_TOOLS_ENABLED": "true",
             "WEB_RESEARCH_ENABLED": "false",
+            "WEB_RESEARCH_PROVIDER": "ddgs",
             "SANDBOX_TOOLS_ENABLED": "true",
             "MANAGED_IMAGE_GENERATION_ENABLED": "true",
             "EXTERNAL_CONNECTORS_ENABLED": "false",
@@ -44,13 +43,12 @@ class AgentCapabilityStatusTests(unittest.TestCase):
             "WHATSAPP_PRIMARY_PILOT_ENABLED": "true",
             "WHATSAPP_MULTIMODAL_ENABLED": "true",
             "WHATSAPP_SPEECH_ENABLED": "false",
+            "WHATSAPP_SPEECH_PROVIDER": "hermes_local",
+            "HERMES_LOCAL_TTS_LANGUAGES": "en",
             "WHATSAPP_PROGRESS_ENABLED": "true",
             "PROACTIVE_INSIGHTS_ENABLED": "false",
             "DAILY_INSIGHTS_ENABLED": "false",
             "WEEKLY_INSIGHTS_ENABLED": "false",
-            "TAVILY_API_KEY_FILE_HOST": str(self.tavily),
-            "ELEVENLABS_API_KEY_FILE_HOST": str(self.elevenlabs),
-            "ELEVENLABS_TTS_VOICE_ID": "voice_canary",
             "SANDBOX_SERVICE_TOKEN_FILE_HOST": str(self.sandbox),
             "SANDBOX_WORKER_URL": "https://sandbox.example.test",
             "GOOGLE_OAUTH_CLIENT_ID": "google-client",
@@ -101,9 +99,9 @@ class AgentCapabilityStatusTests(unittest.TestCase):
             self.environment(
                 WEB_RESEARCH_ENABLED="true",
                 WHATSAPP_SPEECH_ENABLED="true",
-                TAVILY_API_KEY_FILE_HOST=str(missing),
-                ELEVENLABS_API_KEY_FILE_HOST=str(missing),
-                ELEVENLABS_TTS_VOICE_ID="",
+                WEB_RESEARCH_PROVIDER="disabled",
+                WHATSAPP_SPEECH_PROVIDER="disabled",
+                HERMES_LOCAL_TTS_LANGUAGES="",
                 GOOGLE_OAUTH_CLIENT_ID="",
                 GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST=str(missing),
                 META_ADS_OAUTH_CLIENT_ID="",
@@ -136,17 +134,22 @@ class AgentCapabilityStatusTests(unittest.TestCase):
         self.assertEqual(duplicate.returncode, 2)
         self.assertEqual(duplicate.stdout, "")
 
-    def test_multiline_secret_is_not_ready_even_without_a_final_newline(self) -> None:
-        self.tavily.write_text("first-line\nsecond-line", encoding="utf-8")
-        result = self.run_helper(self.environment())
+    def test_keyless_research_and_local_speech_do_not_depend_on_paid_secrets(self) -> None:
+        result = self.run_helper(
+            self.environment(
+                WEB_RESEARCH_ENABLED="true",
+                WHATSAPP_SPEECH_ENABLED="true",
+            )
+        )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertFalse(payload["research"]["tavily_credential_ready"])
-        self.assertEqual(
-            payload["research"]["state"],
-            "blocked_missing_prerequisite",
-        )
+        self.assertEqual(payload["research"]["provider"], "ddgs")
+        self.assertTrue(payload["research"]["keyless_provider_ready"])
+        self.assertEqual(payload["research"]["state"], "active")
+        self.assertEqual(payload["whatsapp"]["speech_provider"], "hermes_local")
+        self.assertTrue(payload["whatsapp"]["local_speech_runtime_configured"])
+        self.assertEqual(payload["whatsapp"]["speech"], "active")
 
 
 if __name__ == "__main__":

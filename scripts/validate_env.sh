@@ -570,24 +570,34 @@ PY
     failed=1
   fi
   if [[ "$web_research_enabled" == "true" ]]; then
-    if [[ -n "$(value_for TAVILY_API_KEY)" ]]; then
-      echo "Tavily must use the production host secret file" >&2
+    if [[ "$(value_for WEB_RESEARCH_PROVIDER)" != "ddgs" ]]; then
+      echo "WEB_RESEARCH_PROVIDER must be ddgs for keyless research" >&2
       failed=1
     fi
-    validate_runtime_secret_host TAVILY_API_KEY_FILE_HOST
+    if [[ ! "$(value_for WEB_RESEARCH_REQUEST_TIMEOUT_SECONDS)" =~ ^([3-9]|[1-5][0-9]|60)([.][0-9]+)?$ ]]; then
+      echo "WEB_RESEARCH_REQUEST_TIMEOUT_SECONDS must be between 3 and 60" >&2
+      failed=1
+    fi
   fi
   if [[ "$whatsapp_speech_enabled" == "true" ]]; then
     if [[ "$whatsapp_multimodal_enabled" != "true" ]]; then
       echo "WHATSAPP_SPEECH_ENABLED requires WHATSAPP_MULTIMODAL_ENABLED=true" >&2
       failed=1
     fi
-    if [[ -n "$(value_for ELEVENLABS_API_KEY)" ]]; then
-      echo "ElevenLabs must use the production host secret file" >&2
+    if [[ "$(value_for WHATSAPP_SPEECH_PROVIDER)" != "hermes_local" ]]; then
+      echo "WHATSAPP_SPEECH_PROVIDER must be hermes_local" >&2
       failed=1
     fi
-    validate_runtime_secret_host ELEVENLABS_API_KEY_FILE_HOST
-    if [[ ! "$(value_for ELEVENLABS_TTS_VOICE_ID)" =~ ^[A-Za-z0-9_-]{6,128}$ ]]; then
-      echo "ELEVENLABS_TTS_VOICE_ID is required for WhatsApp speech" >&2
+    if [[ "$agent_backend" != "hermes" ]]; then
+      echo "Hermes-local WhatsApp speech requires AGENT_BACKEND=hermes" >&2
+      failed=1
+    fi
+    if [[ ! "$(value_for HERMES_MEDIA_TIMEOUT_SECONDS)" =~ ^([1-9][0-9]|[12][0-9][0-9]|300)([.][0-9]+)?$ ]]; then
+      echo "HERMES_MEDIA_TIMEOUT_SECONDS must be between 10 and 300" >&2
+      failed=1
+    fi
+    if [[ ! "$(value_for HERMES_LOCAL_TTS_LANGUAGES)" =~ ^[a-z]{2,3}(,[a-z]{2,3})*$ ]]; then
+      echo "HERMES_LOCAL_TTS_LANGUAGES must be comma-separated language codes" >&2
       failed=1
     fi
   fi

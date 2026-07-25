@@ -99,8 +99,19 @@ proactive_enabled="$(boolean_for PROACTIVE_INSIGHTS_ENABLED)"
 daily_enabled="$(boolean_for DAILY_INSIGHTS_ENABLED)"
 weekly_enabled="$(boolean_for WEEKLY_INSIGHTS_ENABLED)"
 
-tavily_ready="$(secret_ready "$(value_for TAVILY_API_KEY_FILE_HOST)")"
-elevenlabs_secret_ready="$(secret_ready "$(value_for ELEVENLABS_API_KEY_FILE_HOST)")"
+research_provider="$(value_for WEB_RESEARCH_PROVIDER)"
+research_ready=false
+if [[ "$research_provider" == "ddgs" ]]; then
+  research_ready=true
+fi
+
+speech_provider="$(value_for WHATSAPP_SPEECH_PROVIDER)"
+local_tts_languages="$(value_for HERMES_LOCAL_TTS_LANGUAGES)"
+local_speech_ready=false
+if [[ "$speech_provider" == "hermes_local" \
+  && "$local_tts_languages" =~ ^[a-z]{2,3}(,[a-z]{2,3})*$ ]]; then
+  local_speech_ready=true
+fi
 sandbox_secret_ready="$(secret_ready "$(value_for SANDBOX_SERVICE_TOKEN_FILE_HOST)")"
 google_secret_ready="$(secret_ready "$(value_for GOOGLE_OAUTH_CLIENT_SECRET_FILE_HOST)")"
 meta_ads_secret_ready="$(secret_ready "$(value_for META_ADS_OAUTH_CLIENT_SECRET_FILE_HOST)")"
@@ -113,16 +124,6 @@ fi
 sandbox_ready=false
 if [[ "$sandbox_secret_ready" == "true" && "$sandbox_url_ready" == "true" ]]; then
   sandbox_ready=true
-fi
-
-voice_id="$(value_for ELEVENLABS_TTS_VOICE_ID)"
-voice_ready=false
-if [[ "$voice_id" =~ ^[A-Za-z0-9_-]{6,128}$ ]]; then
-  voice_ready=true
-fi
-elevenlabs_ready=false
-if [[ "$elevenlabs_secret_ready" == "true" && "$voice_ready" == "true" ]]; then
-  elevenlabs_ready=true
 fi
 
 google_client_id="$(value_for GOOGLE_OAUTH_CLIENT_ID)"
@@ -154,7 +155,8 @@ fi
 jq -n \
   --arg agent "$(switch_state "$agent_enabled")" \
   --arg hermes_tools "$(switch_state "$hermes_tools_enabled")" \
-  --arg research "$(activation_state "$research_enabled" "$tavily_ready")" \
+  --arg research "$(activation_state "$research_enabled" "$research_ready")" \
+  --arg research_provider "$research_provider" \
   --arg sandbox "$(activation_state "$sandbox_enabled" "$sandbox_ready")" \
   --arg images "$(activation_state "$image_enabled" "$sandbox_ready")" \
   --arg connector_control_plane "$(switch_state "$connectors_enabled")" \
@@ -162,16 +164,17 @@ jq -n \
   --arg meta_ads "$(activation_state "$meta_ads_enabled" "$meta_ads_ready")" \
   --arg primary_pilot "$(switch_state "$primary_pilot_enabled")" \
   --arg multimodal "$(switch_state "$multimodal_enabled")" \
-  --arg speech "$(activation_state "$speech_enabled" "$elevenlabs_ready")" \
+  --arg speech "$(activation_state "$speech_enabled" "$local_speech_ready")" \
+  --arg speech_provider "$speech_provider" \
+  --arg local_tts_languages "$local_tts_languages" \
   --arg progress "$(switch_state "$progress_enabled")" \
   --arg proactive "$(switch_state "$proactive_enabled")" \
   --arg daily "$(switch_state "$daily_enabled")" \
   --arg weekly "$(switch_state "$weekly_enabled")" \
   --arg otp "$otp_state" \
   --arg auth_login_mode "$auth_login_mode" \
-  --argjson tavily_ready "$tavily_ready" \
-  --argjson elevenlabs_secret_ready "$elevenlabs_secret_ready" \
-  --argjson voice_ready "$voice_ready" \
+  --argjson research_ready "$research_ready" \
+  --argjson local_speech_ready "$local_speech_ready" \
   --argjson sandbox_ready "$sandbox_ready" \
   --argjson google_ready "$google_ready" \
   --argjson meta_ads_ready "$meta_ads_ready" \
@@ -182,7 +185,8 @@ jq -n \
     },
     research: {
       state: $research,
-      tavily_credential_ready: $tavily_ready
+      provider: $research_provider,
+      keyless_provider_ready: $research_ready
     },
     sandbox: {
       state: $sandbox,
@@ -200,9 +204,10 @@ jq -n \
       primary_pilot: $primary_pilot,
       multimodal: $multimodal,
       speech: $speech,
+      speech_provider: $speech_provider,
+      local_speech_runtime_configured: $local_speech_ready,
+      local_tts_languages: ($local_tts_languages | split(",") | map(select(length > 0))),
       progress: $progress,
-      elevenlabs_credential_ready: $elevenlabs_secret_ready,
-      tts_voice_ready: $voice_ready,
       proactive: $proactive,
       daily: $daily,
       weekly: $weekly,

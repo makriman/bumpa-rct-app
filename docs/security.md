@@ -161,9 +161,11 @@ The current flow gates research events and reads, stores consent history,
 invalidates artifacts after withdrawal, expires generated artifacts after 24 hours,
 reauthorizes every download, and enqueues production retention cleanup. Audit logs
 default to 365 days and sanitized system errors to 90 days; bounded continuations
-drain an expired backlog with locked/skipped rows. The reviewable policy draft is
-`docs/privacy-retention-policy.md`; named privacy/security approval and the open
-durable product-data windows remain release governance steps.
+drain an expired backlog with locked/skipped rows. The controlled-pilot policy is
+`docs/privacy-retention-policy.md`. The system owner attested on 2026-07-25 that
+privacy and security/operations approval was received; reviewer identity and source
+evidence remain outside git. Durable product-data windows must still be made
+explicit before unrestricted traffic.
 
 ## Verification
 
@@ -212,5 +214,7 @@ primary/multimodal/progress control plane is enabled, but no participant message
 real media send, OTP or delivery/read receipt is claimed. No approved
 authentication template exists, so the sender is not OTP- or unrestricted-
 launch-ready.
-`OFFSITE_BACKUP_SCRIPT` is unset, external alert delivery is absent, and formal
-privacy/retention approval remains an open security and governance gate.
+`OFFSITE_BACKUP_SCRIPT` remains unset and external alert delivery is absent. Those
+two residual risks were explicitly accepted for the controlled five-business
+pilot on 2026-07-25; neither is complete, and both remain gates before public or
+unrestricted launch.

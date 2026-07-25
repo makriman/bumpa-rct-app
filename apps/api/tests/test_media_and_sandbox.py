@@ -10,6 +10,8 @@ import pytest
 from pypdf import PdfWriter
 
 from app.core.config import Settings
+from app.providers.hermes import HermesEndpoint
+from app.providers.hermes_media import HermesMediaClient, HermesMediaError
 from app.services.media import (
     MediaProcessingError,
     extract_document_text,
@@ -26,14 +28,20 @@ def _settings(**overrides: Any) -> Settings:
         "field_encryption_key": "media-sandbox-test-key",
         "whatsapp_multimodal_enabled": True,
         "whatsapp_speech_enabled": True,
-        "elevenlabs_api_key": "elevenlabs-fixture-key-with-safe-length",
-        "elevenlabs_tts_voice_id": "voice_fixture",
         "sandbox_worker_url": "https://sandbox.example.com",
         "sandbox_service_token": ("sandbox-fixture-token-with-at-least-thirty-two-characters"),  # noqa: S106
         "sandbox_tools_enabled": True,
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def _endpoint() -> HermesEndpoint:
+    return HermesEndpoint(
+        profile_name="tenant_fixture",
+        api_url="http://hermes:8700/v1",
+        api_key="fixture-key",
+    )
 
 
 class _MediaClient:
@@ -102,13 +110,14 @@ def test_whatsapp_structured_document_video_and_speech_fallbacks(
                 200,
                 json={
                     "text": "This is the new shelf display",
-                    "language_code": "eng",
+                    "language": "en",
                     "language_probability": 0.9,
                 },
             )
         ),
         tenant_id="tenant-123456",
         workspace="conversation-1",
+        speech_endpoint=_endpoint(),
     )
     assert video.metadata["representative_frames"] == 1
     assert any(part["type"] == "image_url" for part in video.provider_content_parts)
@@ -155,25 +164,32 @@ def test_safe_document_and_voice_generation_boundaries() -> None:
     voice = synthesize_voice_note(
         _settings(),
         text="Your sales increased this week.",
+        endpoint=_endpoint(),
         transport=httpx.MockTransport(
             lambda request: (
-                httpx.Response(200, content=b"ogg-opus")
-                if request.url.path.endswith("/voice_fixture")
+                httpx.Response(
+                    200,
+                    content=b"ogg-opus",
+                    headers={"content-type": "audio/ogg"},
+                )
+                if request.url.path.endswith("/synthesize")
                 else httpx.Response(404)
             )
         ),
     )
     assert voice["content"] == b"ogg-opus"
-    with pytest.raises(MediaProcessingError, match="rate limited"):
+    with pytest.raises(MediaProcessingError, match="busy"):
         synthesize_voice_note(
             _settings(),
             text="Retry",
+            endpoint=_endpoint(),
             transport=httpx.MockTransport(lambda _request: httpx.Response(429)),
         )
     with pytest.raises(MediaProcessingError, match="not configured"):
         synthesize_voice_note(
             _settings(whatsapp_speech_enabled=False),
             text="Fallback",
+            endpoint=_endpoint(),
         )
 
 
@@ -181,7 +197,7 @@ def test_safe_document_and_voice_generation_boundaries() -> None:
     ("status_code", "match"),
     (
         (500, "temporarily unavailable"),
-        (400, "reliable voice note"),
+        (400, "rejected"),
     ),
 )
 def test_voice_generation_rejects_unreliable_provider_results(
@@ -192,29 +208,45 @@ def test_voice_generation_rejects_unreliable_provider_results(
         synthesize_voice_note(
             _settings(),
             text="Please read this answer.",
+            endpoint=_endpoint(),
             transport=httpx.MockTransport(lambda _request: httpx.Response(status_code)),
         )
     with pytest.raises(MediaProcessingError, match="not configured"):
         synthesize_voice_note(
-            _settings(elevenlabs_tts_voice_id="bad!"),
+            _settings(),
             text="Please read this answer.",
+            endpoint=None,
         )
     with pytest.raises(MediaProcessingError, match="no text"):
-        synthesize_voice_note(_settings(), text=" ")
+        synthesize_voice_note(_settings(), text=" ", endpoint=_endpoint())
     with pytest.raises(MediaProcessingError, match="empty response"):
         synthesize_voice_note(
             _settings(),
             text="Please read this answer.",
-            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"")),
+            endpoint=_endpoint(),
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    200,
+                    content=b"",
+                    headers={"content-type": "audio/ogg"},
+                )
+            ),
+        )
+    with pytest.raises(MediaProcessingError, match="not available"):
+        synthesize_voice_note(
+            _settings(),
+            text="Ẹ káàrọ̀.",
+            endpoint=_endpoint(),
+            language="yo",
         )
 
 
 @pytest.mark.parametrize(
     ("response", "match"),
     (
-        (httpx.Response(429), "rate limited"),
+        (httpx.Response(429), "busy"),
         (httpx.Response(503), "temporarily unavailable"),
-        (httpx.Response(400), "could not be transcribed"),
+        (httpx.Response(400), "rejected"),
         (httpx.Response(200, text="not-json"), "invalid data"),
         (httpx.Response(200, json={}), "No speech"),
     ),
@@ -228,7 +260,7 @@ def test_transcription_failures_always_return_a_useful_fallback(
             _settings(),
             content=b"audio-fixture",
             mime_type="audio/ogg",
-            filename="note.ogg",
+            endpoint=_endpoint(),
             transport=httpx.MockTransport(lambda _request: response),
         )
 
@@ -242,7 +274,7 @@ def test_voice_provider_transport_errors_are_sanitized() -> None:
             _settings(),
             content=b"audio-fixture",
             mime_type="audio/ogg",
-            filename="note.ogg",
+            endpoint=_endpoint(),
             transport=httpx.MockTransport(unavailable),
         )
     assert "private-provider-detail" not in str(transcription.value)
@@ -251,9 +283,76 @@ def test_voice_provider_transport_errors_are_sanitized() -> None:
         synthesize_voice_note(
             _settings(),
             text="Please read this answer.",
+            endpoint=_endpoint(),
             transport=httpx.MockTransport(unavailable),
         )
     assert "private-provider-detail" not in str(synthesis.value)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "match"),
+    (
+        (401, "authentication failed"),
+        (413, "safety limit"),
+        (415, "format is not supported"),
+        (422, "language is not supported"),
+    ),
+)
+def test_local_media_client_fails_closed_on_boundary_and_payload_errors(
+    status_code: int,
+    match: str,
+) -> None:
+    client = HermesMediaClient(
+        _settings(),
+        transport=httpx.MockTransport(lambda _request: httpx.Response(status_code)),
+    )
+    with pytest.raises(HermesMediaError, match=match):
+        client.transcribe(
+            _endpoint(),
+            content=b"audio-fixture",
+            mime_type="audio/ogg",
+        )
+
+    with pytest.raises(HermesMediaError, match="format is not supported"):
+        client.transcribe(_endpoint(), content=b"audio", mime_type="application/octet-stream")
+    with pytest.raises(HermesMediaError, match="safety limit"):
+        client.transcribe(_endpoint(), content=b"", mime_type="audio/ogg")
+
+
+def test_local_media_client_rejects_untrusted_response_shapes_and_origins() -> None:
+    for response, match in (
+        (httpx.Response(200, content=b"x" * 65_537), "invalid data"),
+        (httpx.Response(200, json=[]), "invalid data"),
+        (
+            httpx.Response(
+                200,
+                json={"text": "hello", "language": "ENGLISH", "language_probability": 0.8},
+            ),
+            "invalid data",
+        ),
+        (
+            httpx.Response(
+                200,
+                json={"text": "hello", "language": "en", "language_probability": 2},
+            ),
+            "invalid data",
+        ),
+    ):
+        client = HermesMediaClient(
+            _settings(),
+            transport=httpx.MockTransport(lambda _request, value=response: value),
+        )
+        with pytest.raises(HermesMediaError, match=match):
+            client.transcribe(_endpoint(), content=b"audio", mime_type="audio/ogg")
+
+    with pytest.raises(HermesMediaError, match="voice language"):
+        HermesMediaClient(_settings()).synthesize(_endpoint(), text="hello", language="english")
+    with pytest.raises(HermesMediaError, match="private runtime boundary"):
+        HermesMediaClient(_settings(hermes_base_internal_host="https://hermes")).synthesize(
+            _endpoint(),
+            text="hello",
+            language="en",
+        )
 
 
 def test_sandbox_client_routes_every_operation_and_sanitizes_failures() -> None:
