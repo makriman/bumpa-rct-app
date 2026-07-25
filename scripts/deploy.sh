@@ -867,7 +867,7 @@ docker exec \
   "$postgres_container" /docker-entrypoint-initdb.d/10-app-role.sh
 "${compose[@]}" --profile tools run --rm migrate
 "${compose[@]}" --profile tools run --rm --no-deps \
-  --entrypoint python migrate -m app.cli.reconcile_hermes_profiles
+  hermes-profile-reconcile
 "${compose[@]}" up -d --wait --wait-timeout 180 hermes
 ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh
 "${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \
