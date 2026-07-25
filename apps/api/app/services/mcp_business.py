@@ -397,7 +397,7 @@ def research_web(
     if not settings.web_research_enabled:
         return {
             "availability": "unavailable",
-            "warning": "Managed web research is currently disabled.",
+            "warning": "Web research is currently disabled.",
         }
     return _run_tool(
         "research_web",

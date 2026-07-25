@@ -111,9 +111,11 @@ skipped) at 85.75% branch coverage, 171 web tests, 79 operations tests, lint,
 format, strict typing, migration, generated-contract, container, browser and
 security checks.
 
-WhatsApp activation, the provider-side `products.overview` timeout on one store,
-encrypted off-host backup with isolated restore, external alert delivery, and
-formal privacy/security/retention approval remain explicit gates. The canonical
+WhatsApp real-media acceptance and the provider-side `products.overview` timeout
+on one store remain current operational gaps. Controlled-pilot
+privacy/security/retention approval has been received; encrypted off-host backup
+and external alert delivery are explicitly deferred pilot risks and remain gates
+before public/unrestricted launch. The canonical
 redacted release record is
 [`docs/release-evidence-c0c1544.md`](docs/release-evidence-c0c1544.md); use
 [`docs/verification.md`](docs/verification.md) for the evidence ledger and

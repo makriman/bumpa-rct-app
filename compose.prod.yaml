@@ -50,14 +50,6 @@ services:
         target: /run/optional-secrets/meta_ads_oauth_client_secret
         read_only: true
       - type: bind
-        source: ${TAVILY_API_KEY_FILE_HOST:-/dev/null}
-        target: /run/optional-secrets/tavily_api_key
-        read_only: true
-      - type: bind
-        source: ${ELEVENLABS_API_KEY_FILE_HOST:-/dev/null}
-        target: /run/optional-secrets/elevenlabs_api_key
-        read_only: true
-      - type: bind
         source: ${SANDBOX_SERVICE_TOKEN_FILE_HOST:-/dev/null}
         target: /run/optional-secrets/sandbox_service_token
         read_only: true
@@ -187,10 +179,6 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
       META_ADS_OAUTH_CLIENT_SECRET: ""
       META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
-      TAVILY_API_KEY: ""
-      TAVILY_API_KEY_FILE: /run/runtime-secrets/tavily_api_key
-      ELEVENLABS_API_KEY: ""
-      ELEVENLABS_API_KEY_FILE: /run/runtime-secrets/elevenlabs_api_key
       SANDBOX_SERVICE_TOKEN: ""
       SANDBOX_SERVICE_TOKEN_FILE: /run/runtime-secrets/sandbox_service_token
       HERMES_PROFILE_ROOT: /data/hermes/profiles
@@ -251,10 +239,6 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
       META_ADS_OAUTH_CLIENT_SECRET: ""
       META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
-      TAVILY_API_KEY: ""
-      TAVILY_API_KEY_FILE: /run/runtime-secrets/tavily_api_key
-      ELEVENLABS_API_KEY: ""
-      ELEVENLABS_API_KEY_FILE: /run/runtime-secrets/elevenlabs_api_key
       SANDBOX_SERVICE_TOKEN: ""
       SANDBOX_SERVICE_TOKEN_FILE: /run/runtime-secrets/sandbox_service_token
     read_only: true
@@ -305,10 +289,6 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/google_oauth_client_secret
       META_ADS_OAUTH_CLIENT_SECRET: ""
       META_ADS_OAUTH_CLIENT_SECRET_FILE: /run/runtime-secrets/meta_ads_oauth_client_secret
-      TAVILY_API_KEY: ""
-      TAVILY_API_KEY_FILE: /run/runtime-secrets/tavily_api_key
-      ELEVENLABS_API_KEY: ""
-      ELEVENLABS_API_KEY_FILE: /run/runtime-secrets/elevenlabs_api_key
       SANDBOX_SERVICE_TOKEN: ""
       SANDBOX_SERVICE_TOKEN_FILE: /run/runtime-secrets/sandbox_service_token
     read_only: true
@@ -407,6 +387,8 @@ services:
       HERMES_CONTROL_PORT: ${HERMES_CONTROL_PORT:-8699}
       HERMES_PROFILE_ROOT: /opt/data/profiles
       HERMES_STAGING_ROOT: /staged/profiles
+      BUMPABESTIE_WHISPER_MODEL_PATH: /opt/hermes/models/faster-whisper-base
+      BUMPABESTIE_PIPER_MODEL_PATH: /opt/hermes/models/piper/en_GB-alba-medium.onnx
     volumes:
       - hermes_data:/opt/data
       - hermes_staging_data:/staged:ro

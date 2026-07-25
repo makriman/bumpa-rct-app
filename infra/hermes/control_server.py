@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hmac
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,13 +32,38 @@ from urllib.parse import unquote, urlsplit
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,159}$")
 RESTART_PATH = re.compile(r"^/v1/profiles/([A-Za-z0-9][A-Za-z0-9_-]{1,159})/restart$")
 ACTIVATE_PATH = re.compile(r"^/v1/profiles/([A-Za-z0-9][A-Za-z0-9_-]{1,159})/activate$")
+TRANSCRIBE_PATH = re.compile(
+    r"^/v1/profiles/([A-Za-z0-9][A-Za-z0-9_-]{1,159})/transcribe$"
+)
+SYNTHESIZE_PATH = re.compile(
+    r"^/v1/profiles/([A-Za-z0-9][A-Za-z0-9_-]{1,159})/synthesize$"
+)
 MAX_BODY_BYTES = 256
+MAX_MEDIA_BYTES = 16_777_216
+MAX_TTS_BODY_BYTES = 20_000
+MAX_TTS_TEXT_CHARS = 5_000
+MAX_AUDIO_SECONDS = 180.0
 MAX_PROFILE_FILE_BYTES = 131_072
 MAX_PROFILE_BYTES = 262_144
 PROFILE_FILES = frozenset({".bumpa-capabilities-v2", ".env", "config.yaml", "SOUL.md"})
 PROFILE_DIRECTORIES = frozenset({"skills", "memories", "sessions", "cron"})
 PROFILE_ENTRIES = PROFILE_FILES | PROFILE_DIRECTORIES
+MEDIA_MIME_SUFFIXES = {
+    "audio/aac": ".aac",
+    "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3",
+    "audio/ogg": ".ogg",
+    "audio/wav": ".wav",
+    "audio/webm": ".webm",
+    "video/3gpp": ".3gp",
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+}
 _ACTIVATION_LOCK = threading.Lock()
+_STT_LOCK = threading.Lock()
+_TTS_LOCK = threading.Lock()
+_WHISPER_MODEL: object | None = None
+_PIPER_VOICE: object | None = None
 
 
 @dataclass(frozen=True)
@@ -447,6 +474,21 @@ def ensure_profile_service(profile_name: str) -> None:
         raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Hermes activate failed") from exc
 
 
+def _profile_health_is_usable(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status", "")).lower()
+    if status in {"ok", "ready", "healthy"}:
+        return True
+    if status != "degraded" or payload.get("gateway_state") != "running":
+        return False
+    platforms = payload.get("platforms")
+    if not isinstance(platforms, dict):
+        return False
+    api_server = platforms.get("api_server")
+    return isinstance(api_server, dict) and api_server.get("state") == "connected"
+
+
 def wait_profile_ready(
     port: int,
     api_key: str,
@@ -467,11 +509,7 @@ def wait_profile_ready(
             payload = response.read(1025)
             if response.status == 200 and len(payload) <= 1024:
                 parsed = json.loads(payload)
-                if isinstance(parsed, dict) and str(parsed.get("status", "")).lower() in {
-                    "ok",
-                    "ready",
-                    "healthy",
-                }:
+                if _profile_health_is_usable(parsed):
                     return
         except (OSError, http.client.HTTPException, json.JSONDecodeError):
             pass
@@ -492,6 +530,248 @@ def wait_profile_ready(
     raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, f"Hermes {operation} failed")
 
 
+def _read_content_length(handler: BaseHTTPRequestHandler, maximum: int) -> int:
+    value = handler.headers.get("Content-Length")
+    if value is None:
+        raise ControlError(HTTPStatus.LENGTH_REQUIRED, "Content length required")
+    try:
+        length = int(value)
+    except ValueError as exc:
+        raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request") from exc
+    if not 1 <= length <= maximum:
+        raise ControlError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Invalid request")
+    return length
+
+
+def _authorised_runtime_profile(
+    handler: BaseHTTPRequestHandler,
+    profile_root: Path,
+    profile_name: str,
+) -> None:
+    profile_directory = _profile_directory(profile_root, profile_name)
+    profile_key, _profile_port = _profile_runtime(profile_directory)
+    if not _authorised(handler.headers.get("Authorization"), profile_key):
+        raise ControlError(HTTPStatus.UNAUTHORIZED, "Authentication failed")
+
+
+def _write_bounded_request(
+    handler: BaseHTTPRequestHandler,
+    *,
+    length: int,
+    suffix: str,
+) -> Path:
+    descriptor, raw_path = tempfile.mkstemp(prefix="bb-media-", suffix=suffix, dir="/tmp")
+    media_path = Path(raw_path)
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            remaining = length
+            while remaining:
+                chunk = handler.rfile.read(min(65_536, remaining))
+                if not chunk:
+                    raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request")
+                destination.write(chunk)
+                remaining -= len(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        return media_path
+    except Exception:
+        media_path.unlink(missing_ok=True)
+        raise
+
+
+def _audio_duration_seconds(media_path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Local speech runtime unavailable")
+    try:
+        completed = subprocess.run(  # noqa: S603 - fixed binary and private temporary path
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(media_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        duration = float(completed.stdout.strip())
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise ControlError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media") from exc
+    if completed.returncode != 0 or not 0 < duration <= MAX_AUDIO_SECONDS:
+        status = (
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+            if duration > MAX_AUDIO_SECONDS
+            else HTTPStatus.UNSUPPORTED_MEDIA_TYPE
+        )
+        raise ControlError(status, "Unsupported media")
+    return duration
+
+
+def _whisper_model() -> object:
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is not None:
+        return _WHISPER_MODEL
+    model_path = Path(
+        os.environ.get(
+            "BUMPABESTIE_WHISPER_MODEL_PATH",
+            "/opt/hermes/models/faster-whisper-base",
+        )
+    )
+    if not model_path.is_dir():
+        raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Local speech runtime unavailable")
+    try:
+        from faster_whisper import WhisperModel
+
+        _WHISPER_MODEL = WhisperModel(
+            str(model_path),
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=2,
+            num_workers=1,
+        )
+    except Exception as exc:
+        raise ControlError(
+            HTTPStatus.SERVICE_UNAVAILABLE, "Local speech runtime unavailable"
+        ) from exc
+    return _WHISPER_MODEL
+
+
+def _transcribe_local(media_path: Path) -> dict[str, object]:
+    _audio_duration_seconds(media_path)
+    try:
+        with _STT_LOCK:
+            model = _whisper_model()
+            segments, info = model.transcribe(  # type: ignore[attr-defined]
+                str(media_path),
+                beam_size=5,
+                vad_filter=True,
+            )
+            transcript = " ".join(segment.text.strip() for segment in segments).strip()
+    except ControlError:
+        raise
+    except Exception as exc:
+        raise ControlError(
+            HTTPStatus.SERVICE_UNAVAILABLE, "Voice transcription unavailable"
+        ) from exc
+    if not transcript:
+        raise ControlError(HTTPStatus.UNPROCESSABLE_ENTITY, "No speech recognised")
+    language = str(getattr(info, "language", "") or "").lower()
+    probability = getattr(info, "language_probability", None)
+    return {
+        "text": transcript[:12_000],
+        "language": language if re.fullmatch(r"[a-z]{2,3}", language) else None,
+        "language_probability": (
+            max(0.0, min(1.0, float(probability)))
+            if isinstance(probability, int | float)
+            else None
+        ),
+        "provider": "hermes_local_whisper",
+    }
+
+
+def _piper_voice() -> object:
+    global _PIPER_VOICE
+    if _PIPER_VOICE is not None:
+        return _PIPER_VOICE
+    model_path = Path(
+        os.environ.get(
+            "BUMPABESTIE_PIPER_MODEL_PATH",
+            "/opt/hermes/models/piper/en_GB-alba-medium.onnx",
+        )
+    )
+    config_path = Path(f"{model_path}.json")
+    if not model_path.is_file() or not config_path.is_file():
+        raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Local voice runtime unavailable")
+    try:
+        from piper import PiperVoice
+
+        _PIPER_VOICE = PiperVoice.load(str(model_path), config_path=str(config_path))
+    except Exception as exc:
+        raise ControlError(
+            HTTPStatus.SERVICE_UNAVAILABLE, "Local voice runtime unavailable"
+        ) from exc
+    return _PIPER_VOICE
+
+
+def _synthesize_local(text: str) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Local voice runtime unavailable")
+    with tempfile.TemporaryDirectory(prefix="bb-tts-", dir="/tmp") as temporary:
+        wav_path = Path(temporary) / "reply.wav"
+        ogg_path = Path(temporary) / "reply.ogg"
+        try:
+            with _TTS_LOCK:
+                voice = _piper_voice()
+                with wave.open(str(wav_path), "wb") as wav_file:
+                    voice.synthesize_wav(text, wav_file)  # type: ignore[attr-defined]
+            completed = subprocess.run(  # noqa: S603 - fixed argv and private paths
+                [
+                    ffmpeg,
+                    "-v",
+                    "error",
+                    "-y",
+                    "-i",
+                    str(wav_path),
+                    "-vn",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "48k",
+                    "-application",
+                    "voip",
+                    str(ogg_path),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=60,
+                stdin=subprocess.DEVNULL,
+            )
+            if completed.returncode != 0:
+                raise OSError("audio conversion failed")
+            content = ogg_path.read_bytes()
+        except ControlError:
+            raise
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ControlError(
+                HTTPStatus.SERVICE_UNAVAILABLE, "Local voice synthesis unavailable"
+            ) from exc
+    if not content or len(content) > MAX_MEDIA_BYTES:
+        raise ControlError(HTTPStatus.SERVICE_UNAVAILABLE, "Local voice synthesis unavailable")
+    return content
+
+
+def _local_media_ready() -> bool:
+    whisper_path = Path(
+        os.environ.get(
+            "BUMPABESTIE_WHISPER_MODEL_PATH",
+            "/opt/hermes/models/faster-whisper-base",
+        )
+    )
+    piper_path = Path(
+        os.environ.get(
+            "BUMPABESTIE_PIPER_MODEL_PATH",
+            "/opt/hermes/models/piper/en_GB-alba-medium.onnx",
+        )
+    )
+    return bool(
+        whisper_path.is_dir()
+        and piper_path.is_file()
+        and Path(f"{piper_path}.json").is_file()
+        and importlib.util.find_spec("faster_whisper")
+        and importlib.util.find_spec("piper")
+        and shutil.which("ffmpeg")
+        and shutil.which("ffprobe")
+    )
+
+
 class ControlHandler(BaseHTTPRequestHandler):
     server_version = "BumpaBestieHermesControl/1"
     sys_version = ""
@@ -504,17 +784,17 @@ class ControlHandler(BaseHTTPRequestHandler):
             path = unquote(parsed_path.path)
             restart_match = RESTART_PATH.fullmatch(path)
             activate_match = ACTIVATE_PATH.fullmatch(path)
+            transcribe_match = TRANSCRIBE_PATH.fullmatch(path)
+            synthesize_match = SYNTHESIZE_PATH.fullmatch(path)
+            if transcribe_match is not None:
+                self._handle_transcribe(transcribe_match.group(1))
+                return
+            if synthesize_match is not None:
+                self._handle_synthesize(synthesize_match.group(1))
+                return
             if restart_match is None and activate_match is None:
                 raise ControlError(HTTPStatus.NOT_FOUND, "Not found")
-            length_header = self.headers.get("Content-Length")
-            if length_header is None:
-                raise ControlError(HTTPStatus.LENGTH_REQUIRED, "Content length required")
-            try:
-                length = int(length_header)
-            except ValueError as exc:
-                raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request") from exc
-            if not 1 <= length <= MAX_BODY_BYTES:
-                raise ControlError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Invalid request")
+            length = _read_content_length(self, MAX_BODY_BYTES)
             try:
                 body = json.loads(self.rfile.read(length))
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -554,16 +834,67 @@ class ControlHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         if urlsplit(self.path).path == "/health":
-            self._json(HTTPStatus.OK, {"status": "ok"})
+            self._json(
+                HTTPStatus.OK,
+                {
+                    "status": "ok",
+                    "local_media": "ready" if _local_media_ready() else "unavailable",
+                },
+            )
             return
         self._json(HTTPStatus.NOT_FOUND, {"detail": "Not found"})
+
+    def _handle_transcribe(self, profile_name: str) -> None:
+        _authorised_runtime_profile(
+            self,
+            self.server.profile_root,  # type: ignore[attr-defined]
+            profile_name,
+        )
+        mime_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        suffix = MEDIA_MIME_SUFFIXES.get(mime_type)
+        if suffix is None:
+            raise ControlError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media")
+        length = _read_content_length(self, MAX_MEDIA_BYTES)
+        media_path = _write_bounded_request(self, length=length, suffix=suffix)
+        try:
+            result = _transcribe_local(media_path)
+        finally:
+            media_path.unlink(missing_ok=True)
+        self._json(HTTPStatus.OK, result)
+
+    def _handle_synthesize(self, profile_name: str) -> None:
+        _authorised_runtime_profile(
+            self,
+            self.server.profile_root,  # type: ignore[attr-defined]
+            profile_name,
+        )
+        if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != (
+            "application/json"
+        ):
+            raise ControlError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported media")
+        length = _read_content_length(self, MAX_TTS_BODY_BYTES)
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request") from exc
+        if not isinstance(payload, dict) or set(payload) != {"text", "language"}:
+            raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request")
+        text = payload.get("text")
+        language = payload.get("language")
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_TTS_TEXT_CHARS:
+            raise ControlError(HTTPStatus.BAD_REQUEST, "Invalid request")
+        if language != "en":
+            raise ControlError(
+                HTTPStatus.UNPROCESSABLE_ENTITY, "Requested language unavailable"
+            )
+        self._binary(HTTPStatus.OK, _synthesize_local(text.strip()), "audio/ogg")
 
     def log_message(self, format: str, *args: object) -> None:
         # Request paths contain only validated profile names, but suppressing the
         # standard access log keeps lifecycle operations out of container logs.
         return
 
-    def _json(self, status: HTTPStatus, payload: dict[str, str]) -> None:
+    def _json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
         encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -572,6 +903,15 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _binary(self, status: HTTPStatus, content: bytes, mime_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(content)
 
 
 def main() -> None:

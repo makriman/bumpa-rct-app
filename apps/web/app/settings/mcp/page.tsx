@@ -32,6 +32,13 @@ const descriptions: Record<string, string> = {
   home_assistant:
     "Use only explicitly approved shop devices and services; private-network discovery stays off.",
 };
+const comingSoonProviders = new Set([
+  "google_drive",
+  "google_sheets",
+  "gmail",
+  "calendar",
+  "meta_ads",
+]);
 
 type ConnectionRequest = {
   item: McpRegistryItem;
@@ -571,6 +578,7 @@ function ConnectionCard({
   ) => void;
   onRevoke: (connection: McpConnection) => void;
 }) {
+  const isComingSoon = comingSoonProviders.has(item.provider);
   const canAuthorize =
     connection?.admin_approved &&
     connection.oauth_available &&
@@ -595,15 +603,22 @@ function ConnectionCard({
         >
           <strong>{item.name}</strong>
           <Badge>
-            {connection
-              ? titleCase(connection.status)
-              : item.enabled
-                ? "Available"
-                : "Not configured"}
+            {isComingSoon
+              ? "Coming soon"
+              : connection
+                ? titleCase(connection.status)
+                : item.enabled
+                  ? "Available"
+                  : "Not configured"}
           </Badge>
         </div>
         <p>{descriptions[item.provider] ?? "Approved business context."}</p>
-        {connection ? (
+        {isComingSoon ? (
+          <p className="table-secondary" style={{ marginTop: 12 }}>
+            Coming soon. Google Workspace and Meta Ads connections stay
+            unavailable until their reviewed OAuth applications are ready.
+          </p>
+        ) : connection ? (
           <>
             <div className="detail-row">
               <span className="detail-label">Access mode</span>

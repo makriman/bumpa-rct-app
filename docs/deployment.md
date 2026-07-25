@@ -74,9 +74,13 @@ TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
 pages now ship route-specific canonical/Open Graph/Twitter metadata, homepage
 JSON-LD, robots, sitemap, manifest, favicons and the Bumpa Bestie brand assets; private surfaces
 enforce `X-Robots-Tag: noindex`. Provider selectors and credentials never imply
-unrestricted traffic approval. Tavily, ElevenLabs, Google/Meta OAuth, consented
-real-media acceptance, encrypted off-host durability, an external alert
-destination and privacy/security/retention approval remain open gates.
+unrestricted traffic approval. The successor candidate replaces Tavily and
+ElevenLabs with keyless DDGS and Hermes-local Whisper/Piper. Google/Meta OAuth is
+coming soon. Signed consent, an internal media recipient and controlled-pilot
+privacy/security approval have been received; production recording and real-media
+acceptance remain. Encrypted off-host durability and external alert delivery are
+explicitly deferred for this pilot and remain required before public/unrestricted
+launch.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.

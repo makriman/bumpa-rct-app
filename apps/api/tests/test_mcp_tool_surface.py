@@ -39,7 +39,6 @@ def _settings(**overrides: Any) -> Settings:
         "web_research_enabled": True,
         "sandbox_tools_enabled": True,
         "managed_image_generation_enabled": True,
-        "tavily_api_key": "tavily-fixture-key-with-safe-length",
         "sandbox_worker_url": "https://sandbox.example.com",
         "sandbox_service_token": ("sandbox-fixture-token-with-at-least-thirty-two-characters"),  # noqa: S106
     }

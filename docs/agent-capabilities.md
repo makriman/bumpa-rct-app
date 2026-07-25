@@ -10,9 +10,10 @@ endpoint is mounted at `/internal/mcp/`, is blocked by Caddy, and is reachable o
 application network.
 
 Business tools return exact store-local date bounds, currency, freshness, inclusion rules and
-coverage warnings. Customer output is aggregated. Current public research runs only through
-Tavily and returns original HTTPS URLs as untrusted evidence. Search queries reject direct contact
-details and customer, account or order identifiers.
+coverage warnings. Customer output is aggregated. Public research uses the keyless open-source
+DDGS client and returns original HTTPS URLs as untrusted evidence. Search queries reject direct
+contact details and customer, account or order identifiers. Search failure is reported honestly;
+it never permits an uncited external claim or blocks answers that can safely use store data alone.
 
 Terminal, code, files, video-frame extraction, scanned-PDF page rendering and outbound-file
 sanitization run in the Cloudflare Sandbox Worker. A sandbox ID is an HMAC of tenant and
@@ -55,19 +56,19 @@ All switches default off and can be rolled back independently:
 - `PROACTIVE_INSIGHTS_ENABLED`
 
 `AGENT_CAPABILITIES_V2` requires Hermes. Dependent capabilities cannot be enabled unless the main
-switch is on. Production environment validation fails closed when a corresponding provider secret
-file or fixed Sandbox Worker HTTPS origin is missing.
+switch is on. Research requires the fixed `ddgs` provider and no paid-provider key. Speech requires
+the Hermes-local runtime and a configured local-language allowlist. Production environment
+validation fails closed when a required private Hermes/Sandbox boundary is missing.
 
 `WHATSAPP_PRIMARY_PILOT_ENABLED` is the only exception to the legacy temporary web-PIN/primary
 number interlock. It is valid only with the Meta primary sender enabled; it does not enable OTP,
 public onboarding, proactive insights or unapproved templates.
 
-Provider values are copied by `app-secrets-init` into a read-only runtime volume:
+Provider values copied by `app-secrets-init` into a read-only runtime volume are limited to:
 
-- `TAVILY_API_KEY_FILE_HOST`
-- `ELEVENLABS_API_KEY_FILE_HOST`
 - `SANDBOX_SERVICE_TOKEN_FILE_HOST`
-- the existing Google and Meta OAuth client-secret files
+- the dormant Google and Meta OAuth client-secret files when those coming-soon integrations are
+  separately approved and enabled
 
 Secret files must be absolute, non-symlink, one-line files with mode `0400` or `0600`. Never place
 their values in `.env.production`, logs or release evidence.
@@ -81,8 +82,8 @@ Run the content-free capability report before and after each activation:
 The report never prints a secret, secret path, tenant coordinate or participant
 identifier. It distinguishes `active`, `ready_disabled`,
 `blocked_missing_prerequisite`, `misconfigured` and `disabled`. An operator must
-still run the provider-specific canary: `active` proves configuration readiness,
-not upstream reachability or user consent.
+still run the capability-specific canary: `active` proves configuration readiness,
+not DDGS reachability, local model health or user consent.
 
 ## WhatsApp behaviour
 
@@ -92,7 +93,7 @@ an immediate background task. Processing is serialized with a renewable, privacy
 lock per WhatsApp user, and duplicate Meta message IDs remain idempotent.
 
 Text, captions, replies, buttons, locations and contact cards are supported. Images reach Claude
-vision. `WHATSAPP_SPEECH_ENABLED` separately controls ElevenLabs Scribe v2 transcription for
+vision. `WHATSAPP_SPEECH_ENABLED` separately controls local faster-whisper transcription for
 voice, audio and video; video also receives up to three
 bounded Sandbox-generated frames. PDF and safe text documents are extracted without embedded
 execution. Scanned PDFs receive up to four bounded page images for Claude vision. A transcript
@@ -101,32 +102,37 @@ run Hermes tools or actions. Unsupported, corrupt, oversized and provider-failed
 produce an explicit fallback.
 
 The final response is chunked and quotes the inbound message. Generated images, documents and
-video use the corresponding native WhatsApp media types. A requested voice reply is generated as
-a native Ogg/Opus voice note, with the text response retained as fallback. Typing is refreshed
+video use the corresponding native WhatsApp media types. A supported English/Pidgin voice reply
+is generated locally with Piper as a native Ogg/Opus voice note, with the text response retained
+as fallback. Unsupported TTS languages return text rather than a guessed voice. Typing is refreshed
 while long work continues. After eight seconds, at most two progress messages may be emitted, and
 only after real Hermes tool events. Delivery state is monotonic (`sent`, `delivered`, `read`);
 failure evidence is separate. A Hermes outage produces a durable, honest control-plane response
 instead of an empty response or dead letter.
 
-On the first pilot conversation after this release, each RCT business receives an explicit
-research-consent prompt. The migration resets previously granted tenants to `pending`. Declining
-does not change product capability. Research events remain empty unless consent is granted;
-content-free operational events continue.
+All five RCT participants have supplied signed consent decisions outside the application. The
+operator CLI records those decisions for the exact five-tenant list, policy version and tenant
+owner, with a content-free `docusign` attestation marker. It does not accept or retain signed
+documents, participant identities or document references. Recording is dry-run by default,
+exact-count guarded and idempotent. Declining or withdrawing does not change product capability.
+Research events remain empty unless consent is granted; content-free operational events continue.
 
 ## Release order and evidence
 
-1. Provision Tavily, ElevenLabs, Google/Meta OAuth and Cloudflare Sandbox access.
+1. Build the pinned Hermes image and prove its local Whisper/Piper media loop.
 2. Deploy the Sandbox Worker and set its `SANDBOX_SERVICE_TOKEN` secret.
-3. Set the matching API host secret file and the Worker HTTPS origin.
+3. Set the matching API host secret file and the Worker HTTPS origin; research itself needs no key.
 4. Run migrations; verify schema head `0018_agent_capability_audit` and forced tenant RLS.
 5. Reconcile all five Hermes profiles, confirm their distinct MCP credential hashes and verify
    all 19 managed tools before starting the public proxy.
-6. Enable the main capability switch, then research, Sandbox, connectors and multimodal switches.
+6. Enable the main capability switch, then keyless research, Sandbox and multimodal switches.
+   Keep Google/Meta OAuth connectors disabled and visibly marked coming soon.
 7. Canary one internal mapped user before enabling the five RCT users.
 8. Verify text, image, voice, document, video, citations, exact periods, progress, confirmations,
    delivery/read status, provider-outage fallbacks and zero cross-tenant access.
 9. Keep proactive templates off until the conversational pilot is stable. Keep OTP and public
    onboarding off.
 
-Rollback is a switch change first. If a provider is unhealthy, disable only that capability and
-leave grounded Bumpa reads active. Do not replace a failed managed provider with host-local tools.
+Rollback is a switch change first. If DDGS or a local model is unhealthy, disable only that
+capability and leave grounded Bumpa reads active. Do not enable broad Hermes host tools or
+unrestricted egress as a shortcut.
