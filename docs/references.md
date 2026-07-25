@@ -31,7 +31,8 @@ scope. The adapter has authenticated all five supplied business credentials. The
 current mapped production canaries persist orders for all five stores: four are
 accepted partial at eight available analytics datasets, while store 5 is degraded
 only because `products.overview` receives no provider response inside the scoped
-90-second policy. Current raw/metric/canonical evidence reconciles at schema 0015.
+90-second policy. Current raw/metric/canonical evidence reconciles at schema
+`0018_agent_capability_audit`.
 Public landing material and credential probes still do not prove that contract, so
 retain versioned redacted fixtures and re-run tenant-scoped canaries for every
 application activation.

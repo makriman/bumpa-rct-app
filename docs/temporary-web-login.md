@@ -1,9 +1,10 @@
-# Temporary web-only login
+# Temporary mapped web login
 
 ## Evidence state
 
-This document describes the temporary web-login boundary carried by application
-release `c0c15443352ab84fde1d2edfde1ed0692ed842f6`. Exact-revision
+The release transcript below is historical evidence for the web-only boundary
+carried by application release
+`c0c15443352ab84fde1d2edfde1ed0692ed842f6`. Exact-revision
 [merged-main CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
 passed 13/13 jobs,
 [image publication 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
@@ -12,8 +13,11 @@ coordinator, and schema `0015_bumpa_store_context` is live. Older evidence may
 describe the initial feature rollout but predates this application boundary and
 current reverification.
 
-This is a containment mode while WhatsApp verification remains parked. It is not
-the long-term authentication design and it is not equivalent to per-user identity
+The current application release is
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a`. It retains this temporary mapped
+login while permitting the explicitly contained primary WhatsApp pilot described
+in [`docs/agent-capabilities.md`](agent-capabilities.md). This is not the
+long-term authentication design and it is not equivalent to per-user identity
 proof.
 
 ## Production acceptance
@@ -34,8 +38,9 @@ revoked by logout. After canary cleanup, the database contained zero active
 temporary challenges and zero active acceptance sessions.
 
 WhatsApp verification, test-sender verification and proactive/daily/weekly
-WhatsApp delivery remained disabled throughout. This evidence does not imply a
-Meta send, OTP or delivery receipt.
+WhatsApp delivery remained disabled throughout that historical acceptance. The
+current primary-pilot control plane has separate signed-ingress evidence, but no
+participant send, OTP or delivery receipt is claimed.
 
 ## Authentication modes
 
@@ -52,7 +57,9 @@ Production temporary-PIN mode is valid only when all of the following are true:
 - WhatsApp is either fully parked (`WHATSAPP_BACKEND=disabled` and
   `META_TEST_SENDER_VERIFICATION_MODE=disabled`) or limited to the signed,
   `inbound_replies_only` Meta test-sender lane with
-  `META_PRIMARY_SENDER_ENABLED=false`;
+  `META_PRIMARY_SENDER_ENABLED=false`, or it is the explicitly contained primary
+  lane with `WHATSAPP_BACKEND=meta`, `META_PRIMARY_SENDER_ENABLED=true` and
+  `WHATSAPP_PRIMARY_PILOT_ENABLED=true`;
 - proactive, daily and weekly WhatsApp insights are disabled;
 - `TEMPORARY_WEB_PIN_EXPIRES_AT` is a future timezone-aware timestamp; and
 - the verifier is supplied through the scoped Compose secret, never an inline

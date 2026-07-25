@@ -13,24 +13,27 @@ evidenced. A selected adapter is not unrestricted-traffic approval: every
 unsupported or externally blocked capability remains fail-closed until its full
 activation gate passes.
 
-As of 2026-07-15, application release
-`c0c15443352ab84fde1d2edfde1ed0692ed842f6` is live on the five branded
-`bumpabestie.com` hosts through Cloudflare. Brand/SEO and data hardening
-[PR 49](https://github.com/makriman/bumpa-rct-app/pull/49), store-boundary
-persistence [PR 51](https://github.com/makriman/bumpa-rct-app/pull/51), the final
-slow-product timeout [PR 52](https://github.com/makriman/bumpa-rct-app/pull/52), exact-revision
-[main CI 29412671738](https://github.com/makriman/bumpa-rct-app/actions/runs/29412671738)
-(13/13 jobs), and
-[publish run 29413085773](https://github.com/makriman/bumpa-rct-app/actions/runs/29413085773)
-(7/7 jobs) complete the build and publication gates. The deployed release record,
-all six promoted indexes and their OCI revision labels match the exact application
-revision. The redacted production transcript is
-[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its later
-documentation commit is evidence only and is not a separately promoted application
-release.
+As of 2026-07-25, application release
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a` is live on the five branded
+`bumpabestie.com` hosts through Cloudflare. Production SME consultant
+[PR 70](https://github.com/makriman/bumpa-rct-app/pull/70), exact-revision
+[main CI 30165914178](https://github.com/makriman/bumpa-rct-app/actions/runs/30165914178)
+and
+[publication 30166552591](https://github.com/makriman/bumpa-rct-app/actions/runs/30166552591)
+complete the application build and publication gates. All eight promoted indexes
+and their OCI revision labels match the application revision.
+
+The Worker-only temp-directory fix in
+[PR 71](https://github.com/makriman/bumpa-rct-app/pull/71) is deployed separately
+as Cloudflare Worker version `0f5a78d1-660a-41e9-b75d-a970c5933330`;
+[follow-up main CI 30167202934](https://github.com/makriman/bumpa-rct-app/actions/runs/30167202934)
+passed the full quality and image-security matrix. The redacted production
+transcript is
+[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its later
+operations/evidence commit is not a separately promoted application release.
 
 Production runs all ten intended services at schema
-`0016_chat_pagination`; all nine configured healthchecks pass, and the
+`0018_agent_capability_audit`; all nine configured healthchecks pass, and the
 accepted runtime samples have zero restarts and zero OOM kills. The complete
 mapped-login matrix covered all five collaborators on public chat, administration
 and research: 15 host-scoped sign-ins passed. Generic unmapped denial, host-only
@@ -50,13 +53,20 @@ reached its fixed 240-second polling deadline for the fifth store; the durable j
 finished successfully seconds later and was reconciled directly rather than
 widening the helper boundary.
 
-All five isolated Hermes profiles completed one live Claude request from a
-synthetic prompt. Normal tenant-scoped redacted context remained inside Hermes;
-prompt/response bodies were omitted from evidence. Five same-profile health probes
-passed, 20 cross-profile gateway credential attempts were rejected, and cleanup
-left zero active canary sessions. WhatsApp authentication, Meta
-test-sender verification and proactive/daily/weekly delivery remain disabled; no
-Meta send or receipt is claimed.
+All five isolated Hermes profiles expose 19 tenant-bound managed tools and
+completed live Claude requests from synthetic prompts. Grounded period and
+multi-turn canaries passed, including exact store-local “last week” resolution.
+A delegated-agent canary and a local scheduled-task call through the same
+tenant-bound MCP profile also passed. Normal tenant-scoped redacted context
+remained inside Hermes; prompt/response bodies were omitted from evidence, and
+cleanup left zero active canary sessions or scheduled jobs.
+
+The verified primary Meta sender, mapped five-user pilot, multimodal routing,
+read/typing work and bounded progress behavior are enabled. A signed public
+webhook canary passed without creating an outbound message. Real participant
+media and delivery/receipt canaries remain gated on explicit research-consent
+choices and an approved internal test recipient. WhatsApp OTP and proactive
+daily/weekly delivery remain disabled.
 
 All five DNS records remain Cloudflare-proxied; Full (strict), Always Use HTTPS,
 TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
@@ -64,9 +74,9 @@ TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
 pages now ship route-specific canonical/Open Graph/Twitter metadata, homepage
 JSON-LD, robots, sitemap, manifest, favicons and the Bumpa Bestie brand assets; private surfaces
 enforce `X-Robots-Tag: noindex`. Provider selectors and credentials never imply
-unrestricted traffic approval. WhatsApp activation, the remaining provider-side
-dataset timeout, encrypted off-host durability, an external alert destination and
-privacy/security/retention approval remain open gates.
+unrestricted traffic approval. Tavily, ElevenLabs, Google/Meta OAuth, consented
+real-media acceptance, encrypted off-host durability, an external alert
+destination and privacy/security/retention approval remain open gates.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -698,17 +708,17 @@ configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
 The exact-application-release local backup is recorded in
-[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its guarded
-systemd wrapper, five expected checksum entries, six-file inventory, SHA-256 replay
-and format-3 manifest all passed; the manifest binds application revision
-`c0c15443352ab84fde1d2edfde1ed0692ed842f6`, schema
-`0015_bumpa_store_context`, PostgreSQL/pg_dump 16.14 and the exact backup digest.
-All eight services resumed with all seven configured healthchecks healthy. Off-host
-copy, external backup-alert delivery and remote restore evidence remain open.
+[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its guarded
+systemd wrapper, five expected checksum entries, six-file inventory, SHA-256
+replay and format-3 manifest all passed; the manifest binds application revision
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a`, schema
+`0018_agent_capability_audit`, PostgreSQL/pg_dump 16.14 and the exact backup
+digest. All ten services resumed with all nine configured healthchecks healthy.
+Off-host copy, external backup-alert delivery and remote restore evidence remain
+open.
 
-The post-backup stability gate also passed after a full 20-minute clock. Five
-samples at 60-second spacing retained all eight identities and exact images, seven
-healthy configured healthchecks, zero restart/OOM signals, schema 0015 and healthy
+Final runtime inspection retained all ten services and exact images, nine healthy
+configured healthchecks, zero restart/OOM signals, schema 0018 and healthy
 readiness. Bounded logs, direct-origin/public smoke, timers, firewall/UFW and
 maintenance/interlocks passed the final gate.
 

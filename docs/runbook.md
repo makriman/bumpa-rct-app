@@ -4,12 +4,12 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Application release
-`c0c15443352ab84fde1d2edfde1ed0692ed842f6` is deployed on the branded
-`bumpabestie.com` hosts with all eight services at schema
-`0015_bumpa_store_context`. The current contained boundary uses temporary mapped-
-collaborator web sign-in while WhatsApp, Meta test-sender verification and
-proactive/daily/weekly delivery are disabled. Always confirm the actual boundary
-from `.deployed-release.json`, Compose state and
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a` is deployed on the branded
+`bumpabestie.com` hosts with all ten services at schema
+`0018_agent_capability_audit`. The current contained boundary uses temporary
+mapped-collaborator web sign-in alongside the mapped primary WhatsApp pilot.
+OTP, public onboarding and proactive/daily/weekly delivery remain disabled.
+Always confirm the actual boundary from `.deployed-release.json`, Compose state and
 `/health/ready` before applying an incident procedure; selector state is not a
 provider canary.
 
@@ -27,15 +27,13 @@ Never:
 
 ## Temporary web-login containment
 
-The active temporary web-only release is documented in
+The active temporary mapped-login boundary is documented in
 [`docs/temporary-web-login.md`](temporary-web-login.md) and evidenced in
-[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md). Its containment
-boundary is
-`AUTH_LOGIN_MODE=temporary_static_pin`, `WHATSAPP_BACKEND=disabled`, disabled Meta
-test-sender verification, and disabled proactive/daily/weekly WhatsApp delivery.
-Meta secrets remain private for later activation. Do not claim that a PIN was sent:
-the request creates a provider-free ten-minute challenge for an eligible mapping
-and returns the same accepted shape for unknown phones.
+[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its containment
+boundary is `AUTH_LOGIN_MODE=temporary_static_pin`, the explicitly enabled
+primary pilot and disabled OTP/proactive/daily/weekly delivery. The PIN request
+is provider-free: it creates a ten-minute challenge for an eligible mapping and
+returns the same accepted shape for unknown phones.
 
 For immediate login containment, set `AUTH_LOGIN_MODE=disabled`, blank
 `TEMPORARY_WEB_PIN_VERIFIER`, `TEMPORARY_WEB_PIN_VERIFIER_FILE`,
@@ -99,11 +97,11 @@ During incident triage, compare redacted counts rather than raw identities:
 - eligible mapped users, successful and denied login audits;
 - active temporary challenges and locked/expired attempts;
 - WhatsApp outbound/outbox rows before and after the canary; and
-- service health, schema head `0015_bumpa_store_context` and the exact image SHA.
+- service health, schema head `0018_agent_capability_audit` and the exact image SHA.
 
-Any Meta send, a successful unmapped login, a non-expiring verifier, a verifier
-visible outside the API-only secret volume, or admin/research access without the
-matching role is a release blocker.
+Any unapproved or unmapped Meta send, a successful unmapped login, a
+non-expiring verifier, a verifier visible outside the API-only secret volume, or
+admin/research access without the matching role is a release blocker.
 
 ## Triage order
 
@@ -152,10 +150,10 @@ environment file. A coordinator journal, maintenance interlock or
 release-record/live-container mismatch is an intentional hard stop and must be
 reconciled before another deployment or backup.
 
-The verified production snapshot has Caddy, web, API, worker, scheduler, Hermes,
-PostgreSQL and Redis running; all seven services with configured healthchecks are
-healthy, Caddy is running, and accepted runtime samples have zero restarts and zero
-OOM kills.
+The verified production snapshot has Caddy, three web surfaces, API, worker,
+scheduler, Hermes, PostgreSQL and Redis running; all nine configured health
+checks are healthy, and accepted runtime samples have zero restarts and zero OOM
+kills.
 Caddy is 2.11.4 built with Go 1.26.5 and runs as UID 10001 with restricted
 capabilities; PostgreSQL is 16.14 and Redis is 7.4.9. The public, `www`, API, admin
 and research branded hosts are Cloudflare-proxied with Full (strict), Always Use
@@ -166,15 +164,16 @@ database/Redis/worker/scheduler `ok` and the intended provider selectors. Histor
 data-boundary evidence recorded all 23 tenant tables with ENABLE+FORCE
 RLS and one policy each; its non-bypass application-role audit covered 115
 tenant/table contexts across 670 scoped rows with zero no-context or cross-tenant
-rows. Exact-release CI reran the RLS contracts; schema 0015 adds the validated
-store-context and revision boundary without weakening RLS. The onboarding audit
-records five stores and exactly one approved operator/owner dual role. Current
-Hermes evidence records five live completions from a synthetic prompt through five
-active profiles, with normal tenant-scoped redacted context retained inside Hermes
-and bodies omitted from evidence; five authenticated same-profile health probes,
-20 rejected cross-profile gateway credential attempts and zero retained canary
-sessions also passed. Runtime/filesystem/context contracts supply the broader
-isolation evidence. Current Bumpa evidence records four
+rows. Current schema `0018_agent_capability_audit` reconciliation found 26 tenant
+tables with RLS enabled and forced and no missing tenant boundary. The onboarding
+audit records five stores and exactly one approved operator/owner dual role.
+Current Hermes evidence records five live completions from a synthetic prompt
+through five active profiles, with normal tenant-scoped redacted context retained
+inside Hermes and bodies omitted from evidence; five authenticated same-profile
+health probes, 20 rejected cross-profile gateway credential attempts,
+grounded-period, multi-turn, delegation and scheduled-task canaries also passed.
+Cleanup left no canary session or scheduled job. Runtime/filesystem/context
+contracts supply the broader isolation evidence. Current Bumpa evidence records four
 accepted-partial stores at 8/10 analytics datasets plus orders. The fifth store is
 durably degraded at 7/10 plus orders because `products.overview` alone receives no
 provider response inside the scoped 90-second policy. Store 3's previously slow
@@ -182,14 +181,12 @@ request now succeeds. The exact durable rows reconcile raw evidence, ten metrics
 per store, canonical orders/items, currencies, ranges, redaction and freshness.
 Missing or failed values remain unavailable, not zero.
 
-Historical read-only Graph checks confirmed that the configured Meta test WABA and
-test-sender ID were paired; the sender reported `PENDING` and had five approved
-non-authentication templates but zero authentication templates. Both authentication-
-template create endpoints were denied with Graph code `10`/subcode `2388185`; no
-outbound send or receipt is claimed. The lane remains reply-only with
-`supports_otp=false`, and
-proactive outbound is disabled. These facts do not prove Meta delivery or complete
-Bumpa sync.
+Current read-only Meta evidence shows the primary Cloud API sender is
+code-verified and its application is WABA-subscribed. The signed synthetic
+ingress/replay canary passed without outbound delivery. No participant message,
+real media send or delivery/read receipt is claimed. No approved authentication
+template exists; `supports_otp=false`, and proactive outbound is disabled. These
+facts do not prove Meta delivery or complete Bumpa sync.
 
 ## Field-encryption key rotation
 
@@ -350,17 +347,16 @@ and resumes exactly the recorded service set even when backup creation fails. Al
 if no verified backup ID appears within the expected window or any service fails to
 resume.
 
-Older release recovery points remain historical evidence. The current application
-release's guarded local backup is recorded in
-[`docs/release-evidence-c0c1544.md`](release-evidence-c0c1544.md): its five
-checksums replayed successfully, its six-file inventory was exact, and the format-3
-manifest binds revision `c0c15443352ab84fde1d2edfde1ed0692ed842f6`, schema
-`0015_bumpa_store_context`, PostgreSQL/pg_dump 16.14 and the current exact backup
-digest. All eight services resumed with all seven configured healthchecks healthy.
-After the full post-backup 20-minute clock, five samples at 60-second spacing kept
-all eight identities/exact images, seven healthy checks, zero restart/OOM signals,
-schema/readiness healthy and bounded logs clean. Final origin/public smoke,
-timers, firewall/UFW and maintenance/interlocks also passed.
+Older release recovery points remain historical evidence. The current
+application release's guarded local backup is recorded in
+[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md): its five
+checksums replayed successfully, its six-file inventory was exact, and the
+format-3 manifest binds revision
+`9047dae7f884ee953de842c2d8bc8c456e48ae7a`, schema
+`0018_agent_capability_audit`, PostgreSQL/pg_dump 16.14 and the current exact
+backup digest. All ten services resumed with all nine configured health checks
+healthy. Final origin/public smoke, timers, firewall/UFW and
+maintenance/interlocks also passed.
 Off-host durability and external alert delivery remain unconfigured until
 separately evidenced.
 

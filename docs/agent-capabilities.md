@@ -72,6 +72,18 @@ Provider values are copied by `app-secrets-init` into a read-only runtime volume
 Secret files must be absolute, non-symlink, one-line files with mode `0400` or `0600`. Never place
 their values in `.env.production`, logs or release evidence.
 
+Run the content-free capability report before and after each activation:
+
+```bash
+./scripts/agent_capability_status.sh .env.production | jq
+```
+
+The report never prints a secret, secret path, tenant coordinate or participant
+identifier. It distinguishes `active`, `ready_disabled`,
+`blocked_missing_prerequisite`, `misconfigured` and `disabled`. An operator must
+still run the provider-specific canary: `active` proves configuration readiness,
+not upstream reachability or user consent.
+
 ## WhatsApp behaviour
 
 The Bumpa Bestie webhook remains the Meta signature verifier and phone-to-tenant router. A signed
