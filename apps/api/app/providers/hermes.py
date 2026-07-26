@@ -26,8 +26,10 @@ from app.core.config import Settings
 from app.core.crypto import FieldCipher
 from app.db.models import HermesProfile, Tenant
 
-SME_SYSTEM_POLICY = """You are Bumpa Bestie, a practical consultant in the pocket of one SME.
-Help with business planning, sales, marketing, operations, finance, expansion and general work.
+SME_SYSTEM_POLICY = """You are Bumpa Bestie, an AI assistant in the pocket of one SME.
+Adapt to what the entrepreneur needs: a capable employee, practical consultant, thoughtful
+mentor, or supportive friend. Help with business planning, sales, marketing, operations, finance,
+expansion and general work without pretending to be human or overstating your authority.
 Use the tenant-scoped business tools for store facts and exact period calculations. Use the
 approved keyless research tool for current external facts and cite original source URLs. When
 research_web returns sources, end with a Sources section that copies at least two exact clickable
@@ -46,7 +48,9 @@ ask at most one essential follow-up rather than blocking unnecessarily.
 
 SME_SOUL = """# Bumpa Bestie SME Agent
 
-You are a private, capable business consultant for exactly one Bumpa SME.
+You are a private, capable AI assistant for exactly one Bumpa SME. Adapt as a hands-on employee,
+practical consultant, thoughtful mentor, or supportive friend according to what the entrepreneur
+needs, while being clear that you are an AI and never overstating your authority.
 
 - Use `bumpa_bestie` MCP tools for exact tenant business facts, periods and calculations.
 - Use `research_web` for current external evidence. Copy at least two exact returned HTTPS URLs
@@ -124,6 +128,14 @@ class HermesInvalidResponse(HermesError):
     code = "hermes_invalid_response"
 
 
+class HermesProviderCreditExhausted(HermesError):
+    code = "hermes_provider_credit_exhausted"
+
+
+class HermesUpstreamFailure(HermesUnavailable):
+    code = "hermes_upstream_failure"
+
+
 class HermesCircuitOpen(HermesUnavailable):
     code = "hermes_circuit_open"
 
@@ -165,6 +177,34 @@ def _assistant_delta(event: dict[str, Any]) -> str:
     if event.get("type") == "message.delta" and isinstance(event.get("delta"), str):
         return str(event["delta"])[:16_384]
     return ""
+
+
+def _stream_failure(event: dict[str, Any]) -> HermesError | None:
+    choices = event.get("choices")
+    finish_reason: object = None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        finish_reason = choices[0].get("finish_reason")
+    hermes = event.get("hermes")
+    error = event.get("error")
+    failed = (
+        finish_reason == "error"
+        or isinstance(error, dict)
+        or (isinstance(hermes, dict) and hermes.get("failed") is True)
+    )
+    if not failed:
+        return None
+    fragments: list[str] = []
+    if isinstance(error, dict) and isinstance(error.get("message"), str):
+        fragments.append(error["message"])
+    if isinstance(hermes, dict) and isinstance(hermes.get("error"), str):
+        fragments.append(hermes["error"])
+    summary = " ".join(fragments).lower()
+    if any(
+        marker in summary
+        for marker in ("credit balance", "purchase credits", "billing", "insufficient credit")
+    ):
+        return HermesProviderCreditExhausted("Hermes provider credit is exhausted")
+    return HermesUpstreamFailure("Hermes upstream model call failed")
 
 
 def _sanitized_tool_progress(
@@ -565,6 +605,9 @@ class HermesClient:
                             ) from exc
                         if not isinstance(event, dict):
                             continue
+                        failure = _stream_failure(event)
+                        if failure is not None:
+                            raise failure
                         usage = event.get("usage")
                         if isinstance(usage, dict):
                             input_tokens = _safe_token_count(usage.get("prompt_tokens"))

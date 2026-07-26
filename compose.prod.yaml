@@ -276,6 +276,9 @@ services:
       ASYNC_RUNTIME_ENABLED: "true"
       WHATSAPP_BACKEND: ${WHATSAPP_BACKEND:?Set WHATSAPP_BACKEND}
       BUMPA_BACKEND: disabled
+      BUMPA_SCHEDULED_SYNC_ENABLED: ${BUMPA_SCHEDULED_SYNC_ENABLED:-false}
+      BUMPA_SCHEDULED_SYNC_LOCAL_HOUR: ${BUMPA_SCHEDULED_SYNC_LOCAL_HOUR:-3}
+      BUMPA_SCHEDULED_SYNC_WINDOW_DAYS: ${BUMPA_SCHEDULED_SYNC_WINDOW_DAYS:-30}
       AGENT_BACKEND: disabled
       # The scheduler only dispatches durable jobs. It must not inherit
       # tenant-facing tool or media capabilities from the shared API

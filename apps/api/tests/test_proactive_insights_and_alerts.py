@@ -173,6 +173,52 @@ def test_scheduler_uses_tenant_timezone_and_idempotent_calendar_slots() -> None:
         db.rollback()
 
 
+def test_scheduler_enqueues_one_store_local_bumpa_refresh_per_day() -> None:
+    settings = _settings(
+        bumpa_scheduled_sync_enabled=True,
+        bumpa_scheduled_sync_local_hour=3,
+        bumpa_scheduled_sync_window_days=30,
+    )
+    with SessionLocal() as db:
+        tenant, _, _ = _tenant_owner(
+            db, slug=f"sync-schedule-{new_id()[:8]}", timezone="Africa/Lagos"
+        )
+        connection = BumpaConnection(
+            id=new_id(),
+            tenant_id=tenant.id,
+            encrypted_api_key="encrypted",
+            scope_type="business_id",
+            scope_id="scope",
+            store_timezone="Africa/Lagos",
+            provider="bumpa",
+            status="active",
+        )
+        db.add(connection)
+        db.flush()
+        before_local_hour = datetime(2026, 7, 13, 1, 59, tzinfo=UTC)
+        due = datetime(2026, 7, 13, 2, 0, tzinfo=UTC)
+
+        assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=before_local_hour) == 0
+        assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=due) == 1
+        assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=due) == 0
+
+        job = db.scalar(
+            select(AsyncJob).where(
+                AsyncJob.tenant_id == tenant.id,
+                AsyncJob.kind == "bumpa.sync",
+            )
+        )
+        assert job is not None
+        assert job.payload == {
+            "tenant_id": tenant.id,
+            "connection_id": connection.id,
+            "boundary_revision": 1,
+            "date_from": "2026-06-14",
+            "date_to": "2026-07-13",
+        }
+        db.rollback()
+
+
 def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

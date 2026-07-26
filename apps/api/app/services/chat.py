@@ -508,9 +508,9 @@ def _provider_failure_response(freshness: object | None) -> str:
         else " No current business-data freshness timestamp was available."
     )
     return (
-        "I’m sorry—the consultant service is temporarily unavailable, so I couldn’t complete "
-        "this request or verify any external information. I haven’t guessed or taken any "
-        f"external action.{freshness_note} Please try this message again shortly."
+        "I’m sorry—your Bumpa Bestie AI assistant is currently unavailable, so I couldn’t "
+        "complete this request or verify any external information. I haven’t guessed or taken "
+        f"any external action.{freshness_note} Please try again later."
     )
 
 

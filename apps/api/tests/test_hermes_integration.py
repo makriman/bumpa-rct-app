@@ -28,6 +28,7 @@ from app.providers.hermes import (
     HermesEndpoint,
     HermesInvalidResponse,
     HermesProfileError,
+    HermesProviderCreditExhausted,
     HermesRateLimited,
     HermesReadiness,
     HermesResult,
@@ -880,6 +881,47 @@ def test_stream_maps_provider_statuses(
         )
 
 
+def test_stream_classifies_exhausted_provider_credit_without_exposing_error_text(
+    tmp_path: Path,
+) -> None:
+    stream = "\n".join(
+        (
+            'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}',
+            "",
+            (
+                'data: {"choices":[{"delta":{},"finish_reason":"error"}],'
+                '"error":{"message":"Your credit balance is too low; purchase credits."},'
+                '"hermes":{"failed":true,"error_code":"agent_error"}}'
+            ),
+            "",
+            "data: [DONE]",
+        )
+    )
+    client = HermesClient(
+        _settings(tmp_path),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                text=stream,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+    )
+
+    with pytest.raises(
+        HermesProviderCreditExhausted,
+        match="provider credit is exhausted",
+    ) as raised:
+        client.respond_stream(
+            HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
+            message="question",
+            business_context="bounded",
+            on_event=lambda _name, _data: None,
+        )
+    assert raised.value.code == "hermes_provider_credit_exhausted"
+    assert "purchase" not in str(raised.value)
+
+
 @pytest.mark.parametrize(
     ("body", "max_bytes", "match"),
     (
@@ -1002,7 +1044,7 @@ def test_profile_reconciliation_refresh_and_capacity_guards(tmp_path: Path) -> N
 
         reconciled = reconcile_profile_bundle(profile, tenant, settings)
         assert reconciled == target
-        assert "business consultant" in (target / "SOUL.md").read_text()
+        assert "AI assistant" in (target / "SOUL.md").read_text()
         assert not (target / ".no-skills").exists()
         readiness = refresh_profile_status(profile, settings, client=NotReadyClient())  # type: ignore[arg-type]
         assert readiness.ready is False
