@@ -14,7 +14,7 @@ describe the initial feature rollout but predates this application boundary and
 current reverification.
 
 The current application release is
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a`. It retains this temporary mapped
+`e383877ce26dfd3881249508636f0a26c1becbd2`. It retains this temporary mapped
 login while permitting the explicitly contained primary WhatsApp pilot described
 in [`docs/agent-capabilities.md`](agent-capabilities.md). This is not the
 long-term authentication design and it is not equivalent to per-user identity
@@ -39,8 +39,9 @@ temporary challenges and zero active acceptance sessions.
 
 WhatsApp verification, test-sender verification and proactive/daily/weekly
 WhatsApp delivery remained disabled throughout that historical acceptance. The
-current primary-pilot control plane has separate signed-ingress evidence, but no
-participant send, OTP or delivery receipt is claimed.
+current primary-pilot control plane has separate signed-ingress evidence and an
+approved recipient's text/image/PDF/video/native-voice delivery/read canary.
+Exact-release inbound media and OTP remain unclaimed.
 
 ## Authentication modes
 

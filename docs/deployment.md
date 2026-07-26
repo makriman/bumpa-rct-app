@@ -13,23 +13,24 @@ evidenced. A selected adapter is not unrestricted-traffic approval: every
 unsupported or externally blocked capability remains fail-closed until its full
 activation gate passes.
 
-As of 2026-07-25, application release
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a` is live on the five branded
-`bumpabestie.com` hosts through Cloudflare. Production SME consultant
-[PR 70](https://github.com/makriman/bumpa-rct-app/pull/70), exact-revision
-[main CI 30165914178](https://github.com/makriman/bumpa-rct-app/actions/runs/30165914178)
+As of 2026-07-25/26 UTC, application release
+`e383877ce26dfd3881249508636f0a26c1becbd2` is live on the five branded
+`bumpabestie.com` hosts through Cloudflare. Free research/local speech
+[PR 73](https://github.com/makriman/bumpa-rct-app/pull/73), scheduler isolation
+[PR 74](https://github.com/makriman/bumpa-rct-app/pull/74) and authoritative
+research citations
+[PR 75](https://github.com/makriman/bumpa-rct-app/pull/75) complete the production
+SME consultant successor. Exact-revision
+[main CI 30179017277](https://github.com/makriman/bumpa-rct-app/actions/runs/30179017277)
 and
-[publication 30166552591](https://github.com/makriman/bumpa-rct-app/actions/runs/30166552591)
-complete the application build and publication gates. All eight promoted indexes
-and their OCI revision labels match the application revision.
+[publication 30179563912](https://github.com/makriman/bumpa-rct-app/actions/runs/30179563912)
+passed. All eight promoted indexes, their OCI revision labels and exact-index
+security scans match the application revision.
 
-The Worker-only temp-directory fix in
-[PR 71](https://github.com/makriman/bumpa-rct-app/pull/71) is deployed separately
-as Cloudflare Worker version `0f5a78d1-660a-41e9-b75d-a970c5933330`;
-[follow-up main CI 30167202934](https://github.com/makriman/bumpa-rct-app/actions/runs/30167202934)
-passed the full quality and image-security matrix. The redacted production
+The Sandbox Worker temp-directory correction remains deployed as Cloudflare
+Worker version `0f5a78d1-660a-41e9-b75d-a970c5933330`. The redacted production
 transcript is
-[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its later
+[`docs/release-evidence-e383877.md`](release-evidence-e383877.md). Its later
 operations/evidence commit is not a separately promoted application release.
 
 Production runs all ten intended services at schema
@@ -56,17 +57,22 @@ widening the helper boundary.
 All five isolated Hermes profiles expose 19 tenant-bound managed tools and
 completed live Claude requests from synthetic prompts. Grounded period and
 multi-turn canaries passed, including exact store-local “last week” resolution.
-A delegated-agent canary and a local scheduled-task call through the same
-tenant-bound MCP profile also passed. Normal tenant-scoped redacted context
-remained inside Hermes; prompt/response bodies were omitted from evidence, and
-cleanup left zero active canary sessions or scheduled jobs.
+Keyless DDGS research produced the current cited Ghana expansion analysis using
+official primary sources and six tenant business-data tools. Hermes-local
+Faster-Whisper/Piper passed transcription, native Ogg/Opus voice and honest
+unsupported-language fallback canaries. A delegated-agent canary and a local
+scheduled-task call through the same tenant-bound MCP profile also passed.
+Normal tenant-scoped redacted context remained inside Hermes; prompt/response
+bodies were omitted from evidence, and cleanup left zero active canary sessions
+or scheduled jobs.
 
 The verified primary Meta sender, mapped five-user pilot, multimodal routing,
 read/typing work and bounded progress behavior are enabled. A signed public
-webhook canary passed without creating an outbound message. Real participant
-media and delivery/receipt canaries remain gated on explicit research-consent
-choices and an approved internal test recipient. WhatsApp OTP and proactive
-daily/weekly delivery remain disabled.
+webhook canary passed without creating an outbound message. A separately
+approved mapped recipient received audited text, image, PDF, H.264 video and
+native local voice-note canaries. Text/image/PDF/voice reached `read`; video
+reached `delivered`. Real inbound-media replies remain pending and are not
+claimed. WhatsApp OTP and proactive daily/weekly delivery remain disabled.
 
 All five DNS records remain Cloudflare-proxied; Full (strict), Always Use HTTPS,
 TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
@@ -74,13 +80,12 @@ TLS 1.2 minimum and TLS 1.3 are enabled. TLS 1.0/1.1 are rejected on every host,
 pages now ship route-specific canonical/Open Graph/Twitter metadata, homepage
 JSON-LD, robots, sitemap, manifest, favicons and the Bumpa Bestie brand assets; private surfaces
 enforce `X-Robots-Tag: noindex`. Provider selectors and credentials never imply
-unrestricted traffic approval. The successor candidate replaces Tavily and
-ElevenLabs with keyless DDGS and Hermes-local Whisper/Piper. Google/Meta OAuth is
-coming soon. Signed consent, an internal media recipient and controlled-pilot
-privacy/security approval have been received; production recording and real-media
-acceptance remain. Encrypted off-host durability and external alert delivery are
-explicitly deferred for this pilot and remain required before public/unrestricted
-launch.
+unrestricted traffic approval. Production uses keyless DDGS and Hermes-local
+Whisper/Piper; no Tavily or ElevenLabs dependency is active. Google/Meta OAuth is
+coming soon. All five signed consent decisions and the controlled-pilot
+privacy/security approval are recorded. Encrypted off-host durability and
+external alert delivery are explicitly deferred for this pilot and remain
+required before public/unrestricted launch.
 
 Do not change a provider selector from `disabled` merely because a credential has
 been obtained. Use the activation gates in `docs/build-plan-compliance.md`.
@@ -712,10 +717,10 @@ configured and the journal contains a separately verified off-host object
 ID/checksum. See `docs/runbook.md`.
 
 The exact-application-release local backup is recorded in
-[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its guarded
+[`docs/release-evidence-e383877.md`](release-evidence-e383877.md). Its guarded
 systemd wrapper, five expected checksum entries, six-file inventory, SHA-256
 replay and format-3 manifest all passed; the manifest binds application revision
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a`, schema
+`e383877ce26dfd3881249508636f0a26c1becbd2`, schema
 `0018_agent_capability_audit`, PostgreSQL/pg_dump 16.14 and the exact backup
 digest. All ten services resumed with all nine configured healthchecks healthy.
 Off-host copy, external backup-alert delivery and remote restore evidence remain

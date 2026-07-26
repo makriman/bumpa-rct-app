@@ -145,11 +145,11 @@ separate destructive restore profile adds `DAC_OVERRIDE` and is never a standing
 service. Production enables `no-new-privileges`, and exact image references are
 required. The release workflow publishes commit-SHA-tagged images with
 provenance and SBOM, then scans each exact registry digest. Production SME
-consultant [PR 70](https://github.com/makriman/bumpa-rct-app/pull/70),
-[CI 30165914178](https://github.com/makriman/bumpa-rct-app/actions/runs/30165914178)
-and [publish run 30166552591](https://github.com/makriman/bumpa-rct-app/actions/runs/30166552591)
+consultant successor [PR 75](https://github.com/makriman/bumpa-rct-app/pull/75),
+[CI 30179017277](https://github.com/makriman/bumpa-rct-app/actions/runs/30179017277)
+and [publish run 30179563912](https://github.com/makriman/bumpa-rct-app/actions/runs/30179563912)
 passed for all eight images deployed at application release
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a`. Redis remains pinned to its
+`e383877ce26dfd3881249508636f0a26c1becbd2`. Redis remains pinned to its
 reviewed upstream digest.
 
 ## Research governance
@@ -198,8 +198,8 @@ completed a current live Claude request from a synthetic prompt; normal
 tenant-scoped redacted context remained inside Hermes and prompt/response bodies
 were omitted from evidence. Five same-profile health checks passed, and all 20
 cross-profile gateway credential attempts were rejected. Grounded-period,
-multi-turn, delegated-agent and scheduled-task canaries also passed; cleanup
-left zero active canary sessions or jobs. Bumpa is accepted partial at 8/10
+multi-turn, Ghana citation, local speech, delegated-agent and scheduled-task
+canaries also passed; cleanup left zero active canary sessions or jobs. Bumpa is accepted partial at 8/10
 analytics datasets plus orders for
 stores 1–4 and degraded at 7/10 plus orders for store 5. Store 3's slow
 `products.overview` succeeds under the scoped 90-second policy; the same dataset
@@ -210,10 +210,11 @@ Current read-only Meta evidence shows the primary Cloud API sender is
 code-verified, its application is subscribed to the WABA, and five mapped pilot
 identities exist. Invalid signed-webhook ingress was rejected; valid synthetic
 ingress and replay dedupe passed without creating an outbound message. The
-primary/multimodal/progress control plane is enabled, but no participant message,
-real media send, OTP or delivery/read receipt is claimed. No approved
-authentication template exists, so the sender is not OTP- or unrestricted-
-launch-ready.
+primary/multimodal/progress control plane is enabled. An approved mapped
+recipient received audited text, image, PDF, finalized H.264 video and native
+local voice; four reached `read` and video reached `delivered`. Exact-release
+inbound media and OTP are not claimed. No approved authentication template
+exists, so the sender is not OTP- or unrestricted-launch-ready.
 `OFFSITE_BACKUP_SCRIPT` remains unset and external alert delivery is absent. Those
 two residual risks were explicitly accepted for the controlled five-business
 pilot on 2026-07-25; neither is complete, and both remain gates before public or
