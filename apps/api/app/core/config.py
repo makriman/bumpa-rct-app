@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     whatsapp_rate_limit: int = Field(default=12, ge=1, le=1000)
     bumpa_sync_rate_limit_window_seconds: int = Field(default=3600, ge=60, le=86_400)
     bumpa_sync_rate_limit: int = Field(default=6, ge=1, le=100)
+    bumpa_scheduled_sync_enabled: bool = False
+    bumpa_scheduled_sync_local_hour: int = Field(default=3, ge=0, le=23)
+    bumpa_scheduled_sync_window_days: int = Field(default=30, ge=1, le=367)
     research_report_rate_limit_window_seconds: int = Field(default=3600, ge=60, le=86_400)
     research_report_rate_limit: int = Field(default=10, ge=1, le=100)
     local_otp_code: str = "246810"

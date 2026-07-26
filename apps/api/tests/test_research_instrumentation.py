@@ -320,7 +320,7 @@ def test_failed_hermes_call_persists_only_sanitized_diagnostics_and_events(
     )
 
     assert conversation.id == inbound.conversation_id == outbound.conversation_id
-    assert "consultant service is temporarily unavailable" in outbound.content
+    assert "Bumpa Bestie AI assistant is currently unavailable" in outbound.content
     assert "haven’t guessed or taken any external action" in outbound.content
     assert len(db.scalars(select(AgentMessage)).all()) == 2
     system_error = db.scalar(select(SystemError))

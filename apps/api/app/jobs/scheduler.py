@@ -5,7 +5,7 @@ import os
 import signal
 import socket
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.time import utcnow
-from app.db.models import HermesProfile, Tenant
+from app.db.models import BumpaConnection, HermesProfile, Tenant
 from app.db.session import SessionLocal, set_security_context
 from app.jobs.runtime import (
     AsyncRuntimeConfig,
@@ -40,16 +40,17 @@ def run_cycle(
     *,
     config: AsyncRuntimeConfig,
     wake_queue: RedisWakeQueue,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     set_security_context(session, privileged=True)
     _ensure_daily_maintenance(session)
     settings = get_settings()
+    scheduled_syncs = _ensure_bumpa_sync_jobs(session, settings=settings)
     _ensure_proactive_insight_jobs(session, settings=settings)
     _ensure_operational_alert_jobs(session, settings=settings)
     recovered = recover_stale_jobs(session, config)
     wakeups = recover_stale_wakeups(session, config)
     dispatched = dispatch_due_jobs(session, wake_queue, limit=config.dispatch_batch_size)
-    return recovered, wakeups, dispatched
+    return scheduled_syncs, recovered, wakeups, dispatched
 
 
 def _ensure_daily_maintenance(session: Session) -> None:
@@ -71,6 +72,59 @@ def _ensure_daily_maintenance(session: Session) -> None:
         idempotency_key=f"operational-retention:{day}",
         max_attempts=3,
     )
+
+
+def _ensure_bumpa_sync_jobs(
+    session: Session,
+    *,
+    settings: Settings,
+    now: datetime | None = None,
+) -> int:
+    """Create one rolling Bumpa refresh per active connection and store-local day."""
+
+    if not settings.bumpa_scheduled_sync_enabled:
+        return 0
+    current = _as_utc(now or utcnow())
+    connections = session.scalars(
+        select(BumpaConnection)
+        .join(Tenant, Tenant.id == BumpaConnection.tenant_id)
+        .where(
+            BumpaConnection.status == "active",
+            Tenant.status == "active",
+        )
+        .order_by(BumpaConnection.id.asc())
+    ).all()
+    created = 0
+    for connection in connections:
+        try:
+            local_now = current.astimezone(ZoneInfo(connection.store_timezone))
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning("bumpa_sync_schedule_invalid_timezone")
+            continue
+        if local_now.hour < settings.bumpa_scheduled_sync_local_hour:
+            continue
+        date_to = local_now.date()
+        date_from = date_to - timedelta(days=settings.bumpa_scheduled_sync_window_days - 1)
+        payload = {
+            "tenant_id": connection.tenant_id,
+            "connection_id": connection.id,
+            "boundary_revision": connection.boundary_revision,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+        }
+        _, was_created = enqueue_job(
+            session,
+            kind="bumpa.sync",
+            tenant_id=connection.tenant_id,
+            idempotency_key=(
+                "scheduled-bumpa-sync:"
+                f"{connection.id}:{connection.boundary_revision}:{date_to.isoformat()}"
+            ),
+            payload=payload,
+            max_attempts=5,
+        )
+        created += int(was_created)
+    return created
 
 
 def _ensure_proactive_insight_jobs(
@@ -184,13 +238,14 @@ def main() -> None:
         try:
             wake_queue.heartbeat("scheduler", scheduler_id)
             with SessionLocal() as session:
-                recovered, wakeups, dispatched = run_cycle(
+                scheduled_syncs, recovered, wakeups, dispatched = run_cycle(
                     session, config=config, wake_queue=wake_queue
                 )
-            if recovered or wakeups or dispatched:
+            if scheduled_syncs or recovered or wakeups or dispatched:
                 logger.info(
                     "scheduler_cycle",
                     extra={
+                        "scheduled_bumpa_syncs": scheduled_syncs,
                         "recovered": recovered,
                         "redispatched_wakeups": wakeups,
                         "dispatched": dispatched,

@@ -914,7 +914,8 @@ def _process_message(
             purpose=f"research-consent-request:{settings.research_consent_policy_version}",
             phone=phone,
             body=(
-                "Bumpa Bestie now offers broader consultant, research and media features. "
+                "Bumpa Bestie now offers broader AI-assistant, business guidance, research and "
+                "media features. "
                 "May we include your conversation data in the RCT research? Choosing no will "
                 "not disable any product feature."
             ),
