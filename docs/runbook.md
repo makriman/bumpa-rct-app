@@ -4,7 +4,7 @@
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,
 Hermes/Claude and the durable worker/scheduler runtime. Application release
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a` is deployed on the branded
+`e383877ce26dfd3881249508636f0a26c1becbd2` is deployed on the branded
 `bumpabestie.com` hosts with all ten services at schema
 `0018_agent_capability_audit`. The current contained boundary uses temporary
 mapped-collaborator web sign-in alongside the mapped primary WhatsApp pilot.
@@ -29,7 +29,7 @@ Never:
 
 The active temporary mapped-login boundary is documented in
 [`docs/temporary-web-login.md`](temporary-web-login.md) and evidenced in
-[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md). Its containment
+[`docs/release-evidence-e383877.md`](release-evidence-e383877.md). Its containment
 boundary is `AUTH_LOGIN_MODE=temporary_static_pin`, the explicitly enabled
 primary pilot and disabled OTP/proactive/daily/weekly delivery. The PIN request
 is provider-free: it creates a ten-minute challenge for an eligible mapping and
@@ -171,9 +171,10 @@ Current Hermes evidence records five live completions from a synthetic prompt
 through five active profiles, with normal tenant-scoped redacted context retained
 inside Hermes and bodies omitted from evidence; five authenticated same-profile
 health probes, 20 rejected cross-profile gateway credential attempts,
-grounded-period, multi-turn, delegation and scheduled-task canaries also passed.
-Cleanup left no canary session or scheduled job. Runtime/filesystem/context
-contracts supply the broader isolation evidence. Current Bumpa evidence records four
+grounded-period, multi-turn, current Ghana citation, local speech, delegation and
+scheduled-task canaries also passed. Cleanup left no canary session or scheduled
+job. Runtime/filesystem/context contracts supply the broader isolation evidence.
+Current Bumpa evidence records four
 accepted-partial stores at 8/10 analytics datasets plus orders. The fifth store is
 durably degraded at 7/10 plus orders because `products.overview` alone receives no
 provider response inside the scoped 90-second policy. Store 3's previously slow
@@ -183,10 +184,11 @@ Missing or failed values remain unavailable, not zero.
 
 Current read-only Meta evidence shows the primary Cloud API sender is
 code-verified and its application is WABA-subscribed. The signed synthetic
-ingress/replay canary passed without outbound delivery. No participant message,
-real media send or delivery/read receipt is claimed. No approved authentication
-template exists; `supports_otp=false`, and proactive outbound is disabled. These
-facts do not prove Meta delivery or complete Bumpa sync.
+ingress/replay canary passed. An approved mapped recipient received idempotent
+text, PNG, PDF, finalized H.264 video and native Ogg/Opus voice canaries.
+Text/image/PDF/voice reached `read`; video reached `delivered`. Exact-release
+inbound media awaits a reply and is not claimed. No approved authentication
+template exists; `supports_otp=false`, and proactive outbound is disabled.
 
 ## Field-encryption key rotation
 
@@ -349,10 +351,10 @@ resume.
 
 Older release recovery points remain historical evidence. The current
 application release's guarded local backup is recorded in
-[`docs/release-evidence-9047dae.md`](release-evidence-9047dae.md): its five
+[`docs/release-evidence-e383877.md`](release-evidence-e383877.md): its five
 checksums replayed successfully, its six-file inventory was exact, and the
 format-3 manifest binds revision
-`9047dae7f884ee953de842c2d8bc8c456e48ae7a`, schema
+`e383877ce26dfd3881249508636f0a26c1becbd2`, schema
 `0018_agent_capability_audit`, PostgreSQL/pg_dump 16.14 and the current exact
 backup digest. All ten services resumed with all nine configured health checks
 healthy. Final origin/public smoke, timers, firewall/UFW and
