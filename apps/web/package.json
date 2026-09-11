@@ -44,7 +44,7 @@
     "lighthouse": "13.4.1",
     "openapi-typescript": "7.10.1",
     "prettier": "3.4.2",
-    "sharp": "0.35.3",
+    "sharp": "0.35.4",
     "typescript": "5.7.2",
     "vitest": "4.1.10"
   },
@@ -52,6 +52,6 @@
     "brace-expansion": "5.0.8",
     "js-yaml": "4.3.0",
     "postcss": "8.5.18",
-    "sharp": "0.35.3"
+    "sharp": "0.35.4"
   }
 }
