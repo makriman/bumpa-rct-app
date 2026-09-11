@@ -46,7 +46,7 @@
     "prettier": "3.4.2",
     "sharp": "0.35.3",
     "typescript": "5.7.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "overrides": {
     "brace-expansion": "5.0.8",
