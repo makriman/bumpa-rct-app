@@ -42,7 +42,7 @@
     "openapi-typescript": "7.10.1",
     "prettier": "3.4.2",
     "typescript": "5.7.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.11"
   },
   "optionalDependencies": {
     "sharp": "0.35.3"
