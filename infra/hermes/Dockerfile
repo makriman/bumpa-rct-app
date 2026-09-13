@@ -1,4 +1,4 @@
-FROM nousresearch/hermes-agent@sha256:f7b35053268f532f98955195c909f15a230470fbcbdacaa9fdecb95707dad04a AS runtime
+FROM nousresearch/hermes-agent@sha256:c470745df0a2263178f27ed5cb900f76c34a1fbc33742f787838b5d86e7a48ac AS runtime
 
 USER root
 # The immutable upstream release currently contains fixable high/critical OS,
