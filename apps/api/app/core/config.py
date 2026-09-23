@@ -15,6 +15,19 @@ def _default_mcp_endpoint() -> str:
     return "http://api:" + str(8_000) + "/internal/mcp/"
 
 
+_PRODUCTION_SECRET_MARKERS = ("local-only", "ADD_VALUE", "change-me")
+
+
+def _production_secret_rejected(value: str, *, minimum: int) -> bool:
+    """Reject secrets that would fail scripts/validate_env.sh.
+
+    The shell gate is not the only way the API process starts. Production
+    settings must enforce the same length and placeholder rules themselves.
+    """
+
+    return len(value) < minimum or any(marker in value for marker in _PRODUCTION_SECRET_MARKERS)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -408,11 +421,12 @@ class Settings(BaseSettings):
                     "SESSION_COOKIE_DOMAIN cannot be configured"
                 )
             insecure = (
-                self.jwt_secret.startswith("local-only"),
-                self.otp_secret.startswith("local-only"),
+                _production_secret_rejected(self.jwt_secret, minimum=24),
+                _production_secret_rejected(self.otp_secret, minimum=24),
                 self.field_encryption_key.startswith("local-only"),
                 self.research_pseudonym_key.startswith("local-only"),
                 self.onboarding_integrity_key.startswith("local-only"),
+                _production_secret_rejected(self.internal_service_token, minimum=24),
             )
             if any(insecure):
                 raise ValueError("Production secrets must be explicitly configured")
@@ -728,8 +742,7 @@ class Settings(BaseSettings):
 
     def _validate_agent_capabilities(self) -> None:
         if (self.agent_capabilities_v2 or self.hermes_tools_enabled) and (
-            self.internal_service_token.startswith("local-only")
-            or len(self.internal_service_token) < 32
+            _production_secret_rejected(self.internal_service_token, minimum=32)
         ):
             raise ValueError(
                 "Agent capabilities require an explicitly configured INTERNAL_SERVICE_TOKEN"

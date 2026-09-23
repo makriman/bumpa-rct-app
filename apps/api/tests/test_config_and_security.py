@@ -64,6 +64,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
             field_encryption_key="f" * 40,
             research_pseudonym_key="p" * 40,
             onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="disabled",
@@ -79,6 +80,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
         field_encryption_key="f" * 40,
         research_pseudonym_key="p" * 40,
         onboarding_integrity_key="i" * 40,
+        internal_service_token="t" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="disabled",
@@ -114,6 +116,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
             field_encryption_key="f" * 40,
             research_pseudonym_key="p" * 40,
             onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             dev_fixed_otp="246810",
@@ -130,6 +133,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
             field_encryption_key="f" * 40,
             research_pseudonym_key="p" * 40,
             onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="meta",
@@ -143,6 +147,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
         field_encryption_key="f" * 40,
         research_pseudonym_key="p" * 40,
         onboarding_integrity_key="i" * 40,
+        internal_service_token="t" * 40,
         expose_local_otp=False,
         seed_demo_data=False,
         whatsapp_backend="meta",
@@ -163,6 +168,83 @@ def test_root_environment_aliases_and_production_guards() -> None:
     assert configured_meta.effective_meta_app_secret == "s" * 32
     assert configured_meta.effective_meta_system_user_access_token == "t" * 40
 
+    with pytest.raises(ValidationError, match="Production secrets"):
+        Settings(
+            app_env="production",
+            jwt_secret="x",  # noqa: S106 - weak fixture
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+        )
+    with pytest.raises(ValidationError, match="Production secrets"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="deployed-change-me-otp-secret",  # noqa: S106 - weak fixture
+            field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+        )
+    with pytest.raises(ValidationError, match="Production secrets"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+        )
+    with pytest.raises(ValidationError, match="Agent capabilities require"):
+        Settings(
+            app_env="production",
+            jwt_secret="j" * 40,
+            otp_secret="o" * 40,
+            field_encryption_key="f" * 40,
+            research_pseudonym_key="p" * 40,
+            onboarding_integrity_key="i" * 40,
+            internal_service_token="s" * 24,
+            expose_local_otp=False,
+            seed_demo_data=False,
+            whatsapp_backend="disabled",
+            bumpa_backend="disabled",
+            agent_backend="disabled",
+            agent_capabilities_v2=True,
+        )
+    accepted = Settings(
+        app_env="production",
+        jwt_secret="j" * 24,
+        otp_secret="o" * 24,
+        field_encryption_key="f" * 40,
+        research_pseudonym_key="p" * 40,
+        onboarding_integrity_key="i" * 40,
+        internal_service_token="s" * 24,
+        expose_local_otp=False,
+        seed_demo_data=False,
+        whatsapp_backend="disabled",
+        bumpa_backend="disabled",
+        agent_backend="disabled",
+    )
+    assert len(accepted.jwt_secret) == 24
+    assert len(accepted.internal_service_token) == 24
+
     with pytest.raises(ValidationError, match="Production cannot use mock providers"):
         Settings(
             app_env="production",
@@ -171,6 +253,7 @@ def test_root_environment_aliases_and_production_guards() -> None:
             field_encryption_key="f" * 40,
             research_pseudonym_key="p" * 40,
             onboarding_integrity_key="i" * 40,
+            internal_service_token="t" * 40,
             expose_local_otp=False,
             seed_demo_data=False,
             whatsapp_backend="mock",

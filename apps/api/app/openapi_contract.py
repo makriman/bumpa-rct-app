@@ -28,6 +28,7 @@ _CONTRACT_SETTINGS: Mapping[str, Any] = {
     "field_encryption_key": "contract-generation-field-key-00000000000",
     "research_pseudonym_key": "contract-generation-pseudonym-key-000000000",
     "onboarding_integrity_key": "contract-generation-onboarding-key-00000000",
+    "internal_service_token": "contract-generation-service-token-000000",
     "auth_rate_limit_enabled": True,
     "operation_rate_limit_enabled": True,
     "expose_local_otp": False,
