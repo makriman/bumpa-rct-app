@@ -8,13 +8,32 @@ updates:
     groups:
       web-development:
         dependency-type: development
-  - package-ecosystem: pip
-    directory: /apps/api
+  - package-ecosystem: npm
+    directory: /apps/admin-web
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: docker
-    directory: /
+    groups:
+      admin-web-development:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /apps/research-web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      research-web-development:
+        dependency-type: development
+  - package-ecosystem: npm
+    directory: /apps/sandbox-worker
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      sandbox-worker-development:
+        dependency-type: development
+  - package-ecosystem: pip
+    directory: /apps/api
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -25,6 +44,21 @@ updates:
     open-pull-requests-limit: 5
   - package-ecosystem: docker
     directory: /apps/web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /apps/admin-web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /apps/research-web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: docker
+    directory: /apps/sandbox-worker
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
