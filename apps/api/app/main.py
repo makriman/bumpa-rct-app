@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import Settings, get_settings
+from app.core.cors import credentialed_cors_origins
 from app.core.logging import configure_logging, correlation_id_var
 from app.core.request_context import audit_request_context_var, build_audit_request_context
 from app.db.session import SessionLocal, create_schema, set_security_context
@@ -98,7 +99,7 @@ def create_app(*, settings_config: Settings | None = None) -> FastAPI:
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=config.effective_cors_origins,
+        allow_origins=credentialed_cors_origins(config),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[

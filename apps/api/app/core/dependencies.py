@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 from fastapi import Cookie, Depends, Header, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.cors import credentialed_cors_origins, normalized_browser_origin
 from app.core.security import decode_access_token
 from app.db.models import PlatformRole, Tenant, TenantMembership, User
 from app.db.session import get_db, set_security_context
@@ -59,35 +59,16 @@ def enforce_cookie_origin(request: Request, settings: Settings) -> None:
         if _private_peer(request):
             return
         raise HTTPException(status_code=403, detail="Request origin could not be verified")
-    source_origin = _normalized_origin(source)
-    allowed = {
-        origin
-        for configured in settings.effective_cors_origins
-        if (origin := _normalized_origin(configured)) is not None
-    }
-    request_origin = _normalized_origin(str(request.base_url))
+    source_origin = normalized_browser_origin(source)
+    # Use the credentialed allowlist rather than the raw setting. A wildcard or
+    # null value fails closed, and non-local HTTP origins are not treated as
+    # trusted just because they were copied into the environment.
+    allowed = set(credentialed_cors_origins(settings))
+    request_origin = normalized_browser_origin(str(request.base_url))
     if request_origin:
         allowed.add(request_origin)
     if source_origin is None or source_origin not in allowed:
         raise HTTPException(status_code=403, detail="Request origin is not allowed")
-
-
-def _normalized_origin(value: str) -> str | None:
-    try:
-        parsed = urlsplit(value)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            return None
-        port = parsed.port
-    except ValueError:
-        return None
-    default_port = 443 if parsed.scheme == "https" else 80
-    suffix = f":{port}" if port is not None and port != default_port else ""
-    return f"{parsed.scheme}://{parsed.hostname.lower()}{suffix}"
 
 
 def _private_peer(request: Request) -> bool:
