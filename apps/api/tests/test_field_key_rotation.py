@@ -54,6 +54,7 @@ def _production_settings(**overrides: object) -> Settings:
         "field_encryption_old_keys": {"key-2026-01": OLD_SECRET},
         "research_pseudonym_key": "p" * 40,
         "onboarding_integrity_key": "i" * 40,
+        "internal_service_token": "t" * 40,
         "expose_local_otp": False,
         "seed_demo_data": False,
         "whatsapp_backend": "disabled",

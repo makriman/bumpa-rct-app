@@ -39,6 +39,7 @@ def production_settings_values() -> dict[str, object]:
         "field_encryption_key": "f" * 40,
         "research_pseudonym_key": "p" * 40,
         "onboarding_integrity_key": "i" * 40,
+        "internal_service_token": "t" * 40,
         "expose_local_otp": False,
         "seed_demo_data": False,
         "auth_login_mode": "temporary_static_pin",

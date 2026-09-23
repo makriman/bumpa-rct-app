@@ -401,6 +401,7 @@ jobs:
             apps/web/package-lock.json
             apps/admin-web/package-lock.json
             apps/research-web/package-lock.json
+            apps/sandbox-worker/package-lock.json
       - name: Audit production and test web dependencies
         run: |
           npm --prefix apps/web audit --omit=dev --audit-level=high
@@ -409,3 +410,5 @@ jobs:
           npm --prefix apps/admin-web audit --audit-level=high
           npm --prefix apps/research-web audit --omit=dev --audit-level=high
           npm --prefix apps/research-web audit --audit-level=high
+          npm --prefix apps/sandbox-worker audit --omit=dev --audit-level=high
+          npm --prefix apps/sandbox-worker audit --audit-level=high
