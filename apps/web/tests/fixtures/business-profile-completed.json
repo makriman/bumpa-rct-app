@@ -1,0 +1,117 @@
+{
+  "business_name": "E2E Store",
+  "can_edit": true,
+  "status": "completed",
+  "step": "done",
+  "revision": 9,
+  "answers": {
+    "offering": "Women’s shoes and repairs",
+    "customers": "Working women in Ibadan",
+    "channels": {
+      "value": ["WhatsApp", "Physical shop", "Other"],
+      "detail": "Market stall"
+    },
+    "monthly_orders": "It varies a lot / I’m not sure",
+    "team_size": "Just me (1 person)",
+    "goal": "Get more customers",
+    "challenge": "Delivery costs put people off ordering"
+  },
+  "draft": {},
+  "questions": [
+    {
+      "key": "offering",
+      "label": "Products or services",
+      "title": "What do you sell or do?",
+      "help": "Products, services, or both — tell me in your own words.",
+      "placeholder": "For example: I sell ready-to-wear clothes and do alterations.",
+      "kind": "text"
+    },
+    {
+      "key": "customers",
+      "label": "Your customers",
+      "title": "Who usually buys from you?",
+      "help": "Who are they, and where are they? It’s okay if you’re still figuring this out.",
+      "placeholder": "For example: working women in Ibadan, mostly buying on WhatsApp.",
+      "kind": "text"
+    },
+    {
+      "key": "channels",
+      "label": "Where you sell",
+      "title": "Where do customers buy from you?",
+      "help": "Choose all that apply. Online, offline, or both.",
+      "kind": "multi",
+      "options": [
+        "WhatsApp",
+        "Instagram",
+        "TikTok",
+        "Facebook",
+        "Bumpa website/store",
+        "Physical shop",
+        "Marketplace such as Jumia",
+        "Other"
+      ],
+      "placeholder": "For example: market stall, referrals, or home visits."
+    },
+    {
+      "key": "monthly_orders",
+      "label": "Orders in a typical month",
+      "title": "About how many orders do you get in a month?",
+      "help": "An estimate is fine. Count customer orders or bookings, not individual items.",
+      "kind": "single",
+      "options": [
+        "0–5",
+        "6–20",
+        "21–50",
+        "51–100",
+        "More than 100",
+        "It varies a lot / I’m not sure"
+      ]
+    },
+    {
+      "key": "team_size",
+      "label": "People in your business",
+      "title": "How many people work in your business?",
+      "help": "Include yourself, part-time staff, and anyone who regularly helps — paid or unpaid.",
+      "kind": "single",
+      "options": [
+        "Just me (1 person)",
+        "2–3 people",
+        "4–5 people",
+        "6–10 people",
+        "More than 10 people"
+      ]
+    },
+    {
+      "key": "goal",
+      "label": "Your priority",
+      "title": "What would you most like to improve right now?",
+      "help": "Pick the one that matters most today. We can work on the others later.",
+      "kind": "single",
+      "options": [
+        "Get more customers",
+        "Increase sales",
+        "Get existing customers to buy again",
+        "Improve my marketing/content",
+        "Improve my prices",
+        "Manage stock better",
+        "Manage money better",
+        "Save time running my business",
+        "Something else"
+      ],
+      "placeholder": "What would make the biggest difference to your business?"
+    },
+    {
+      "key": "challenge",
+      "label": "What’s getting in the way",
+      "title": "What’s making that difficult at the moment?",
+      "help": "No perfect answer needed. Tell me what running the business feels like right now.",
+      "placeholder": "For example: people ask for prices but don’t order, or delivery costs put them off.",
+      "kind": "text"
+    }
+  ],
+  "order_hint": null,
+  "suggestions": [
+    "Here’s what my business sells or does: Women’s shoes and repairs. What can I do this week to get more customers?",
+    "I buy an item for ₦12,000 and sell it for ₦18,000. How do I know if my price is right?"
+  ]
+}

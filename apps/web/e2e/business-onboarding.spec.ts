@@ -1,6 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 import initialProfile from "../tests/fixtures/business-profile.json";
+import completedProfile from "../tests/fixtures/business-profile-completed.json";
 import { apiPath, fulfillSession, grantTestSession, json } from "./support";
 
 for (const simulateFailure of [false, true]) {
@@ -55,6 +56,7 @@ for (const simulateFailure of [false, true]) {
             profile.status = "completed";
             profile.answers = { ...profile.draft };
             profile.draft = {};
+            profile.suggestions = completedProfile.suggestions;
           }
         }
         await json(route, profile);
@@ -156,9 +158,9 @@ for (const simulateFailure of [false, true]) {
     ).toBeVisible();
     expect(Object.keys(profile.answers)).toHaveLength(7);
     const firstUsefulQuestion = page.getByRole("button", {
-      name: "Help me get more customers this week.",
+      name: completedProfile.suggestions[0],
     });
-    await expect(firstUsefulQuestion).toBeInViewport();
+    await expect(firstUsefulQuestion).toBeInViewport({ ratio: 1 });
     const savedDetails = page.locator(".onboarding-saved-details");
     await expect(savedDetails).not.toHaveAttribute("open");
     await savedDetails.getByText("Review my saved business details").click();

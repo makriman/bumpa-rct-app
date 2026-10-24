@@ -41,7 +41,7 @@ export function ChatWorkspace({
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const onboarding = useBusinessOnboarding(
-    !initialConversationId && state.messages.length === 0,
+    state.phase === "empty" && state.messages.length === 0,
   );
   const setupActive =
     !!onboarding.profile?.can_edit &&
