@@ -130,6 +130,16 @@ WELCOME = (
     "We’ll take them one at a time. You can answer in English or Pidgin.\n\n"
     "Reply LET’S START to begin, or LATER to ask me something first."
 )
+PAUSE_COMMANDS = {
+    "later",
+    "pause",
+    "skip for now",
+    "not now",
+    "stop",
+    "i no get time now",
+    "make we do am later",
+    "we go do am later",
+}
 
 
 class OnboardingCommand(BaseModel):
@@ -528,13 +538,31 @@ def text_prompt(state: dict[str, Any], hint: dict[str, str] | None = None) -> st
     if state["status"] in {"not_started", "paused"}:
         return WELCOME
     if state["status"] == "completed":
+        first_steps = {
+            "Get more customers": "Start with one clear offer: who it helps, the total price and how to order or book.",
+            "Increase sales": "For the next enquiry, make the total cost, delivery or pickup and next step clear.",
+            "Get existing customers to buy again": "Choose one useful reason for a past customer to return, such as a restock or a follow-up service.",
+            "Improve my marketing/content": "Start with one clear message showing what the customer gets, the full price and how to order or book.",
+            "Improve my prices": "List materials or stock, your time, packaging and delivery costs before deciding your margin.",
+            "Manage stock better": "List what runs out and what sits unsold before deciding what to buy next.",
+            "Manage money better": "Start a simple daily record of money received and money spent. Cash in hand is not the same as profit.",
+            "Save time running my business": "Pick one repeated task. We can turn its steps into a checklist or a reusable message.",
+        }
+        first_step = first_steps.get(
+            display(state["answers"].get("goal", "")),
+            "Choose one small action to try this week and one sign that would show it helped.",
+        )
         return (
             "Your business profile is saved 👍🏽 I’ll keep it in mind when giving advice. "
-            "Tell me whenever something changes.\n\nHow can I help you grow your business today?\n\n"
-            + "\n\n".join(suggestions(state["answers"]))
+            "Tell me whenever something changes.\n\n"
+            + first_step
+            + "\n\nHow can I help you put that into practice?"
         )
     if state["step"] == "review":
-        lines = [f"• {q['label']}: {display(state['draft'][q['key']])}" for q in QUESTIONS]
+        lines = [
+            f"{i}. {q['label']}: {display(state['draft'][q['key']])}"
+            for i, q in enumerate(QUESTIONS, 1)
+        ]
         return (
             "Thanks — here’s what I’ve learned about your business:\n\n"
             + "\n".join(lines)
@@ -614,6 +642,21 @@ def chat_reply(
             if cmd == "confirm_update"
             else "Okay, I’ve kept your business profile as it was."
         )
+    if normalized in PAUSE_COMMANDS:
+        if state["status"] in {"in_progress", "review"}:
+            apply_command(
+                db,
+                tenant,
+                user_id,
+                OnboardingCommand(action="pause", expected_revision=state["revision"]),
+            )
+        return (
+            "No problem. Your setup answers are saved so far. "
+            "Say RESUME ONBOARDING when you’re ready. What can I help with now?"
+            if state["draft"]
+            else "No problem — you can ask for business help straight away. "
+            "Tell me one thing you want help with, such as pricing, finding customers or managing your day."
+        )
     if normalized in {
         "onboarding",
         "set up my business",
@@ -622,7 +665,18 @@ def chat_reply(
     }:
         command = OnboardingCommand(action="start", expected_revision=state["revision"])
     elif (
-        normalized in {"let's start", "lets start", "let’s start", "resume onboarding"}
+        normalized
+        in {
+            "let's start",
+            "lets start",
+            "resume onboarding",
+            "start setup",
+            "make we start",
+            "make we begin",
+            "continue setup",
+            "continue onboarding",
+            "make we continue",
+        }
         and state["status"] != "completed"
     ):
         command = OnboardingCommand(action="resume", expected_revision=state["revision"])
@@ -637,14 +691,6 @@ def chat_reply(
         return WELCOME
     elif state["status"] not in {"in_progress", "review"}:
         return None
-    elif normalized in {"later", "pause", "skip for now", "not now", "stop"}:
-        apply_command(
-            db,
-            tenant,
-            user_id,
-            OnboardingCommand(action="pause", expected_revision=state["revision"]),
-        )
-        return "No problem. Your answers are saved so far. Say RESUME ONBOARDING when you’re ready. What can I help with now?"
     elif normalized == "back":
         command = OnboardingCommand(action="back", expected_revision=state["revision"])
     elif normalized.endswith("?") or re.match(
@@ -678,6 +724,33 @@ def chat_reply(
         detail = None
         if q.get("options"):
             raw, _, detail = value.partition(":")
+            aliases = {
+                "team_size": {
+                    "only me": "Just me (1 person)",
+                    "just me": "Just me (1 person)",
+                    "na only me": "Just me (1 person)",
+                    "na me alone": "Just me (1 person)",
+                },
+                "monthly_orders": {
+                    phrase: "It varies a lot / I’m not sure"
+                    for phrase in (
+                        "not sure",
+                        "i'm not sure",
+                        "i no sure",
+                        "it varies",
+                        "e dey vary",
+                        "e dey change",
+                    )
+                },
+                "goal": {
+                    "more customers": "Get more customers",
+                    "i wan get more customers": "Get more customers",
+                    "i want more customers": "Get more customers",
+                },
+            }
+            raw = aliases.get(q["key"], {}).get(raw.strip().casefold(), raw)
+            if q["kind"] == "multi":
+                raw = re.sub(r"\s+(?:and|&)\s+", ",", raw, flags=re.IGNORECASE)
             if q["key"] == "monthly_orders" and normalized == "use bumpa":
                 hint = order_hint(db, tenant)
                 if not hint:

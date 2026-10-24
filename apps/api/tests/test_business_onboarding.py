@@ -185,6 +185,40 @@ def test_whatsapp_numbered_answers_and_interruptions(
     assert state_for(db, tenant)["answers"]["team_size"] == "Just me (1 person)"
 
 
+def test_whatsapp_natural_setup_pidgin_pause_and_useful_first_step(
+    business: tuple[Session, Tenant, User],
+) -> None:
+    db, tenant, user = business
+
+    def reply(text: str) -> str | None:
+        return chat_reply(db, tenant, user.id, text, channel="whatsapp")
+
+    assert "business help straight away" in (reply("LATER") or "")
+    assert state_for(db, tenant)["status"] == "not_started"
+    assert "Question 1 of 7" in (reply("make we start") or "")
+    reply("I dey sell food and cater for events")
+    assert "saved so far" in (reply("make we do am later") or "")
+    assert state_for(db, tenant)["answers"] == {}
+    assert "Question 2 of 7" in (reply("make we continue") or "")
+    reply("Office workers and families near my stall")
+    reply("WhatsApp and Physical shop")
+    assert state_for(db, tenant)["draft"]["channels"] == ["WhatsApp", "Physical shop"]
+    reply("e dey vary")
+    reply("na only me")
+    reply("i wan get more customers")
+    review = reply("Transport costs dey make customers change mind") or ""
+    assert "1. Products or services:" in review
+    assert "7. What’s getting in the way:" in review
+    assert "EDIT 1–7" in review
+    assert state_for(db, tenant)["answers"] == {}
+    saved = reply("SAVE") or ""
+    assert "one clear offer" in saved and saved.count("?") == 1
+    assert len(saved) < 450
+    assert state_for(db, tenant)["answers"]["team_size"] == "Just me (1 person)"
+    assert state_for(db, tenant)["answers"]["monthly_orders"] == "It varies a lot / I’m not sure"
+    assert tenant.research_consent_status == "pending"
+
+
 @pytest.mark.parametrize(
     "message",
     [

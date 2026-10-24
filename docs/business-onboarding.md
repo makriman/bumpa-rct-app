@@ -4,16 +4,16 @@ Source: [Bumpa Bestie Onboarding](https://docs.google.com/document/d/1PWA6WIh0sZ
 
 ## Comparison with the previous app
 
-| Document requirement | Previous app | Implemented behavior |
-| --- | --- | --- |
-| Introduction and start | General chat empty state; admin provisioning wizard | Merchant welcome inside chat; separate from controlled account enrollment |
-| Seven questions, one at a time | Tenant category/location only | Products/services, customers, all selling channels, monthly orders, people including owner, priority, free-text challenge |
-| Flexible selling channels | No merchant preference collection | Every document option, multiple selections, required description for Other |
-| Use existing reliable Bumpa data | Metrics available to agent, no onboarding reuse | Optional dated order-range suggestion from a complete prior calendar month and active connection boundary |
-| Summarize what was learned | No merchant review | Review all seven answers, change any answer, explicitly save |
-| Persistent structured profile | Identity and synced metrics only | Application-owned, tenant-isolated reviewed business memory; drafts stored separately |
-| Transition to useful advice | Generic sales/stock prompts | Goal-based first question plus the document’s naira pricing example; free chat remains available |
-| Update as business changes | No structured merchant updates | Profile editor and Hermes proposal tool; exact preview, explicit confirmation, expiry and supersession |
+| Document requirement             | Previous app                                        | Implemented behavior                                                                                                      |
+| -------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Introduction and start           | General chat empty state; admin provisioning wizard | Merchant welcome inside chat; separate from controlled account enrollment                                                 |
+| Seven questions, one at a time   | Tenant category/location only                       | Products/services, customers, all selling channels, monthly orders, people including owner, priority, free-text challenge |
+| Flexible selling channels        | No merchant preference collection                   | Every document option, multiple selections, required description for Other                                                |
+| Use existing reliable Bumpa data | Metrics available to agent, no onboarding reuse     | Optional dated order-range suggestion from a complete prior calendar month and active connection boundary                 |
+| Summarize what was learned       | No merchant review                                  | Review all seven answers, change any answer, explicitly save                                                              |
+| Persistent structured profile    | Identity and synced metrics only                    | Application-owned, tenant-isolated reviewed business memory; drafts stored separately                                     |
+| Transition to useful advice      | Generic sales/stock prompts                         | Goal-based first question plus the document’s naira pricing example; free chat remains available                          |
+| Update as business changes       | No structured merchant updates                      | Profile editor and Hermes proposal tool; exact preview, explicit confirmation, expiry and supersession                    |
 
 ## Audience decisions
 
@@ -44,3 +44,11 @@ The migration is additive (`0019_business_onboarding`); the old application can 
 Local tests cover review versus draft memory, channel revisions, resume, choice validation, uncertain orders, number-based WhatsApp setup, interruptions, actor visibility, exact confirmation, supersession/expiry, and complete-month order evidence. Browser tests cover desktop/mobile completion, corrections, saved progress after reload, failed-save recovery, accessibility, and screenshots with synthetic merchants.
 
 Live WhatsApp transport and live Hermes extraction/recall still require a staging exercise. Mock/local tests do not prove external delivery or live model behavior. Usability with merchants and real network interruptions remains a pilot validation task.
+
+The WhatsApp setup also accepts explicit Pidgin start/pause/resume commands,
+natural `WhatsApp and Physical shop` channel choices, uncertain-volume answers
+and `na only me` team answers. These become drafts until review/save. Review
+lines are numbered to match EDIT 1–7. Completion gives one practical first step
+for the selected priority and one follow-up, while LATER offers immediate help
+without requiring setup. Existing media interruptions, transcribed voice-note
+answers, corrections and per-turn reviewed memory remain shared with web.
