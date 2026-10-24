@@ -45,6 +45,7 @@ MAX_TTS_TEXT_CHARS = 5_000
 MAX_AUDIO_SECONDS = 180.0
 MAX_PROFILE_FILE_BYTES = 131_072
 MAX_PROFILE_BYTES = 262_144
+MAX_HEALTH_BYTES = 16_384
 PROFILE_FILES = frozenset({".bumpa-capabilities-v2", ".env", "config.yaml", "SOUL.md"})
 PROFILE_DIRECTORIES = frozenset({"skills", "memories", "sessions", "cron"})
 PROFILE_ENTRIES = PROFILE_FILES | PROFILE_DIRECTORIES
@@ -506,8 +507,8 @@ def wait_profile_ready(
                 headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
             )
             response = connection.getresponse()
-            payload = response.read(1025)
-            if response.status == 200 and len(payload) <= 1024:
+            payload = response.read(MAX_HEALTH_BYTES + 1)
+            if response.status == 200 and len(payload) <= MAX_HEALTH_BYTES:
                 parsed = json.loads(payload)
                 if _profile_health_is_usable(parsed):
                     return

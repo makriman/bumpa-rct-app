@@ -1,0 +1,60 @@
+{
+  "scanner": "Trivy 0.76.1",
+  "policy": "vuln; ignore-unfixed; CRITICAL,HIGH; exit-code 1",
+  "images": {
+    "caddy": {
+      "created_at": "2026-10-24T04:04:53.556006094Z",
+      "image_id": "sha256:30d952c80825f65a50a2132d1c0bee647bdb81da2434b441c2a9cd0e639c50ad",
+      "repo_digests": [
+        "bumpabestie-caddy@sha256:30d952c80825f65a50a2132d1c0bee647bdb81da2434b441c2a9cd0e639c50ad"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "2d8c2c2f3d2fcd6e3224a2d1a2fc7e889a53d2ccd2ecbd27a24bcfe89f1baa2e"
+    },
+    "api": {
+      "created_at": "2026-10-24T04:23:34.68747371Z",
+      "image_id": "sha256:7f1c10e34f34439126342fc991a5abceffa3a9561cbff6cc21f87bf8fc98b022",
+      "repo_digests": [
+        "bumpabestie-api@sha256:7f1c10e34f34439126342fc991a5abceffa3a9561cbff6cc21f87bf8fc98b022"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "99a68427c906c7942984175953112a87e72454522901126b1bcdedccaa86664b"
+    },
+    "backup": {
+      "created_at": "2026-10-24T04:04:56.960655512Z",
+      "image_id": "sha256:8723055a956d3a0679b3e54b9f5078ed99477e5ec6c158b44d95f207a0db1425",
+      "repo_digests": [
+        "bumpabestie-backup@sha256:8723055a956d3a0679b3e54b9f5078ed99477e5ec6c158b44d95f207a0db1425"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "4c5f081fba3932ccd714b3bfb37a4510e172e67e815bab91db41cf70d1ad700d"
+    },
+    "sandbox": {
+      "created_at": "2026-10-24T04:17:46.781555424Z",
+      "image_id": "sha256:9dae48638d248e307dd96c5c021c35b72f5a1bd4ef95a4c7ffa56709c763191a",
+      "repo_digests": [
+        "bumpabestie-sandbox@sha256:9dae48638d248e307dd96c5c021c35b72f5a1bd4ef95a4c7ffa56709c763191a"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "20c62e55890fe1dcb737a73e46f110ed6025ac72ca5bec6588535345973121d0"
+    },
+    "hermes": {
+      "created_at": "2026-10-24T04:18:34.551184043Z",
+      "image_id": "sha256:a4cbeba21d4c87331962da079467b0659ef48af13910ce83a7e0febf3cec18a8",
+      "repo_digests": [
+        "bumpabestie-hermes@sha256:a4cbeba21d4c87331962da079467b0659ef48af13910ce83a7e0febf3cec18a8"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "3a3e8e0da3fde4559660884bd1e3f0820f873637a48d73490f7a7af741041abb"
+    },
+    "postgres": {
+      "created_at": "2026-10-24T04:04:55.783196762Z",
+      "image_id": "sha256:92273add71687568c4e8e2ce49cc2ab6d21bb67621046fdb5ff00b8852cff4be",
+      "repo_digests": [
+        "bumpabestie-postgres@sha256:92273add71687568c4e8e2ce49cc2ab6d21bb67621046fdb5ff00b8852cff4be"
+      ],
+      "fixable_critical_high": 0,
+      "raw_sha256": "d77d2a4c331bbb19f3aa256734dc766ad5296ee1c93f6dc13d0b5fe6089ad91a"
+    }
+  }
+}

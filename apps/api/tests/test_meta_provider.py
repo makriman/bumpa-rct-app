@@ -187,6 +187,87 @@ def test_meta_interactive_media_read_typing_and_download_paths() -> None:
         provider.upload_media(content=b"", mime_type="image/png", filename="empty.png")
 
 
+@pytest.mark.parametrize(
+    "message_id",
+    ["wamid.synthetic+slash/value=", "wamid.synthetic==", "wamid.legacy-1:part", "w" * 256],
+)
+def test_meta_reply_and_read_paths_preserve_bounded_message_id_alphabet(message_id: str) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if payload.get("status") == "read":
+            return httpx.Response(200, json={"success": True})
+        return _success_response(request)
+
+    provider = _client(handler)
+    provider.send_text("+2348000000000", "Synthetic reply", reply_to_message_id=message_id)
+    provider.send_interactive_buttons(
+        "+2348000000000",
+        body="Synthetic confirmation",
+        buttons=[("confirm", "Confirm")],
+        reply_to_message_id=message_id,
+    )
+    provider.send_media(
+        "+2348000000000",
+        media_type="image",
+        media_id="media-12345",
+        reply_to_message_id=message_id,
+    )
+    provider.mark_read(message_id, typing=True)
+    assert len(requests) == 4
+    assert all(payload["context"]["message_id"] == message_id for payload in requests[:3])
+    assert requests[3]["message_id"] == message_id
+    assert requests[3]["typing_indicator"] == {"type": "text"}
+
+
+@pytest.mark.parametrize(
+    "message_id",
+    [
+        "",
+        "abcd",
+        "w" * 257,
+        "wamid.bad\n",
+        "wamid.bad\r",
+        "wamid.bad\x00",
+        "wamid. bad",
+        'wamid."bad',
+        "wamid.bad?",
+        "wamid.bad%20",
+        "wamid.非ASCII",
+    ],
+)
+def test_meta_reply_and_read_paths_reject_unsafe_ids_before_transport(message_id: str) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _success_response(request)
+
+    provider = _client(handler)
+    operations = (
+        lambda: provider.send_text("+2348000000000", "Synthetic", reply_to_message_id=message_id),
+        lambda: provider.send_interactive_buttons(
+            "+2348000000000",
+            body="Synthetic",
+            buttons=[("confirm", "Confirm")],
+            reply_to_message_id=message_id,
+        ),
+        lambda: provider.send_media(
+            "+2348000000000",
+            media_type="image",
+            media_id="media-12345",
+            reply_to_message_id=message_id,
+        ),
+        lambda: provider.mark_read(message_id, typing=True),
+    )
+    for operation in operations:
+        with pytest.raises(ValueError, match="Invalid Meta"):
+            operation()
+    assert requests == []
+
+
 def test_meta_rejects_untrusted_media_locations_and_checksum_mismatch() -> None:
     def untrusted(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/media-12345"):

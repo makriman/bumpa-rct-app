@@ -1,0 +1,429 @@
+{
+  "runtime": "Playwright 1.64.1, pinned Linux amd64 image",
+  "review": "Changed states inspected visually; snapshot thresholds unchanged. Strict reruns and exact-head CI are required.",
+  "images": [
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-administrators-mobile-chromium-linux.png",
+      "previous_sha256": "9627eb4e116de1e7898b0ac552a538166860b4244a5e85fc9899daaa37b667fa",
+      "candidate_sha256": "85540b36c2c85bc5e428e4680e804e48aee86e2144b4db8dc2f037e7aac1d008",
+      "dimensions": [
+        390,
+        1155
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-connections-mobile-chromium-linux.png",
+      "previous_sha256": "15cb420ac8e757772ca456d3189b34d4313e2cecd9698d3e8747121be3d7dd3b",
+      "candidate_sha256": "2ef7853b5ca75da7457b823a960a82ff26b3dfb2aff22bd7345f726810322665",
+      "dimensions": [
+        390,
+        1377
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-failures-mobile-chromium-linux.png",
+      "previous_sha256": "bd44ce652fdaa2755f753dd97e72d786effdf4f309bb39383e82de2d2916b635",
+      "candidate_sha256": "4482acac4449820b5ab8a997a50ebee81ec89ece52666f2f8471cd3be5651cd2",
+      "dimensions": [
+        390,
+        1368
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-onboarding-demo-onboarding-mobile-chromium-linux.png",
+      "previous_sha256": "f687d1ec158f587e8c44d652575ee03e8dfc18895396067667a6d595edbc88a2",
+      "candidate_sha256": "a1e8fcdd1276b1b0b1adf16e04d5a8080f8f7d8b89def261faf9e89b7f178c96",
+      "dimensions": [
+        390,
+        1390
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-onboarding-mobile-chromium-linux.png",
+      "previous_sha256": "4c2df272e5f84f35f1b9466258e83a72c9e9bb9eaeb42e84f72ddef1e1cff7c2",
+      "candidate_sha256": "e6a3b177f36a3c5ff595a24fe1a0469e289318b29fb07bdc6a117e0a2c9f1671",
+      "dimensions": [
+        390,
+        1593
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-overview-mobile-chromium-linux.png",
+      "previous_sha256": "1d1481ea230f129ed2a30ee72881d7e1d8ace60e3e086276378e5ab7d7af9bb7",
+      "candidate_sha256": "462dc32a40c7d48005d5c0e163b3a062855b715690805f4e861092537adc6cfe",
+      "dimensions": [
+        390,
+        2201
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-provider-failures-mobile-chromium-linux.png",
+      "previous_sha256": "50683c302bfdec4ddbf7fef5bba7da52962afaff5539cc5e08223fed95fc0d84",
+      "candidate_sha256": "5e0e5e447c568998c2db5bb0b1df0161ae1c4ff39908d76ecf90d54d903ec4ad",
+      "dimensions": [
+        390,
+        1504
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-sync-runs-mobile-chromium-linux.png",
+      "previous_sha256": "dca9cb26ddb657220c17477f004180a135c1f64810c15a47a9c02bdb66a42f6d",
+      "candidate_sha256": "a871af49cd151b6d0f02f3ff496bd342703e863e767fe418f7dbd5f2b6941a79",
+      "dimensions": [
+        390,
+        1151
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-tenants-demo-kaia-home-mobile-chromium-linux.png",
+      "previous_sha256": "c3920e4ae8bce5b7f586092f6f08c53d6c1a7d68cd3a74289906a23e2e4d7c02",
+      "candidate_sha256": "76e4b3fe878d0e2a47941497ed8d365ecb7bfd10309ad043e9cdf3596527d055",
+      "dimensions": [
+        390,
+        1565
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-tenants-mobile-chromium-linux.png",
+      "previous_sha256": "28bbcf3e366811d6171a0ea318bb6d595b93d47ea8e861dff5f4217475b63c92",
+      "candidate_sha256": "32ed81bf730f35781c333c1d1afa5dda9e55eb2f702fe8c2dcda57088dfa7744",
+      "dimensions": [
+        390,
+        963
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/route-usage-mobile-chromium-linux.png",
+      "previous_sha256": "ab5052e0a3eb46746497938c97a658c816b7891178f02ce164a052d1417ce76d",
+      "candidate_sha256": "fd5dae37dd1e61dd5d64dd1e11e176821f55cde091411ec93ae2e1b33f9dad31",
+      "dimensions": [
+        390,
+        1143
+      ]
+    },
+    {
+      "path": "apps/admin-web/e2e/__screenshots__/surface.spec.ts/state-connections-error-mobile-chromium-linux.png",
+      "previous_sha256": "882294284019a50568f67a5a5755d9ab4e8ee4c9d046195d2edf3439b3c821c6",
+      "candidate_sha256": "f15671449b167aef877f5621dde0b650aa25fcd42f0293336eebad52d8fa1512",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/route-classifications-mobile-chromium-linux.png",
+      "previous_sha256": "23524c4b6a97e671e01fd2008903c1ba69f18debc51f8c4ad5f836ee6ac10a57",
+      "candidate_sha256": "9b48c3d4053a26d1f1e21692a0eaafac4efc441de975fd883a91d9f590c24f1a",
+      "dimensions": [
+        390,
+        1623
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/route-cohorts-mobile-chromium-linux.png",
+      "previous_sha256": "7029458ba696ed6a86599666d871cc751503016c5297e4f130684dbc5254a4a7",
+      "candidate_sha256": "d6ff0ba007688fceb1ecbfc3c2a3ade61b3ca8a0def1c68d332aec20db228edb",
+      "dimensions": [
+        390,
+        1544
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/route-consent-mobile-chromium-linux.png",
+      "previous_sha256": "f68e1b5c28f912669647555058c6b7fe99bc67c1525d93950dafad1bc7469b76",
+      "candidate_sha256": "70e4df80cc4a135192a9e31e461f09e16f05bea13c137c733308166ab624d552",
+      "dimensions": [
+        390,
+        1551
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/route-login-mobile-chromium-linux.png",
+      "previous_sha256": "f4e33141ddd9d31c7ea6632e0af5dcd4e58b0102720a359e632fb29e3cecb527",
+      "candidate_sha256": "d978c0ef6f6c596a6e382ad68db68b7d254377dd464d0097b0b54111055c6df6",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/route-overview-mobile-chromium-linux.png",
+      "previous_sha256": "3e619dc35f2d9a99bf6420875191b7cee95caccf9dcccd1826904b419aaa7f19",
+      "candidate_sha256": "78d710a92c45f8d2e04b479390ce2271d5c4c2ca95633a827438796172fab1f1",
+      "dimensions": [
+        390,
+        7563
+      ]
+    },
+    {
+      "path": "apps/research-web/e2e/__screenshots__/surface.spec.ts/state-conversations-error-mobile-chromium-linux.png",
+      "previous_sha256": "47376b9a24c157ba7be7248e920944861d995f277a2c4072e09696db9465c380",
+      "candidate_sha256": "877f2b717c232a1bf342471b29202e8b8524a6d248dadf979f6a7e288455cf90",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-account-menu-desktop-chromium-linux.png",
+      "previous_sha256": "b354aa79005367cfedef827fd9a87a01fc99464085f865a50d95458f7863834d",
+      "candidate_sha256": "3a80aad2429a8347d4129257445c09ea8f09392d357f182777c7a3ddb31d6a87",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-account-menu-mobile-chromium-linux.png",
+      "previous_sha256": "4f177a8a0670d291c19f603a583ec3310e006d3b60051e81e89c9a839fa050f2",
+      "candidate_sha256": "493fec3e138453128819b9efb54d06d80b71a23444f67f1d9595251e5614bf94",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-desktop-collapsed-desktop-chromium-linux.png",
+      "previous_sha256": "bcf850c045437cff13991fab4278c67604d010bdeb82a533616f30b8c83a1004",
+      "candidate_sha256": "eaa896d39a00f2a330577536c191bd50f5f1be6ecb7ebc9eac9064a933e8ee68",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-error-mobile-chromium-linux.png",
+      "previous_sha256": "c4eddf3ee92e6bac514c143810d16aebe5d5968b3da0b02979c0866bc20e8e82",
+      "candidate_sha256": "fb96a4063f04fb560d8a338632fcc9b342397c5908da5500dfd1b2c71b8b1a3c",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-mobile-drawer-mobile-chromium-linux.png",
+      "previous_sha256": "032ce8c197b66c4ef8ae7681227fb0fdc64bc7c86a1ed3a9ee2723c25d1e5987",
+      "candidate_sha256": "1d03bd68328fb715b44aae843d6a2d8d226e07a78b32eb894987ce3d18552ae8",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-populated-mobile-chromium-linux.png",
+      "previous_sha256": "a766f64850cf753e39b1f51553c49d5397bb5a04cd006ee8108a672fe321a8ce",
+      "candidate_sha256": "0d5bae96d8c9453d7f4d13c8d453c471e7e3c1adcbe1bac3a5c3d1de9af38959",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/chat-sending-mobile-chromium-linux.png",
+      "previous_sha256": "82f9e5784b40b41422c28cfb8a600cb8cb1d5cac1f208399147347f1bc8bd3e4",
+      "candidate_sha256": "83d66bf4c48dffb2a5d3fb72821c9cbcfe6fde9fa626727ffaaa362afc979cd2",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/public-landing-mobile-chromium-linux.png",
+      "previous_sha256": "09f6f21381e025e93a76bacdc3237cd5f1ba22d6a9a10bbc235455d719557c44",
+      "candidate_sha256": "2e35d42939837563cf4a5fb0a6a9b21849b47a1f41f5e5dfd4b1ec1dcf8f3adb",
+      "dimensions": [
+        390,
+        3969
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-about-mobile-chromium-linux.png",
+      "previous_sha256": "747d1d56d490ca4a3c5f9d6b4fb9dde6ec6a5fd075e7018af93f69b8e6ccbb05",
+      "candidate_sha256": "00f5fb41b4cdb69adc0671d34d712b2e9a385bfa053543cdb41bb39472e27e44",
+      "dimensions": [
+        390,
+        1451
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-chat-conversation-e2e-desktop-chromium-linux.png",
+      "previous_sha256": "115fb1628ec136aecd5b7254796fb57cb36993130412662c8549bffe6ff708e1",
+      "candidate_sha256": "b819363a1ab6eaa1debd4542b220eb98e9a3d5409de3b0e06b966aaeb01df5e8",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-chat-conversation-e2e-mobile-chromium-linux.png",
+      "previous_sha256": "5a1d4ab50f7bf8f413a16e44751c0c4624a903fc843bc2143685cc9ef2f49810",
+      "candidate_sha256": "f919500b3e66a49f62f137d09751aece07e43c10d93c1c437672eefe58a9be2a",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-chat-desktop-chromium-linux.png",
+      "previous_sha256": "de32b1a56e675f21b99502111c1ae49d4ca33917dcf5d90114792bd7e419e088",
+      "candidate_sha256": "b819363a1ab6eaa1debd4542b220eb98e9a3d5409de3b0e06b966aaeb01df5e8",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-chat-mobile-chromium-linux.png",
+      "previous_sha256": "5a1d4ab50f7bf8f413a16e44751c0c4624a903fc843bc2143685cc9ef2f49810",
+      "candidate_sha256": "f919500b3e66a49f62f137d09751aece07e43c10d93c1c437672eefe58a9be2a",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-landing-mobile-chromium-linux.png",
+      "previous_sha256": "09f6f21381e025e93a76bacdc3237cd5f1ba22d6a9a10bbc235455d719557c44",
+      "candidate_sha256": "2e35d42939837563cf4a5fb0a6a9b21849b47a1f41f5e5dfd4b1ec1dcf8f3adb",
+      "dimensions": [
+        390,
+        3969
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-privacy-mobile-chromium-linux.png",
+      "previous_sha256": "105c0a85ee4daa8d0edb750e4876cbfa8ad49fd47754c2dd627dbdbf0bafa252",
+      "candidate_sha256": "62a2bdd536ae36c0f26ef6e8869d34889d47174deaaf8384eba942dff18c9350",
+      "dimensions": [
+        390,
+        1616
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-profile-desktop-chromium-linux.png",
+      "previous_sha256": "e2a675001734a52aa00af887978bbb5354e9a58bebed10db478ef09fa9888956",
+      "candidate_sha256": "5c595796a9bc3a7fafcc33d47f694fa8e7a33de461aee3d17a98fe5d3a1721b8",
+      "dimensions": [
+        1440,
+        1962
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-profile-mobile-chromium-linux.png",
+      "previous_sha256": "20ecb3269d8f082a8899c78d8775635a89bf0eeb240cbafb2ae6e5ca4dce0dde",
+      "candidate_sha256": "fb944bdf2b044876cf493d1ce0d49c1eef04666ef53a8f44982441e88ba0108d",
+      "dimensions": [
+        390,
+        2687
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-settings-bumpa-mobile-chromium-linux.png",
+      "previous_sha256": "f13f429990d9d181003c87689643ba08d28a17fb8043458941a8ac9e361e4aad",
+      "candidate_sha256": "66ee8f6e43d0f6db383490c7e7192cc909830f7130eae0b23e9c23f5e3945ffd",
+      "dimensions": [
+        390,
+        1049
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-settings-whatsapp-mobile-chromium-linux.png",
+      "previous_sha256": "1f959f65dbbf7e3e978ea18b27125c606e8815388551194c0df3744f1df34e65",
+      "candidate_sha256": "fbf10b5b81885ccfb947dfe5b3fd04fc65495d370735e62f6b8fde0dd99d3a3f",
+      "dimensions": [
+        390,
+        844
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/route-terms-mobile-chromium-linux.png",
+      "previous_sha256": "b53c310569d3fef9dbc62892f33bd53358f2a50a510169d7b359b39bc20a788d",
+      "candidate_sha256": "33fae38001370063a2e8bd04cdbd68887126d525e81fab434be3260c4c35beb2",
+      "dimensions": [
+        390,
+        1736
+      ]
+    },
+    {
+      "path": "apps/web/e2e/__screenshots__/quality.spec.ts/sme-bumpa-settings-mobile-chromium-linux.png",
+      "previous_sha256": "93989eb5556b860c26a3e62e5c3e0155b6ec23563edc25585f207161933dcac2",
+      "candidate_sha256": "71ad6067146907112ff86f761f85fc93520f36621ffd2aa5054c4507bb2301d7",
+      "dimensions": [
+        390,
+        1230
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-channels-desktop-chromium.png",
+      "previous_sha256": "d303503cd5bbf17a0be17b5b107593f536d22aa2ca9081c849ce05aad8433047",
+      "candidate_sha256": "c574e173219c0e29c7e396db3e8538b15a03bd9e938906d406afda3075bfeddb",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-channels-mobile-chromium.png",
+      "previous_sha256": "cc44c2462ad9364d60911e0ffd5287af7d2f27cd67280ca559b179ce58fe8ff1",
+      "candidate_sha256": "6a7204f52086af91d4ccb14f070eefe3a7ebf22858d760bb8586ac8bf76bc427",
+      "dimensions": [
+        1170,
+        2532
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-review-desktop-chromium.png",
+      "previous_sha256": "2f7deeda1246cd045bae05de6d7ee1734d6f1cc91a876fb6507bc6a5e301b277",
+      "candidate_sha256": "775bfc941d2f704c4be37edbfe6a367ff9ac6ccb759b062940cc6437586b747b",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-review-mobile-chromium.png",
+      "previous_sha256": "44be7f1f58638682d5927e31b9343ab25ed61b0e2fa8f14ffeba1af17907373b",
+      "candidate_sha256": "fcb0ef70fea7c5500ff7fa722000c7e3a4dea8bef7c417e9206413ee2933d7e2",
+      "dimensions": [
+        1170,
+        2532
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-saved-desktop-chromium.png",
+      "previous_sha256": "6b92d140fe47042374fe44bf053e5d04cec1710b841eb9676824562835b44256",
+      "candidate_sha256": "80a5d0eb8557c34f2f766c3bf0da4fde0d3c1a6f1e453d2fbc561a66b2d78af5",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-saved-mobile-chromium.png",
+      "previous_sha256": "c8b3c85e47563ff4a9aefa497a5ef33f6fe9136996d7e9f14cd2f5d840c31667",
+      "candidate_sha256": "322b533d723a63cbfb454bb6c85fb492c98d15fe6b4e85292eb835713e16b4d0",
+      "dimensions": [
+        1170,
+        2532
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-welcome-desktop-chromium.png",
+      "previous_sha256": "00e213403466285b17da8a08f39af53cf5496f80989de8a296c1e8fc97248d05",
+      "candidate_sha256": "9ab03356055040d7da4f652194aed8f6f4acad86f47b621b76d9146476421b0a",
+      "dimensions": [
+        1440,
+        900
+      ]
+    },
+    {
+      "path": "artifacts/onboarding-welcome-mobile-chromium.png",
+      "previous_sha256": "64cdc2213a2f097c03b3aa9ae5e3f4bc634f704c4ca95907430e9c6554053068",
+      "candidate_sha256": "0d49420a73c6e714b6e0d51335ab79f85237864b5574f8c191a497baa43dc7f2",
+      "dimensions": [
+        1170,
+        2532
+      ]
+    }
+  ]
+}

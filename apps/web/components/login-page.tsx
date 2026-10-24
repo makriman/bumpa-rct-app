@@ -15,6 +15,7 @@ import { useHydrated } from "@/lib/use-hydrated";
 type AccessRequestResponse = {
   delivery: LoginDelivery;
   expires_in_seconds: number;
+  resend_after_seconds?: number;
 };
 
 type SessionResponse = {
@@ -28,6 +29,7 @@ const initialState: LoginState = {
   requestedPhone: "",
   delivery: null,
   expiresInSeconds: 0,
+  resendSeconds: 0,
   pin: "",
   error: "",
   pending: null,
@@ -52,6 +54,17 @@ export default function LoginPage({
   useEffect(() => {
     if (state.step === "pin") pinRef.current?.focus();
   }, [state.step]);
+
+  useEffect(() => {
+    if (state.resendSeconds <= 0 || state.step !== "pin") return;
+    const timer = window.setTimeout(() => {
+      dispatch({
+        type: "patch",
+        value: { resendSeconds: state.resendSeconds - 1 },
+      });
+    }, 1_000);
+    return () => window.clearTimeout(timer);
+  }, [state.resendSeconds, state.step]);
 
   const requestAccess = async (event?: FormEvent<HTMLFormElement>) => {
     event?.preventDefault();
@@ -84,6 +97,7 @@ export default function LoginPage({
           requestedPhone: phone.e164,
           delivery: result.delivery,
           expiresInSeconds: result.expires_in_seconds,
+          resendSeconds: result.resend_after_seconds ?? 30,
           pin: "",
           step: "pin",
         },
@@ -139,7 +153,12 @@ export default function LoginPage({
     if (!/^\d{6}$/.test(state.pin)) {
       dispatch({
         type: "patch",
-        value: { error: "Enter the complete six-digit web PIN." },
+        value: {
+          error:
+            state.delivery === "whatsapp"
+              ? "Enter the complete six-digit WhatsApp code."
+              : "Enter the complete six-digit web PIN.",
+        },
       });
       return;
     }
@@ -159,7 +178,7 @@ export default function LoginPage({
           error:
             reason instanceof Error
               ? reason.message
-              : "That PIN could not be verified.",
+              : "That sign-in code could not be verified.",
           pending: null,
         },
       });
@@ -177,7 +196,9 @@ export default function LoginPage({
         type: "patch",
         value: {
           error:
-            "Your PIN was accepted, but we could not open your workspace. Try again without entering the PIN again.",
+            state.delivery === "whatsapp"
+              ? "Your code was accepted, but we could not open your workspace. Try again without requesting another code."
+              : "Your PIN was accepted, but we could not open your workspace. Try again without entering the PIN again.",
         },
       });
     } finally {

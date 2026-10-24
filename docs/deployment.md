@@ -804,21 +804,83 @@ fail closed; reactivation is a separate administrative decision.
 
 ## Rollback boundary
 
+### Preserving an already-expired pilot login configuration
+
+An owner-authorized onboarding release can retain the exact observed temporary
+PIN configuration while web OTP activation is deferred. This does not extend or
+reset the PIN: new sign-ins continue returning 503 after its original deadline,
+while valid mapped-user sessions keep their existing eligibility and expiry.
+Rollback retains that same contained boundary; it does not promise OTP delivery
+or restored new-login availability.
+
+Ordinary production validation still requires a future PIN deadline. The guarded
+deployment may use `--preserve-recorded-auth` only after all recorded/running
+service identities match and the captured private release-record checksum is
+unchanged. Its explicit prior PIN auth fields must match literally, with no
+inline verifier, a genuine timezone-aware expired deadline and a verified prior
+API image ID. The prior record's `preserved_configuration` must bind every
+nonrelease environment byte to the observed baseline. Only the existing eleven
+release-pointer keys are excluded from that digest; auth, secrets, sender/pilot
+flags, cookie settings, delivery cadence and comments remain included. Capture
+this proof from the actual baseline before target selection, never from a staged
+target. Missing proof, malformed dates or configuration drift fail closed.
+
+After successful smoke and runtime identity verification, new or hybrid metadata
+can carry the same validated configuration digest with its verified running API
+identity. No new credential, privilege, fallback login or expiry is introduced.
+
+### Existing-pilot inbound onboarding
+
+For an explicitly approved existing population, stage a private, same-owner,
+mode-0600 regular `/var/lib/bumpabestie/onboarding-existing-pilot.json` before
+promotion. The snapshot contains the fixed cohort name, existing identity/user/
+tenant IDs, roles and keyed phone fingerprints; it contains no raw phone numbers.
+Include approved secondary numbers, and preserve opt-outs. Validate the captured
+scope through `python -m app.cli.arm_pilot_onboarding` without `--apply` first.
+
+The coordinator validates the snapshot and captures its digest before side
+effects. After additive migration0019 and before application startup, the
+provider-disabled migration lane applies it transactionally. Mapping or digest
+drift aborts the release; missing input after capture cannot silently skip the
+requested setup. This arms defaults only for captured identities, sends nothing,
+creates no mappings and leaves completed profiles unchanged. Active setup keeps
+accepting answers; paused/new setup resumes on inbound. Attachments, business
+help, opt-out and confirmation controls retain their normal handling.
+
+After verified deployment, archive the input privately under the maintenance
+lock so future unrelated deployments do not reapply a stale population snapshot.
+Keep the application receipt and counts. Rollback retains the additive profile
+state and reviewed business memory. Never use real merchant messages as synthetic
+canaries or claim mock-provider tests establish actual WhatsApp delivery.
+
 `scripts/deploy.sh` records the verified revision, actual running repository
 digests, and the non-secret authentication boundary (`AUTH_LOGIN_MODE`, the
 temporary verifier paths and expiry, and `WHATSAPP_BACKEND`). It validates that
 record as private, immutable metadata and compares its
 API, worker, scheduler, web, Hermes, Caddy, PostgreSQL and Redis references with
 the actual running containers before enabling automatic rollback. A mismatch is a
-hard preflight stop. Any pre-deployment failure after a valid record is loaded
+hard preflight stop. An immutable registry alias added while preserving a locally
+built image is accepted only when Docker resolves the recorded digest to the
+exact running image identity. Publishing an alias does not adopt or repair a stale
+release record; preserve and reconcile its provenance before promotion.
+Any pre-deployment failure after a valid record is loaded
 atomically restores all nine prior release pointers and the recorded authentication
 boundary in `.env.production`. A legacy record without the auth object loads as
 the fail-closed disabled boundary; the first compatibility promotion must therefore
 be the documented disabled phase.
 
 After migrations begin, a failed later release can restore the prior application
-images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
-automatic rollback never recreates an older infrastructure image and never reverses
+images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only.
+The rollback callback uses only immutable images already verified in the local
+Docker cache, including the target API initializer and target edge image, and
+sets `--pull never` for every recreation. A missing/invalid cache entry fails
+through normal containment and the maintenance interlock; no mutable tag,
+registry pull or image build is substituted. Preserve and verify an image archive
+of the actual running boundary before promotion, including locally built hotfix
+images. Host-loss recovery requires loading that verified archive on a replacement
+host; cache/archive on the same host is not off-host disaster recovery.
+
+Automatic rollback never recreates an older infrastructure image and never reverses
 migrations. Only after rollback smoke passes, the script persists a hybrid boundary:
 the prior application revision/tag and API/web/Hermes references with the target
 infrastructure tag and Caddy/PostgreSQL/backup references. Its separate

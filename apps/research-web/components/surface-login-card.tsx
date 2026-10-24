@@ -12,6 +12,7 @@ export type SurfaceLoginState = {
   requestedPhone: string;
   delivery: "web_pin" | "whatsapp" | null;
   expiresInSeconds: number;
+  resendSeconds: number;
   pin: string;
   error: string;
   pending: "request" | "verify" | "session" | null;
@@ -37,7 +38,7 @@ export function SurfaceLoginCard({
   country: PhoneCountry;
   description: string;
   dispatch: React.Dispatch<SurfaceLoginAction>;
-  onRequestAccess: (event: FormEvent) => Promise<void>;
+  onRequestAccess: (event?: FormEvent) => Promise<void>;
   onRetrySession: () => Promise<void>;
   onVerify: (event: FormEvent) => Promise<void>;
   phoneCountries: readonly PhoneCountry[];
@@ -50,6 +51,7 @@ export function SurfaceLoginCard({
     delivery,
     error,
     expiresInSeconds,
+    resendSeconds,
     nationalNumber,
     pending,
     pin,
@@ -202,6 +204,20 @@ export function SurfaceLoginCard({
               {pending === "verify" ? "Signing in…" : "Verify and sign in"}
             </button>
           </form>
+          {delivery === "whatsapp" && (
+            <button
+              className="button button-ghost button-small"
+              type="button"
+              disabled={pending !== null || resendSeconds > 0}
+              onClick={() => void onRequestAccess()}
+            >
+              {pending === "request"
+                ? "Requesting code…"
+                : resendSeconds > 0
+                  ? `Request another code in ${resendSeconds}s`
+                  : "Request another code"}
+            </button>
+          )}
         </>
       ) : (
         <SurfaceSessionState

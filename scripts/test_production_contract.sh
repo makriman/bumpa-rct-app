@@ -30,6 +30,8 @@ live_env="$(mktemp)"
 verification_env="$(mktemp)"
 temporary_verification_env="$(mktemp)"
 pilot_env="$(mktemp)"
+preserved_env="$(mktemp)"
+preserved_record="$(mktemp)"
 disabled_auth_env="$(mktemp)"
 whatsapp_auth_env="$(mktemp)"
 versioned_auth_env="$(mktemp)"
@@ -77,7 +79,7 @@ cleanup() {
   fi
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$temporary_verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
-    "$versioned_auth_env" "$pilot_env" \
+    "$versioned_auth_env" "$pilot_env" "$preserved_env" "$preserved_record" \
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$auth_secret_init_volume" >/dev/null 2>&1 || true
@@ -1233,7 +1235,7 @@ deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | cu
 deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
 release_helper_line="$(grep -n -F 'source "$ROOT_DIR/scripts/release_boundary.sh"' scripts/deploy.sh | cut -d: -f1)"
 release_load_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/deploy.sh | cut -d: -f1)"
-target_validate_line="$(grep -n -F './scripts/validate_env.sh .env.production production' scripts/deploy.sh | cut -d: -f1)"
+target_validate_line="$(grep -n -F './scripts/validate_env.sh "${target_validation_args[@]}"' scripts/deploy.sh | cut -d: -f1)"
 scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | cut -d: -f1)"
 scheduled_env_line="$(grep -n -F "env_file=\"\${ENV_FILE:-.env.production}\"" scripts/scheduled_backup.sh | cut -d: -f1)"
 require_single_line_number deploy_lock_line "$deploy_lock_line"
@@ -1251,7 +1253,8 @@ if [[ -z "$deploy_lock_line" || -z "$deploy_env_line" || "$deploy_lock_line" -ge
 fi
 if [[ -z "$release_helper_line" || -z "$release_load_line" || -z "$target_validate_line" \
   || "$release_helper_line" -ge "$release_load_line" \
-  || "$release_load_line" -ge "$target_validate_line" ]]; then
+  || "$release_load_line" -ge "$target_validate_line" \
+  || "$target_validate_line" -ge "$image_pull_line" ]]; then
   echo "Deployment does not load the previous release boundary before target preflight" >&2
   exit 1
 fi
@@ -1269,7 +1272,7 @@ grep -Fq 'running_service_matches_recorded_topology' scripts/deploy.sh
 grep -Fq 'select_surface_rollback_image' scripts/deploy.sh
 grep -Fq '"$hybrid_admin_web" == "$rollback_admin_web_image"' scripts/deploy.sh
 grep -Fq '"$hybrid_research_web" == "$rollback_research_web_image"' scripts/deploy.sh
-grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
+grep -Fq 'actual_image="$(running_image "$service" "$recorded_image")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
 grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=127.0.0.1' scripts/deploy.sh
@@ -1286,7 +1289,8 @@ test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke' scripts/deploy.sh)" = 2
 grep -Fq 'if docker start "${previous_writer_containers[@]}" >/dev/null' scripts/deploy.sh
-grep -Fq '&& "${compose[@]}" --profile async up -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq '&& "${compose[@]}" --profile async up --pull never -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq 'verify_cached_rollback_images' scripts/deploy.sh
 grep -Fq 'COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type' infra/hermes/Dockerfile
 if grep -Fq 'SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh' scripts/deploy.sh; then
   echo "Deployment bypasses the bounded direct-origin and edge smoke gates" >&2
@@ -1860,6 +1864,47 @@ awk '
 ' "$temporary_verification_env" > "$pilot_env"
 chmod 0600 "$pilot_env"
 ./scripts/validate_env.sh "$pilot_env" production >/dev/null
+awk '/^TEMPORARY_WEB_PIN_EXPIRES_AT=/ { print "TEMPORARY_WEB_PIN_EXPIRES_AT=2020-01-01T00:00:00Z"; next } {print}' \
+  "$pilot_env" >"$preserved_env"
+chmod 0600 "$preserved_env" "$preserved_record"
+if ./scripts/validate_env.sh "$preserved_env" production >/dev/null 2>&1; then
+  echo "Ordinary validation accepted an expired PIN boundary" >&2
+  exit 1
+fi
+python3 - "$preserved_env" "$preserved_record" <<'PY'
+import json
+import sys
+from pathlib import Path
+from scripts.validate_preserved_auth import configuration_digest
+
+env_path, record_path = map(Path, sys.argv[1:])
+env = dict(line.split('=', 1) for line in env_path.read_text().splitlines() if line and not line.startswith('#'))
+record = {'revision': env['DEPLOY_REF'], 'operations_revision': env['DEPLOY_REF'],
+    'image_tag': env['IMAGE_TAG'], 'infra_image_tag': env['INFRA_IMAGE_TAG'],
+    'images': {key: env[name] for key, name in {
+        'api': 'API_IMAGE', 'worker': 'API_IMAGE', 'scheduler': 'API_IMAGE', 'web': 'WEB_IMAGE',
+        'admin_web': 'ADMIN_WEB_IMAGE', 'research_web': 'RESEARCH_WEB_IMAGE', 'caddy': 'CADDY_IMAGE',
+        'postgres': 'POSTGRES_IMAGE', 'backup': 'BACKUP_IMAGE', 'hermes': 'HERMES_IMAGE'}.items()},
+    'auth': {key: env[name] for key, name in {
+        'login_mode': 'AUTH_LOGIN_MODE', 'temporary_web_pin_verifier_file': 'TEMPORARY_WEB_PIN_VERIFIER_FILE',
+        'temporary_web_pin_verifier_file_host': 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST',
+        'temporary_web_pin_expires_at': 'TEMPORARY_WEB_PIN_EXPIRES_AT', 'whatsapp_backend': 'WHATSAPP_BACKEND'}.items()},
+    'preserved_configuration': {'schema_version': 1, 'policy': 'unchanged-expired-pin-no-new-logins',
+        'running_api_image_id': 'sha256:' + 'c' * 64,
+        'non_release_environment_sha256': configuration_digest(env_path.read_bytes())}}
+record['images']['redis'] = 'redis@sha256:' + 'a' * 64
+record_path.write_text(json.dumps(record))
+PY
+./scripts/validate_env.sh "$preserved_env" production --preserve-recorded-auth "$preserved_record" \
+  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" >/dev/null
+awk '/^TEMPORARY_WEB_PIN_EXPIRES_AT=/ { print "TEMPORARY_WEB_PIN_EXPIRES_AT=2099-01-01T00:00:00Z"; next } {print}' \
+  "$preserved_env" >"$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production --preserve-recorded-auth "$preserved_record" \
+  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" >/dev/null 2>&1; then
+  echo "Recorded auth preservation accepted changed selectors" >&2
+  exit 1
+fi
 pilot_rendered="$(docker compose --env-file "$pilot_env" \
   -f compose.yaml -f compose.prod.yaml --profile async --profile tools config --format json)"
 if ! jq --exit-status '
@@ -1930,25 +1975,38 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+awk '
+  /^HERMES_DEFAULT_MODEL=/ {
+    print "HERMES_DEFAULT_MODEL=claude-haiku-4-5-20251001"; next
+  }
+  { print }
+' "$live_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted a non-Sonnet Hermes model" >&2
+  exit 1
+fi
+
 # The third-party Hermes base is digest-pinned, but its Debian security overlay
 # is intentionally refreshed on every protected and publication build. A cached
 # apt layer can otherwise retain a package after Debian has shipped a fix.
 grep -Fq '      fail-fast: false' .github/workflows/ci.yml
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/ci.yml
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
-grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
-grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
-grep -Fq 'go get google.golang.org/grpc@v1.82.1' infra/caddy/Dockerfile
+grep -Fq 'apt-get upgrade --yes --no-install-recommends' infra/hermes/Dockerfile
+grep -Fq 'go get google.golang.org/grpc@v1.84.0' infra/caddy/Dockerfile
 grep -Fq 'go version -m /out/caddy' infra/caddy/Dockerfile
-grep -Fq 'httplib2==0.32.0' infra/hermes/Dockerfile
-grep -Fq 'mcp==1.28.1' infra/hermes/Dockerfile
-grep -Fq 'pillow==12.3.0' infra/hermes/Dockerfile
-grep -Fq 'pyasn1==0.6.4' infra/hermes/Dockerfile
-grep -Fq 'npm prune --prefix /opt/hermes --omit=dev --workspaces=false' infra/hermes/Dockerfile
-grep -Fq '/opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion' infra/hermes/Dockerfile
+grep -Fq 'cryptography==50.0.2' infra/hermes/Dockerfile
+grep -Fq 'certifi==2026.10.19' infra/hermes/Dockerfile
+grep -Fq 'pillow==13.0.0' infra/hermes/Dockerfile
+grep -Fq 'aiohttp==3.14.5' infra/hermes/Dockerfile
+grep -Fq 'infra/hermes/package.json infra/hermes/package-lock.json' infra/hermes/Dockerfile
+grep -Fq 'npm-cli.js ci --prefix /opt/hermes' infra/hermes/Dockerfile
 grep -Fq '/usr/local/lib/node_modules/npm' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/node_modules/.bin/agent-browser --help' infra/hermes/Dockerfile
 grep -Fq 'from PIL import Image' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/.venv/bin/hermes --help' infra/hermes/Dockerfile
+grep -Fq 'infra/hermes/browser-runtime.json' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/.venv/bin/python /tmp/upgrade_browser.py' infra/hermes/Dockerfile
 
 echo "Production environment and immutable Compose contracts passed"

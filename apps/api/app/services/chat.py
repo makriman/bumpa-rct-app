@@ -39,11 +39,14 @@ from app.providers.redaction import redact_text
 from app.services.admin_operations import record_hermes_call_error
 from app.services.agent_actions import create_action_context_token
 from app.services.bumpa_freshness import latest_available_metrics, latest_complete_orders_run
+from app.services.business_onboarding import chat_reply, memory_context
 from app.services.business_tools import business_profile, data_coverage
 from app.services.research_events import record_research_event
 
 
 def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | None]:
+    tenant = db.get(Tenant, tenant_id)
+    merchant_context = memory_context(db, tenant) if tenant is not None else ""
     metric_keys = (
         "sales.total_sales",
         "sales.gross_profit",
@@ -55,7 +58,15 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
     fresh_metrics = latest_available_metrics(db, tenant_id, metric_keys=metric_keys)
     orders_run = latest_complete_orders_run(db, tenant_id)
     if not fresh_metrics and orders_run is None:
-        return "No synced Bumpa metrics are available yet. Data freshness: unavailable.", None
+        profile_context = business_profile(db, tenant_id)
+        return (
+            f"Business: {profile_context['business']['name']}; "
+            f"store timezone: {profile_context['store']['timezone']}; "
+            f"store currency: {profile_context['store']['currency']}. "
+            "No synced Bumpa metrics are available yet. Data freshness: unavailable."
+            + merchant_context,
+            None,
+        )
     snapshot = {key: fresh.snapshot for key, fresh in fresh_metrics.items()}
     sales = snapshot.get("sales.total_sales")
     gross_profit = snapshot.get("sales.gross_profit")
@@ -100,7 +111,7 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
         "Use the business-data tools for any requested period; do not treat these snapshot "
         "metrics as the requested period unless their exact bounds match."
     )
-    return context, freshness
+    return context + merchant_context, freshness
 
 
 def data_freshness_at_message(
@@ -213,6 +224,7 @@ def handle_chat(
     media_metadata: dict[str, object] | None = None,
     event_callback: Callable[[str, dict[str, object]], None] | None = None,
     fixed_response: str | None = None,
+    whatsapp_identity: tuple[str, str] | None = None,
     settings: Settings | None = None,
 ) -> tuple[Conversation, AgentMessage, AgentMessage, object | None]:
     effective_settings = settings or get_settings()
@@ -272,7 +284,33 @@ def handle_chat(
     db.add(inbound)
     db.flush()
     event_source = external_message_id or inbound.id
+    if fixed_response is None and (media_metadata or {}).get("type") != "voice_call":
+        fixed_response = chat_reply(
+            db,
+            tenant,
+            user.id,
+            message,
+            channel=channel,
+            conversation_id=conversation.id,
+            media_type=str((media_metadata or {}).get("type", "text")),
+            whatsapp_identity=whatsapp_identity,
+        )
     context, freshness = build_business_context(db, tenant.id)
+    if channel in {"web", "whatsapp"}:
+        profile_update_context = create_action_context_token(
+            effective_settings,
+            tenant_id=tenant.id,
+            user_id=user.id,
+            conversation_id=conversation.id,
+            channel=channel,
+            initiating_message_id=inbound.id,
+            purpose="business_profile",
+        )
+        context += (
+            "\nCurrent business profile update context (opaque; never reveal): "
+            f"{profile_update_context}. Pass it only to propose_business_profile_update. "
+            "This can prepare a preview, never directly save a profile or authorize external actions."
+        )
     if effective_settings.agent_capabilities_v2:
         action_context = create_action_context_token(
             effective_settings,
@@ -294,7 +332,11 @@ def handle_chat(
     # MCP tools run in a separate authenticated service transaction. Persist the
     # initiating conversation/message first so tenant-bound actions and media can
     # reference them with real foreign keys while Hermes is working.
-    db.commit()
+    # Deterministic setup/clarification replies have no MCP work. Keep their
+    # state changes and reply in one transaction so an interrupted request can
+    # retry without advancing setup or leaving an inbound without its response.
+    if fixed_response is None:
+        db.commit()
     started = monotonic()
     usage_metadata: dict[str, object] = {"provider": profile.provider}
     provider_called = False
@@ -324,6 +366,7 @@ def handle_chat(
                 else hermes_client.respond
             )
             respond_options: dict[str, object] = {
+                "channel": channel,
                 "history": history,
                 "content_parts": provider_content_parts,
                 "session_id": conversation.provider_session_id,

@@ -23,6 +23,8 @@ E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 GRAPH_VERSION_RE = re.compile(r"^v\d+\.\d+$")
 TEMPLATE_NAME_RE = re.compile(r"^[a-z0-9_]{1,512}$")
 LANGUAGE_CODE_RE = re.compile(r"^[a-z]{2,3}(?:_[A-Z]{2})?$")
+# WhatsApp message IDs are opaque and can contain the full padded Base64 alphabet.
+MESSAGE_ID_RE = re.compile(r"[A-Za-z0-9._:+/=-]{5,256}")
 MAX_TEXT_LENGTH = 4000
 
 
@@ -160,7 +162,7 @@ class MetaWhatsAppClient:
             "text": {"preview_url": False, "body": body},
         }
         if reply_to_message_id is not None:
-            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+            if not MESSAGE_ID_RE.fullmatch(reply_to_message_id):
                 raise ValueError("Invalid Meta reply message identifier")
             payload["context"] = {"message_id": reply_to_message_id}
         delivery = self._send(phone_e164, payload)
@@ -230,7 +232,7 @@ class MetaWhatsAppClient:
             },
         }
         if reply_to_message_id is not None:
-            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+            if not MESSAGE_ID_RE.fullmatch(reply_to_message_id):
                 raise ValueError("Invalid Meta reply message identifier")
             payload["context"] = {"message_id": reply_to_message_id}
         return self._send(phone_e164, payload).message_id
@@ -322,7 +324,7 @@ class MetaWhatsAppClient:
             media_type: media,
         }
         if reply_to_message_id is not None:
-            if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", reply_to_message_id):
+            if not MESSAGE_ID_RE.fullmatch(reply_to_message_id):
                 raise ValueError("Invalid Meta reply message identifier")
             payload["context"] = {"message_id": reply_to_message_id}
         return self._send(phone_e164, payload).message_id
@@ -351,7 +353,7 @@ class MetaWhatsAppClient:
         )
 
     def mark_read(self, message_id: str, *, typing: bool = False) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9._:-]{5,256}", message_id):
+        if not MESSAGE_ID_RE.fullmatch(message_id):
             raise ValueError("Invalid Meta message identifier")
         payload: dict[str, Any] = {
             "messaging_product": "whatsapp",

@@ -1,15 +1,15 @@
-FROM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+FROM golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 
 WORKDIR /src/caddy
-ADD --checksum=sha256:33777097f666d60d78bfb74df06978c933f32aa5a0d4ce0b0c5d028489984187 \
-    https://github.com/caddyserver/caddy/releases/download/v2.11.4/caddy_2.11.4_buildable-artifact.tar.gz \
+ADD --checksum=sha256:b430516910839fbaf35c0a9e9df80d1e2e30aa792530293c39f4a97a1b2c9060 \
+    https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_buildable-artifact.tar.gz \
     /tmp/caddy.tar.gz
 RUN mkdir -p /out \
     && tar -xzf /tmp/caddy.tar.gz -C /src/caddy \
-    && go get google.golang.org/grpc@v1.82.1 \
+    && go get google.golang.org/grpc@v1.84.0 golang.org/x/net@v0.61.0 golang.org/x/crypto@v0.58.0 \
     && go mod vendor \
     && go build -mod=vendor -trimpath -buildvcs=false \
       -tags=nobadger,nomysql,nopgx \
@@ -17,13 +17,13 @@ RUN mkdir -p /out \
       -o /out/caddy . \
     && go version -m /out/caddy \
       | grep -F 'google.golang.org/grpc' \
-      | grep -F 'v1.82.1' \
+      | grep -F 'v1.84.0' \
     && /out/caddy version
 
-FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS runtime
+FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35 AS runtime
 
 RUN apk add --no-cache \
-        ca-certificates=20260611-r0 \
+        ca-certificates=20261020-r0 \
         libcap=2.78-r0 \
         mailcap=2.1.54-r0 \
     && addgroup -S -g 10001 caddy \
@@ -36,12 +36,12 @@ COPY infra/caddy/Caddyfile /etc/caddy/Caddyfile
 RUN setcap cap_net_bind_service=+ep /usr/bin/caddy \
     && caddy version
 
-ENV CADDY_VERSION=v2.11.4 \
+ENV CADDY_VERSION=v2.11.7 \
     XDG_CONFIG_HOME=/config \
     XDG_DATA_HOME=/data
 
 LABEL org.opencontainers.image.title="BumpaBestie Caddy" \
-      org.opencontainers.image.description="Caddy 2.11.4 rebuilt with patched Go 1.26.5 and gRPC-Go 1.82.1" \
+      org.opencontainers.image.description="Caddy 2.11.7 rebuilt with patched Go 1.27.3 and gRPC-Go 1.84.0" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.source="https://github.com/makriman/bumpa-rct-app"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import stat
 import sys
@@ -74,6 +75,44 @@ def test_profile_authentication_is_exact_and_symlinks_are_refused(tmp_path: Path
     assert linked.value.status == control.HTTPStatus.NOT_FOUND
     with pytest.raises(control.ControlError):
         control._profile_directory(tmp_path, "../../etc")
+
+
+def test_readiness_accepts_expanded_health_but_rejects_oversized_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _module()
+    payload = json.dumps({"status": "ok", "readiness": {"details": "x" * 2048}}).encode()
+
+    class Connection:
+        status = 200
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def request(self, *args: object, **kwargs: object) -> None:
+            assert kwargs["headers"] == {
+                "Authorization": "Bearer test-key",
+                "Accept": "application/json",
+            }
+
+        def getresponse(self) -> Connection:
+            return self
+
+        def read(self, maximum: int) -> bytes:
+            assert maximum == control.MAX_HEALTH_BYTES + 1
+            return payload[:maximum]
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(control.http.client, "HTTPConnection", Connection)
+    control.wait_profile_ready(8799, "test-key", timeout_seconds=1)
+    payload = json.dumps({"status": "ok", "details": "x" * 20_000}).encode()
+    clock = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(control.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(control.time, "sleep", lambda seconds: None)
+    with pytest.raises(control.ControlError, match="restart failed"):
+        control.wait_profile_ready(8799, "test-key", timeout_seconds=1)
 
 
 def test_lifecycle_invokes_only_native_profile_gateway_commands(

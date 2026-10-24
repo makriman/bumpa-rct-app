@@ -22,7 +22,7 @@ from app.db.session import SessionLocal
 from app.jobs.handlers import research_report_handler
 from app.main import app
 from app.providers.redaction import pseudonymize, redact_order_payload, redact_text
-from tests.conftest import auth_headers
+from tests.conftest import approved_login_mapping, auth_headers
 
 RAW_PII = (
     "Customer name: Ada Lovelace; shipping address: Plot 12 Admiralty Way, Lekki; "
@@ -548,41 +548,44 @@ def test_production_report_request_is_transactionally_enqueued(
     production_settings = get_settings().model_copy(update={"app_env": "production"})
     app.dependency_overrides[get_settings] = lambda: production_settings
     monkeypatch.setattr("app.routes.research.enforce_operation_rate_limit", lambda *a, **k: None)
-    try:
-        monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "false")
-        unavailable = client.post(
-            "/v1/research/reports",
-            headers=researcher,
-            json={"report_type": "question_taxonomy", "formats": ["csv"]},
-        )
-        assert unavailable.status_code == 503
-        monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "true")
-        created = client.post(
-            "/v1/research/reports",
-            headers=researcher,
-            json={"report_type": "question_taxonomy", "formats": ["jsonl", "csv"]},
-        )
-    finally:
-        app.dependency_overrides.pop(get_settings, None)
-    assert created.status_code == 201, created.text
-    assert created.json()["status"] == "queued"
-    report_id = created.json()["id"]
-    with SessionLocal() as db:
-        job = db.scalar(
-            select(AsyncJob).where(
-                AsyncJob.kind == "research.generate_report",
-                AsyncJob.idempotency_key == f"research-report:{report_id}",
+    with approved_login_mapping("+2348099990002"):
+        try:
+            monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "false")
+            unavailable = client.post(
+                "/v1/research/reports",
+                headers=researcher,
+                json={"report_type": "question_taxonomy", "formats": ["csv"]},
             )
-        )
-        assert job is not None
-        assert job.payload == {"report_id": report_id, "formats": ["csv", "jsonl"]}
-        assert job.max_attempts == 3
-        outbox = db.scalar(select(JobOutbox).where(JobOutbox.job_id == job.id))
-        assert outbox is not None and outbox.status == "pending"
-        result = research_report_handler(db, job)
-        assert result == {
-            "report_id": report_id,
-            "status": "success",
-            "formats": ["csv", "jsonl"],
-        }
-        assert len(list(db.scalars(select(Artifact).where(Artifact.report_id == report_id)))) == 2
+            assert unavailable.status_code == 503
+            monkeypatch.setenv("ASYNC_RUNTIME_ENABLED", "true")
+            created = client.post(
+                "/v1/research/reports",
+                headers=researcher,
+                json={"report_type": "question_taxonomy", "formats": ["jsonl", "csv"]},
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert created.status_code == 201, created.text
+        assert created.json()["status"] == "queued"
+        report_id = created.json()["id"]
+        with SessionLocal() as db:
+            job = db.scalar(
+                select(AsyncJob).where(
+                    AsyncJob.kind == "research.generate_report",
+                    AsyncJob.idempotency_key == f"research-report:{report_id}",
+                )
+            )
+            assert job is not None
+            assert job.payload == {"report_id": report_id, "formats": ["csv", "jsonl"]}
+            assert job.max_attempts == 3
+            outbox = db.scalar(select(JobOutbox).where(JobOutbox.job_id == job.id))
+            assert outbox is not None and outbox.status == "pending"
+            result = research_report_handler(db, job)
+            assert result == {
+                "report_id": report_id,
+                "status": "success",
+                "formats": ["csv", "jsonl"],
+            }
+            assert (
+                len(list(db.scalars(select(Artifact).where(Artifact.report_id == report_id)))) == 2
+            )

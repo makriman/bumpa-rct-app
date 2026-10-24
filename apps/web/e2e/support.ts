@@ -1,5 +1,6 @@
 import type { Page, Route } from "@playwright/test";
 import { previewSyncRuns } from "../lib/preview-fixtures";
+import completedBusinessProfile from "../tests/fixtures/business-profile-completed.json";
 
 export async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({
@@ -48,6 +49,12 @@ export async function grantTestSession(page: Page) {
 export async function fulfillSession(route: Route): Promise<boolean> {
   if (apiPath(route) !== "/api/backend/auth/me") return false;
   await json(route, liveSession);
+  return true;
+}
+
+export async function fulfillBusinessProfile(route: Route): Promise<boolean> {
+  if (apiPath(route) !== "/api/backend/settings/business-profile") return false;
+  await json(route, completedBusinessProfile);
   return true;
 }
 

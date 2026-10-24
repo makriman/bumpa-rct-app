@@ -4,21 +4,26 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "cf-typegen": "wrangler types",
+    "cf-typegen": "wrangler types && node scripts/normalize-generated-types.mjs",
     "typecheck": "npm run cf-typegen && tsc --noEmit",
     "test": "vitest run",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.12.4"
+    "@cloudflare/sandbox": "0.12.14"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.18.8",
-    "@cloudflare/workers-types": "5.20260724.1",
+    "@cloudflare/vitest-pool-workers": "0.23.0",
+    "@cloudflare/workers-types": "5.20261024.1",
     "@types/node": "24.10.13",
     "typescript": "7.0.2",
-    "vitest": "4.1.10",
-    "wrangler": "4.114.0"
+    "vitest": "4.1.12",
+    "wrangler": "4.152.0"
+  },
+  "overrides": {
+    "sharp": "0.35.5",
+    "undici": "7.30.1",
+    "zod": "4.6.6"
   }
 }

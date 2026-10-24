@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { previewTeam } from "../lib/preview-fixtures";
 import {
   apiPath,
+  fulfillBusinessProfile,
   fulfillSession,
   grantTestSession,
   json,
@@ -380,6 +381,7 @@ test("chat supports retry, durable URLs, history paging, and the mobile drawer",
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, {
         items: [
@@ -528,6 +530,52 @@ test("chat supports retry, durable URLs, history paging, and the mobile drawer",
   ).toBeVisible();
 });
 
+test("chat waits for profile readiness before accepting a draft", async ({
+  page,
+}) => {
+  await grantTestSession(page);
+  let releaseProfile: () => void = () => undefined;
+  const profileGate = new Promise<void>((resolve) => {
+    releaseProfile = resolve;
+  });
+  let markObserved: () => void = () => undefined;
+  const observed = new Promise<void>((resolve) => {
+    markObserved = resolve;
+  });
+  await page.route("**/api/backend/**", async (route) => {
+    const path = apiPath(route);
+    if (await fulfillSession(route)) return;
+    if (path === "/api/backend/settings/business-profile") {
+      markObserved();
+      await profileGate;
+      await fulfillBusinessProfile(route);
+      return;
+    }
+    if (path.startsWith("/api/backend/chat/conversations")) {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    await route.abort("failed");
+  });
+  await page.goto("/chat");
+  await observed;
+  const composer = page.getByRole("textbox", { name: "Message Bumpa Bestie" });
+  try {
+    await expect(
+      page.getByText("Getting your business profile ready…"),
+    ).toBeVisible();
+    await expect(composer).toHaveCount(0);
+  } finally {
+    releaseProfile();
+  }
+  await expect(
+    page.getByRole("heading", { name: "What shall we work on today?" }),
+  ).toBeVisible();
+  await composer.fill("Help me price my new stock");
+  await page.waitForLoadState("networkidle");
+  await expect(composer).toHaveValue("Help me price my new stock");
+});
+
 test("chat recovers after the browser returns online", async ({
   page,
 }, testInfo) => {
@@ -536,6 +584,7 @@ test("chat recovers after the browser returns online", async ({
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -606,6 +655,7 @@ test("account menu logs out through the browser BFF", async ({
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -635,6 +685,7 @@ test("chat reflows at the CSS viewport equivalent of 200% desktop zoom", async (
   await grantTestSession(page);
   await page.route("**/api/backend/**", async (route) => {
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -661,6 +712,7 @@ test("primary mobile chat controls keep generous touch targets", async ({
   await grantTestSession(page);
   await page.route("**/api/backend/**", async (route) => {
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -700,6 +752,7 @@ test("team settings adds a persisted live member", async ({ page }) => {
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (
       path === "/api/backend/settings/team" &&
       route.request().method() === "POST"
@@ -764,6 +817,7 @@ test("consumer output contains no links to operational surfaces", async ({
 }) => {
   await page.route("**/api/backend/**", async (route) => {
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (apiPath(route) === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;

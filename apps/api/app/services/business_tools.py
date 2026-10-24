@@ -134,6 +134,8 @@ def resolve_period(
 
 
 def business_profile(db: Session, tenant_id: str) -> dict[str, Any]:
+    from app.services.business_onboarding import QUESTIONS, state_for
+
     tenant, timezone, currency = tenant_store_context(db, tenant_id)
     return {
         "business": {
@@ -143,6 +145,9 @@ def business_profile(db: Session, tenant_id: str) -> dict[str, Any]:
             "city": tenant.city,
         },
         "store": {"timezone": timezone, "currency": currency},
+        "merchant_profile": state_for(db, tenant)["answers"],
+        "merchant_profile_source": "Merchant-reviewed onboarding; self-reported, not verified sales totals",
+        "profile_choices": {q["key"]: q["options"] for q in QUESTIONS if q.get("options")},
         "source": "Bumpa Bestie tenant profile",
     }
 

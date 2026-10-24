@@ -2,6 +2,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   apiPath,
+  fulfillBusinessProfile,
   fulfillSession,
   grantTestSession,
   json,
@@ -35,6 +36,7 @@ async function mockConsumerRouteData(page: Page) {
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -98,6 +100,7 @@ async function mockChatVisualData(
   await page.route("**/api/backend/**", async (route) => {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
+    if (await fulfillBusinessProfile(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, {
         items: populated
@@ -193,6 +196,21 @@ for (const route of consumerRouteMatrix) {
     expect(response?.status()).toBe(200);
     await expect(page.locator("main")).toBeVisible();
     await page.waitForLoadState("networkidle");
+    if (route.path === "/chat" || route.path.startsWith("/chat/")) {
+      // Empty persisted conversations must load a profile too, not remain busy.
+      await expect(
+        page.getByRole("heading", {
+          name: "What shall we work on today?",
+        }),
+      ).toBeVisible();
+    }
+    if (route.path === "/profile") {
+      await expect(
+        page.getByRole("heading", {
+          name: "What Bestie knows about your business",
+        }),
+      ).toBeVisible();
+    }
     await settleVisuals(page);
     expect(
       await page.evaluate(
@@ -428,6 +446,7 @@ test("populated chat visual baseline does not regress", async ({ page }) => {
 });
 
 test("sending chat visual baseline does not regress", async ({ page }) => {
+  await page.clock.setFixedTime("2026-07-21T08:02:00Z");
   let releaseSend: () => void = () => undefined;
   const sendGate = new Promise<void>((resolve) => {
     releaseSend = resolve;
@@ -466,6 +485,7 @@ test("sending chat visual baseline does not regress", async ({ page }) => {
 test("recoverable chat error visual baseline does not regress", async ({
   page,
 }) => {
+  await page.clock.setFixedTime("2026-07-21T08:02:00Z");
   await grantTestSession(page);
   await mockChatVisualData(page, {
     onSend: async (route) => {

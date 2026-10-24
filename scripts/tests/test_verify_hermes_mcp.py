@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
+import sys
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "verify_hermes_mcp.py"
@@ -26,6 +31,95 @@ def private_url(
 
 
 class VerifyHermesMcpTests(unittest.TestCase):
+    def test_profile_verification_supports_both_mcp_transport_generations(self) -> None:
+        for modern in (False, True):
+            with self.subTest(modern=modern):
+                self._verify_transport_generation(modern)
+
+    def _verify_transport_generation(self, modern: bool) -> None:
+        events: list[str] = []
+        credential = "synthetic-profile-key-for-transport-tests"
+        modules = {
+            name: ModuleType(name)
+            for name in (
+                "mcp",
+                "mcp.client",
+                "mcp.client.streamable_http",
+                "httpx2",
+            )
+        }
+
+        class HttpClient:
+            def __init__(inner, **kwargs: object) -> None:
+                self.assertEqual(kwargs["headers"], {"Authorization": f"Bearer {credential}"})
+                self.assertIs(kwargs["follow_redirects"], False)
+
+            async def __aenter__(inner) -> object:
+                events.append("http-open")
+                return inner
+
+            async def __aexit__(inner, *_args: object) -> None:
+                events.append("http-close")
+
+        @asynccontextmanager
+        async def transport(url: str, **kwargs: object):
+            self.assertEqual(url, private_url())
+            if modern:
+                self.assertIsInstance(kwargs["http_client"], HttpClient)
+            else:
+                self.assertEqual(kwargs["headers"], {"Authorization": f"Bearer {credential}"})
+                self.assertEqual(kwargs["sse_read_timeout"], 20)
+            events.append("transport-open")
+            yield ("read", "write", "session", "modern-extra")
+            events.append("transport-close")
+
+        class Session:
+            def __init__(inner, read: str, write: str) -> None:
+                self.assertEqual((read, write), ("read", "write"))
+
+            async def __aenter__(inner) -> object:
+                events.append("session-open")
+                return inner
+
+            async def __aexit__(inner, *_args: object) -> None:
+                events.append("session-close")
+
+            async def initialize(inner) -> None:
+                events.append("initialize")
+
+            async def list_tools(inner) -> object:
+                return SimpleNamespace(
+                    tools=[SimpleNamespace(name=name) for name in MODULE.REQUIRED_TOOLS]
+                )
+
+        modules["mcp"].ClientSession = Session
+        modules["mcp"].client = modules["mcp.client"]
+        modules["mcp.client"].streamable_http = modules["mcp.client.streamable_http"]
+        setattr(
+            modules["mcp.client.streamable_http"],
+            "streamable_http_client" if modern else "streamablehttp_client",
+            transport,
+        )
+        modules["httpx2"].AsyncClient = HttpClient
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(MODULE, "load_profile_key", return_value=credential),
+        ):
+            self.assertEqual(
+                asyncio.run(MODULE.verify_profile(Path("synthetic"), private_url())),
+                19,
+            )
+        expected = [
+            "transport-open",
+            "session-open",
+            "initialize",
+            "session-close",
+            "transport-close",
+        ]
+        if modern:
+            expected = ["http-open", *expected, "http-close"]
+        self.assertEqual(events, expected)
+
     def test_private_mcp_url_is_exact(self) -> None:
         expected = private_url()
         self.assertEqual(MODULE.validate_private_mcp_url(expected), expected)
@@ -49,8 +143,7 @@ class VerifyHermesMcpTests(unittest.TestCase):
                 profile.mkdir()
                 environment = profile / ".env"
                 environment.write_text(
-                    "API_SERVER_ENABLED=true\n"
-                    f"API_SERVER_KEY={'a' * 47}{index}\n",
+                    f"API_SERVER_ENABLED=true\nAPI_SERVER_KEY={'a' * 47}{index}\n",
                     encoding="utf-8",
                 )
                 os.chmod(environment, 0o600)
@@ -63,7 +156,9 @@ class VerifyHermesMcpTests(unittest.TestCase):
             with self.assertRaises(MODULE.VerificationError):
                 MODULE.load_profile_key(profiles[0])
 
-    def test_required_surface_contains_business_research_and_sandbox_tools(self) -> None:
+    def test_required_surface_contains_business_research_and_sandbox_tools(
+        self,
+    ) -> None:
         self.assertEqual(len(MODULE.REQUIRED_TOOLS), 19)
         self.assertTrue(
             {

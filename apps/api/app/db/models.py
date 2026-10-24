@@ -52,6 +52,15 @@ class Tenant(IdMixin, TimestampMixin, Base):
     research_consent_status: Mapped[str] = mapped_column(String(24), default="pending")
 
 
+class MerchantBusinessProfile(IdMixin, TimestampMixin, Base):
+    __tablename__ = "merchant_business_profiles"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    state: Mapped[JsonDict] = mapped_column(JSON, default=dict, server_default="{}")
+
+
 class User(IdMixin, TimestampMixin, Base):
     __tablename__ = "users"
 

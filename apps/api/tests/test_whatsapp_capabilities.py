@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.crypto import FieldCipher
 from app.core.ids import new_id
 from app.core.time import utcnow
 from app.db.base import Base
@@ -17,6 +18,7 @@ from app.db.models import (
     AgentMessage,
     Conversation,
     GeneratedAgentMedia,
+    HermesProfile,
     PendingAgentAction,
     PhoneIdentity,
     ResearchConsent,
@@ -28,14 +30,167 @@ from app.db.models import (
     WhatsappMessage,
 )
 from app.jobs.runtime import PermanentJobError
+from app.providers.hermes import HermesResult
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
-from app.services import whatsapp
+from app.services import chat, whatsapp
 
 
 def _factory() -> sessionmaker[Session]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def test_progress_deduplicates_bodies_and_keeps_typing_after_message_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress = whatsapp._WhatsAppProgress(
+        settings=Settings(app_env="test", whatsapp_progress_after_seconds=2),
+        event_id="event-id",
+        inbound_message_id="inbound-id",
+        phone="+2348000000044",
+        tenant_id="tenant-id",
+        user_id="user-id",
+        meta_sender=("123456789", "987654321"),
+    )
+    now = [100.0]
+    sent: list[tuple[float, str]] = []
+    typing: list[float] = []
+
+    def wait(timeout: float | None = None) -> bool:
+        now[0] += timeout or 0.0
+        if now[0] >= 125:
+            progress.finish()
+        else:
+            # Start/completion events and different tools can all map to the same
+            # generic text. A third distinct stage must not create another bubble.
+            tool = "research_web" if now[0] >= 110 else "get_sales" if now[0] >= 106 else "api_call"
+            progress.on_event("tool.progress", {"tool": tool, "status": "working"})
+        return progress._done.is_set()
+
+    monkeypatch.setattr(whatsapp, "monotonic", lambda: now[0])
+    progress._started_at = now[0]
+    monkeypatch.setattr(progress._done, "wait", wait)
+    monkeypatch.setattr(progress._changed, "wait", wait)
+    monkeypatch.setattr(progress, "_send", lambda body: sent.append((now[0], body)))
+    monkeypatch.setattr(progress, "_refresh_typing", lambda: typing.append(now[0]))
+    progress.on_event("tool.progress", {"tool": "api_call", "status": "started"})
+    progress._run()
+
+    assert sent == [
+        (102.0, whatsapp._progress_body("api_call")),
+        (106.0, whatsapp._progress_body("get_sales")),
+    ]
+    assert typing[-1] > sent[-1][0] + 10
+
+
+def test_progress_waits_for_real_tools_and_stops_before_sending_after_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress = whatsapp._WhatsAppProgress(
+        settings=Settings(app_env="test"),
+        event_id="event-id",
+        inbound_message_id="inbound-id",
+        phone="+2348000000044",
+        tenant_id="tenant-id",
+        user_id="user-id",
+        meta_sender=("123456789", "987654321"),
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(progress, "_send", sent.append)
+    monkeypatch.setattr(progress, "_refresh_typing", lambda: None)
+    monkeypatch.setattr(progress._done, "wait", lambda _timeout: False)
+    monkeypatch.setattr(progress._changed, "wait", lambda **_: progress.finish())
+    progress.on_event("message.delta", {"delta": "Some draft text"})
+    progress._run()
+    assert sent == []
+    progress.on_event("tool.progress", {"tool": "get_sales"})
+    progress._run()
+    assert sent == []
+
+
+def test_progress_body_is_delivered_once_even_when_a_worker_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _factory()
+    with factory() as db:
+        tenant, user = _seed_authorized_phone(db)
+        event = WebhookEvent(
+            provider="whatsapp",
+            external_event_id="progress-retry",
+            signature_valid=True,
+            payload={},
+        )
+        db.add(event)
+        db.commit()
+        event_id, tenant_id, user_id = event.id, tenant.id, user.id
+    monkeypatch.setattr(whatsapp, "SessionLocal", factory)
+    monkeypatch.setattr(MetaWhatsAppClient, "mark_read", lambda *_args, **_kwargs: None)
+    sent: list[str] = []
+
+    def send_text(_self: object, _phone: str, body: str, **_kwargs: object) -> str:
+        sent.append(body)
+        return f"wamid.progress.{len(sent)}"
+
+    monkeypatch.setattr(MetaWhatsAppClient, "send_text", send_text)
+
+    def new_progress() -> whatsapp._WhatsAppProgress:
+        return whatsapp._WhatsAppProgress(
+            settings=_meta_settings(),
+            event_id=event_id,
+            inbound_message_id="inbound-id",
+            phone="+2348000000044",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            meta_sender=("123456789", "987654321"),
+        )
+
+    generic = whatsapp._progress_body("api_call")
+    sales = whatsapp._progress_body("get_sales")
+    first = new_progress()
+    first._send(generic)
+    first._send(sales)
+    restarted = new_progress()
+    restarted._send(sales)
+    restarted._send(generic)
+    assert sent == [generic, sales]
+
+
+def test_progress_stops_if_answer_finishes_during_typing_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _factory()
+    with factory() as db:
+        tenant, user = _seed_authorized_phone(db)
+        event = WebhookEvent(
+            provider="whatsapp",
+            external_event_id="progress-finished-during-read",
+            signature_valid=True,
+            payload={},
+        )
+        db.add(event)
+        db.commit()
+        event_id, tenant_id, user_id = event.id, tenant.id, user.id
+    progress = whatsapp._WhatsAppProgress(
+        settings=_meta_settings(),
+        event_id=event_id,
+        inbound_message_id="inbound-id",
+        phone="+2348000000044",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        meta_sender=("123456789", "987654321"),
+    )
+    monkeypatch.setattr(whatsapp, "SessionLocal", factory)
+    # A slow read/typing request can finish after the final answer is ready.
+    monkeypatch.setattr(
+        MetaWhatsAppClient, "mark_read", lambda *_args, **_kwargs: progress.finish()
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        whatsapp, "_deliver_once", lambda *_args, **kwargs: sent.append(kwargs["body"])
+    )
+    progress._send(whatsapp._progress_body("get_sales"))
+    assert sent == []
 
 
 def _seed_authorized_phone(db: Session) -> tuple[Tenant, User]:
@@ -67,6 +222,56 @@ def _seed_authorized_phone(db: Session) -> tuple[Tenant, User]:
     )
     db.commit()
     return tenant, user
+
+
+@pytest.mark.parametrize("channel", ["web", "whatsapp"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_forwards_trusted_channel_to_hermes(
+    monkeypatch: pytest.MonkeyPatch, channel: str, stream: bool
+) -> None:
+    settings = Settings(app_env="test", agent_backend="hermes")
+    calls: list[tuple[str, str]] = []
+
+    class FakeHermesClient:
+        def __init__(self, _settings: Settings) -> None:
+            pass
+
+        def respond(self, _endpoint: object, *, channel: str, **_kwargs: object) -> HermesResult:
+            calls.append(("regular", channel))
+            return HermesResult("Short answer", 1, 1, 2, 10)
+
+        def respond_stream(
+            self, _endpoint: object, *, channel: str, **_kwargs: object
+        ) -> HermesResult:
+            calls.append(("stream", channel))
+            return HermesResult("Short answer", 1, 1, 2, 10)
+
+    monkeypatch.setattr(chat, "HermesClient", FakeHermesClient)
+    with _factory()() as db:
+        tenant, user = _seed_authorized_phone(db)
+        db.add(
+            HermesProfile(
+                tenant_id=tenant.id,
+                profile_name="tenant_profile",
+                profile_path="/profiles/tenant_profile",
+                api_port=8700,
+                provider="hermes",
+                api_internal_url="http://hermes:8700/v1",
+                encrypted_api_key=FieldCipher.from_settings(settings).encrypt("private-key"),
+            )
+        )
+        db.commit()
+        _, _, outbound, _ = chat.handle_chat(
+            db,
+            tenant=tenant,
+            user=user,
+            message="Help with a discount email",
+            channel=channel,
+            settings=settings,
+            event_callback=(lambda *_: None) if stream else None,
+        )
+        assert outbound.content == "Short answer"
+    assert calls == [("stream" if stream else "regular", channel)]
 
 
 def test_whatsapp_batch_extraction_reply_context_and_progress_language() -> None:
@@ -680,7 +885,11 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             MetaWhatsAppClient,
             "send_text",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("transport", retryable=True)
+                MetaProviderError(
+                    "transport",
+                    retryable=True,
+                    request_id="meta-request-alpha",
+                )
             ),
         )
         with pytest.raises(PermanentJobError, match="cannot be retried"):
@@ -701,6 +910,11 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             )
         )
         assert ambiguous is not None and ambiguous.status == "ambiguous"
+        assert ambiguous.payload["provider_error"] == {
+            "category": "transport",
+            "retryable": True,
+            "request_id_hash": hashlib.sha256(b"meta-request-alpha").hexdigest(),
+        }
         with pytest.raises(PermanentJobError, match="reconciliation"):
             whatsapp._deliver_once(
                 db,
@@ -742,7 +956,13 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             MetaWhatsAppClient,
             "send_text",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("provider", retryable=True, http_status=429)
+                MetaProviderError(
+                    "rate_limited",
+                    retryable=True,
+                    http_status=429,
+                    provider_code=131047,
+                    retry_after_seconds=6,
+                )
             ),
         )
         with pytest.raises(MetaProviderError):
@@ -763,6 +983,51 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             )
         )
         assert retryable is not None and retryable.status == "failed"
+        assert retryable.payload["provider_error"] == {
+            "category": "rate_limited",
+            "retryable": True,
+            "http_status": 429,
+            "provider_code": "131047",
+            "retry_after_seconds": 6,
+        }
+
+        monkeypatch.setattr(
+            MetaWhatsAppClient,
+            "send_text",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                MetaProviderError(
+                    "provider",
+                    retryable=False,
+                    http_status=400,
+                    provider_code="130497",
+                )
+            ),
+        )
+        with pytest.raises(PermanentJobError, match="cannot be retried"):
+            whatsapp._deliver_once(
+                db,
+                event=event,
+                purpose="provider-rejected",
+                phone="+2348000000044",
+                body="Rejected send",
+                settings=settings,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                meta_sender=("123456789", "987654321"),
+            )
+        provider_rejected = db.scalar(
+            select(WhatsappMessage).where(
+                WhatsappMessage.idempotency_key
+                == whatsapp._idempotency_key(event.id, "provider-rejected")
+            )
+        )
+        assert provider_rejected is not None and provider_rejected.status == "rejected"
+        assert provider_rejected.payload["provider_error"] == {
+            "category": "provider",
+            "retryable": False,
+            "http_status": 400,
+            "provider_code": "130497",
+        }
 
 
 def test_outbound_media_upload_delivery_and_failure_classification(
@@ -837,7 +1102,12 @@ def test_outbound_media_upload_delivery_and_failure_classification(
             MetaWhatsAppClient,
             "send_media",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("provider", retryable=False, http_status=400)
+                MetaProviderError(
+                    "provider",
+                    retryable=False,
+                    http_status=400,
+                    provider_code="130497",
+                )
             ),
         )
         rejected = {**kwargs, "purpose": "media-rejected"}
@@ -850,6 +1120,12 @@ def test_outbound_media_upload_delivery_and_failure_classification(
             )
         )
         assert rejected_row is not None and rejected_row.status == "rejected"
+        assert rejected_row.payload["provider_error"] == {
+            "category": "provider",
+            "retryable": False,
+            "http_status": 400,
+            "provider_code": "130497",
+        }
 
 
 def test_immediate_read_receipts_and_basic_event_guards(

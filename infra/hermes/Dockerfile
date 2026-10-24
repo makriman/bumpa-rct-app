@@ -1,33 +1,42 @@
-FROM nousresearch/hermes-agent@sha256:f7b35053268f532f98955195c909f15a230470fbcbdacaa9fdecb95707dad04a AS runtime
+FROM node:26.12.1-bookworm-slim@sha256:28147155d47dc31abe0a46e0d12b59b2fb3d0a2dcc5dc65fce76a074180b16fe AS node-runtime
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv-runtime
+FROM nousresearch/hermes-agent@sha256:fd822bae0a61bf023450737edbeaeea5fc6460f17cb4ee240a7e67b306ed63fb AS dependencies
 
 USER root
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=uv-runtime /uv /usr/local/bin/uv
+COPY --from=uv-runtime /uv /uvx /opt/hermes/tools/uv-0.13.5-linux-x64/
 # The immutable upstream release currently contains fixable high/critical OS,
 # Python, npm and uv findings. Apply the security overlay in the derived image;
 # publication still consumes and records the exact resulting image digest.
-# Python packages are intentionally upgraded without dependency resolution
-# because upstream pins vulnerable builds exactly. Prune the upstream web/TUI
+# Resolve the security overlay independently of upstream's exact vulnerable pins.
+# Prune the upstream web/TUI
 # workspaces: this image runs the authenticated Python profile gateway and the
 # agent-browser runtime, not the dormant Hermes dashboard or its build tools.
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade --yes --no-install-recommends \
-    && dpkg --compare-versions \
-        "$(dpkg-query --show --showformat='${Version}' libxfont2)" \
-        ge '1:2.0.6-1+deb13u1' \
-    && rm -rf /var/lib/apt/lists/* \
-    && uv pip install --python /opt/hermes/.venv/bin/python --no-cache --no-deps --upgrade \
-        cryptography==48.0.1 \
-        httplib2==0.32.0 \
-        mcp==1.28.1 \
-        pillow==12.3.0 \
-        pyasn1==0.6.4 \
-        python-multipart==0.0.30 \
-        starlette==1.3.1 \
-        tornado==6.5.6 \
-    && uv pip install --python /opt/hermes/.venv/bin/python --no-cache \
+    && rm -rf /var/lib/apt/lists/*
+RUN uv --no-config pip install --python /opt/hermes/.venv/bin/python --no-cache --upgrade \
+        --exclude-newer 2026-10-22T21:15:00Z \
+        aiohttp==3.14.5 \
+        certifi==2026.10.19 \
+        cryptography==50.0.2 \
+        oauthlib==4.0.0 \
+        opentelemetry-api==1.45.1 \
+        opentelemetry-sdk==1.45.1 \
+        opentelemetry-exporter-otlp-proto-http==1.45.1 \
+        pillow==13.0.0 \
+    && uv --no-config pip install --python /opt/hermes/.venv/bin/python --no-cache \
+        --exclude-newer 2026-10-22T20:40:13Z \
         faster-whisper==1.2.1 \
-        numpy==2.4.3 \
-        piper-tts==1.6.0 \
-    && install -d -m 0755 /opt/hermes/models/faster-whisper-base \
+        numpy==2.5.4 \
+        piper-tts==1.8.0 \
+    && /opt/hermes/tools/python-3.14.9+20261021-linux-x64/bin/python -c 'import importlib.util, subprocess, sys; subprocess.run([sys.executable, "-m", "pip", "uninstall", "--yes", "pip"], check=True) if importlib.util.find_spec("pip") else None' \
+    && rm -rf /opt/hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/ensurepip
+
+FROM dependencies AS models
+RUN install -d -m 0755 /opt/hermes/models/faster-whisper-base \
     && curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
         --retry-delay 2 --retry-max-time 180 \
         'https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/config.json?download=true' \
@@ -67,25 +76,51 @@ RUN apt-get update \
         'aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4' \
         '/opt/hermes/models/piper/en_GB-alba-medium.onnx.json' \
         | sha256sum --check --strict \
-    && /opt/hermes/.venv/bin/python -c 'import importlib.metadata as m; expected={"cryptography":"48.0.1","httplib2":"0.32.0","mcp":"1.28.1","pillow":"12.3.0","pyasn1":"0.6.4","python-multipart":"0.0.30","starlette":"1.3.1","tornado":"6.5.6"}; assert all(m.version(name) == version for name, version in expected.items())' \
-    && /opt/hermes/.venv/bin/python -c 'import faster_whisper, piper; from pathlib import Path; assert Path("/opt/hermes/models/faster-whisper-base/model.bin").is_file(); assert Path("/opt/hermes/models/piper/en_GB-alba-medium.onnx").is_file()' \
-    && npm prune --prefix /opt/hermes --omit=dev --workspaces=false \
-        --ignore-scripts --no-audit --no-fund \
-    && rm -rf \
-        /opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion \
-        /opt/hermes/node_modules/@eslint/eslintrc/node_modules/brace-expansion \
-        /opt/hermes/node_modules/brace-expansion \
-        /opt/hermes/node_modules/eslint-plugin-react/node_modules/brace-expansion \
-        /opt/hermes/node_modules/eslint/node_modules/brace-expansion \
-        /opt/hermes/node_modules/js-yaml \
-        /usr/local/lib/node_modules/npm \
+    && /opt/hermes/.venv/bin/python -c 'import importlib.metadata as m; expected={"aiohttp":"3.14.5","certifi":"2026.10.19","cryptography":"50.0.2","oauthlib":"4.0.0","opentelemetry-api":"1.45.1","pillow":"13.0.0"}; actual={name:m.version(name) for name in expected}; assert actual == expected, actual' \
+    && /opt/hermes/.venv/bin/python -c 'from aiohttp import web; from gateway.platforms.api_server import check_api_server_requirements; assert check_api_server_requirements()' \
+    && /opt/hermes/.venv/bin/python -c 'import faster_whisper, piper; from pathlib import Path; assert Path("/opt/hermes/models/faster-whisper-base/model.bin").is_file(); assert Path("/opt/hermes/models/piper/en_GB-alba-medium.onnx").is_file()'
+
+FROM dependencies AS brotli-builder
+ADD --checksum=sha256:98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f \
+    https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz /tmp/brotli.tar.gz
+COPY infra/brotli/build-package.sh /tmp/build-brotli.sh
+RUN sh /tmp/build-brotli.sh /tmp/brotli.tar.gz
+
+FROM models AS runtime
+RUN uv --no-config pip install --python /opt/hermes/.venv/bin/python --no-cache brotlicffi==1.2.1.0
+# Upstream bootstrap metadata says 0.0.0, while its immutable CI stamp records
+# 0.22.5. Verify provenance and the DNS-rebinding fix before correcting identity.
+COPY infra/hermes/reconcile_package_version.py /tmp/reconcile_package_version.py
+RUN PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python /tmp/reconcile_package_version.py \
+    && rm /tmp/reconcile_package_version.py
+
+
+COPY --from=brotli-builder /out/libbrotli1_1.2.1-0bumpa1_amd64.deb /tmp/brotli.deb
+RUN dpkg -i /tmp/brotli.deb && rm /tmp/brotli.deb \
+    && /opt/hermes/.venv/bin/python -c 'import ctypes; assert ctypes.CDLL("libbrotlidec.so.1").BrotliDecoderVersion() == 0x1002001'
+RUN /opt/hermes/.venv/bin/python -c 'import sys; assert sys.version_info[:3] == (3, 14, 9)' \
+    && /opt/hermes/.venv/bin/python -c 'from aiohttp import web; import faster_whisper, piper; from gateway.platforms.api_server import check_api_server_requirements; assert check_api_server_requirements()'
+COPY infra/hermes/browser-runtime.json /tmp/browser-runtime.json
+COPY infra/hermes/upgrade_browser.py /tmp/upgrade_browser.py
+ADD --checksum=sha256:e6c94490f0b6b337225aeb2d2a5034858516b7017356980ba94f5176d8774a50 \
+    https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/linux64/chrome-linux64.zip \
+    /opt/hermes/tools/fetch-e6c94490f0b6b337225aeb2d2a5034858516b7017356980ba94f5176d8774a50/chrome-linux64.zip
+# Install through PM so discovery and future repairs use the patched browser pin.
+RUN PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python /tmp/upgrade_browser.py \
+    && chmod 0644 /opt/hermes/pm/lock.json /opt/hermes/tools/facts.json \
+    && rm /tmp/upgrade_browser.py /tmp/browser-runtime.json
+COPY infra/hermes/package.json infra/hermes/package-lock.json /opt/hermes/
+# The profile gateway needs only the root utilities and browser CLI, not the UI workspaces.
+RUN find /opt/hermes -type d -name node_modules -prune -exec rm -rf '{}' + \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --prefix /opt/hermes \
+        --omit=dev --ignore-scripts --no-audit --no-fund \
+    && rm -rf /usr/local/lib/node_modules/npm \
     && rm -f /usr/local/bin/npm /usr/local/bin/npx \
     && test -z "$(find /opt/hermes -type f \( \
         -path '*/node_modules/brace-expansion/package.json' -o \
-        -path '*/node_modules/js-yaml/package.json' -o \
         -path '*/node_modules/postcss/package.json' -o \
         -path '*/node_modules/react-router/package.json' \) -print -quit)" \
-    && test -x /opt/hermes/node_modules/.bin/agent-browser \
+    && node --version | grep -Fx 'v26.12.1' \
     && /opt/hermes/node_modules/.bin/agent-browser --help >/dev/null \
     && /opt/hermes/.venv/bin/python -c 'from io import BytesIO; import mcp; from PIL import Image; image=Image.new("RGB", (1, 1)); image.save(BytesIO(), format="PNG")' \
     && /opt/hermes/.venv/bin/hermes --help >/dev/null \
@@ -98,3 +133,6 @@ COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-
 COPY --chmod=0444 infra/hermes/control-user /etc/s6-overlay/s6-rc.d/user/contents.d/bumpabestie-hermes-control
 
 ENTRYPOINT ["/usr/local/bin/bumpabestie-hermes-entrypoint"]
+
+FROM runtime AS gateway-runtime
+RUN ln -s /opt/hermes/node_modules/.bin/agent-browser /usr/local/bin/agent-browser

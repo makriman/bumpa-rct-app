@@ -1,20 +1,44 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-env_file="${1:-.env}"
+validation_env_file="${1:-.env}"
 expected_environment="${2:-local}"
+preserved_auth_record=""
+preserved_running_api_id=""
+if (($# > 2)); then
+  if (($# != 5)) || [[ "$expected_environment" != production || "$3" != --preserve-recorded-auth ]]; then
+    echo "Invalid recorded-auth preservation arguments" >&2
+    exit 2
+  fi
+  preserved_auth_record="$4"
+  preserved_running_api_id="$5"
+fi
 
-if [[ ! -f "$env_file" ]]; then
-  echo "Environment file not found: $env_file" >&2
+if [[ ! -f "$validation_env_file" ]]; then
+  echo "Environment file not found: $validation_env_file" >&2
   exit 2
 fi
 
 failed=0
+preserved_auth_valid=0
+if [[ -n "$preserved_auth_record" ]]; then
+  validator_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # shellcheck source=scripts/release_boundary.sh
+  source "$validator_dir/release_boundary.sh"
+  if load_release_boundary "$preserved_auth_record" \
+    && python3 "$validator_dir/validate_preserved_auth.py" \
+      "$validation_env_file" "$preserved_auth_record" "$preserved_running_api_id"; then
+    preserved_auth_valid=1
+  else
+    echo "Recorded auth preservation failed" >&2
+    failed=1
+  fi
+fi
 duplicate_keys="$(
   awk -F= '
     /^[A-Za-z_][A-Za-z0-9_]*=/ { count[$1]++ }
     END { for (key in count) if (count[key] > 1) print key }
-  ' "$env_file" | sort
+  ' "$validation_env_file" | sort
 )"
 if [[ -n "$duplicate_keys" ]]; then
   while IFS= read -r key; do
@@ -27,7 +51,7 @@ malformed_lines="$(
   awk '
     /^[[:space:]]*($|#)/ { next }
     !/^[A-Za-z_][A-Za-z0-9_]*=/ { print NR }
-  ' "$env_file"
+  ' "$validation_env_file"
 )"
 if [[ -n "$malformed_lines" ]]; then
   while IFS= read -r line_number; do
@@ -38,7 +62,7 @@ fi
 
 value_for() {
   local key="$1"
-  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$env_file"
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$validation_env_file"
 }
 
 required=(
@@ -240,7 +264,7 @@ for old_id, secret in old_keys.items():
     echo "CADDY_SITE_SCHEME must be https in production" >&2
     failed=1
   fi
-  if grep -Eq '^(DEV_FIXED_OTP|DEV_OTP_SINK)=' "$env_file"; then
+  if grep -Eq '^(DEV_FIXED_OTP|DEV_OTP_SINK)=' "$validation_env_file"; then
     echo "Development OTP controls must not be present in production" >&2
     failed=1
   fi
@@ -306,8 +330,10 @@ if expires_at.tzinfo is None or expires_at.astimezone(timezone.utc) <= datetime.
     raise SystemExit(1)
 PY
     then
-      echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
-      failed=1
+      if ((preserved_auth_valid == 0)); then
+        echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
+        failed=1
+      fi
     fi
   elif [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
     -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" || \
@@ -498,6 +524,10 @@ PY
     fi
     if [[ ! "$(value_for HERMES_DEFAULT_MODEL)" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$ ]]; then
       echo "HERMES_DEFAULT_MODEL contains invalid characters" >&2
+      failed=1
+    fi
+    if [[ "$app_env" == "production" && ! "$(value_for HERMES_DEFAULT_MODEL)" =~ (^|[-_.:/])sonnet([-_.:/]|$) ]]; then
+      echo "HERMES_DEFAULT_MODEL must be a Sonnet-class model in production" >&2
       failed=1
     fi
     hermes_port_start="$(value_for HERMES_PROFILE_PORT_START)"
@@ -705,4 +735,4 @@ if ((failed)); then
   exit 2
 fi
 
-echo "Environment contract valid for $expected_environment: $env_file"
+echo "Environment contract valid for $expected_environment: $validation_env_file"

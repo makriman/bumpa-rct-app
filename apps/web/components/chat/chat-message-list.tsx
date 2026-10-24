@@ -6,7 +6,12 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import Image from "next/image";
-import type { RefObject } from "react";
+import { useState, type RefObject } from "react";
+import {
+  BusinessOnboarding,
+  BusinessOnboardingView,
+  type BusinessOnboardingController,
+} from "@/components/business-onboarding";
 import type { ChatState } from "@/lib/chat-state";
 import { formatMessageTime } from "@/lib/chat-state";
 
@@ -23,6 +28,7 @@ type ChatMessageListProps = {
   onRetryConversation: () => void;
   onRetrySend: () => void;
   onSuggestion: (value: string) => void;
+  onboarding?: BusinessOnboardingController;
   state: ChatState;
 };
 
@@ -33,8 +39,10 @@ export function ChatMessageList({
   onRetryConversation,
   onRetrySend,
   onSuggestion,
+  onboarding,
   state,
 }: ChatMessageListProps) {
+  const [setupDeferred, setSetupDeferred] = useState(false);
   if (state.phase === "loading") {
     return (
       <div className="bestie-message-scroll" aria-busy="true">
@@ -68,27 +76,45 @@ export function ChatMessageList({
   if (state.messages.length === 0) {
     return (
       <div className="bestie-message-scroll">
-        <div className="bestie-chat-empty">
-          <span className="bestie-empty-icon">
-            <SparkleIcon size={25} weight="fill" />
-          </span>
-          <h1>What can I help you understand?</h1>
-          <p>
-            Ask about sales, stock, products, customers, orders, or the next
-            decision in your business.
-          </p>
-          <div className="bestie-prompt-grid" aria-label="Suggested questions">
-            {suggestions.map((suggestion) => (
-              <button
-                type="button"
-                key={suggestion}
-                onClick={() => onSuggestion(suggestion)}
-              >
-                {suggestion}
-              </button>
-            ))}
+        {!setupDeferred &&
+          (onboarding ? (
+            <BusinessOnboardingView
+              controller={onboarding}
+              onAsk={onSuggestion}
+              onSkip={() => setSetupDeferred(true)}
+            />
+          ) : (
+            <BusinessOnboarding
+              onAsk={onSuggestion}
+              onSkip={() => setSetupDeferred(true)}
+            />
+          ))}
+        {setupDeferred && (
+          <div className="bestie-chat-empty">
+            <span className="bestie-empty-icon">
+              <SparkleIcon size={25} weight="fill" />
+            </span>
+            <h1>What can I help you understand?</h1>
+            <p>
+              Ask about sales, stock, products, customers, orders, or the next
+              decision in your business.
+            </p>
+            <div
+              className="bestie-prompt-grid"
+              aria-label="Suggested questions"
+            >
+              {suggestions.map((suggestion) => (
+                <button
+                  type="button"
+                  key={suggestion}
+                  onClick={() => onSuggestion(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }

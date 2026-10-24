@@ -159,7 +159,7 @@ jobs:
             --env TRIVY_PASSWORD \
             --volume "$PWD/image-security:/evidence" \
             --volume trivy-cache:/root/.cache/trivy \
-            aquasec/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e \
+            aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c \
             image --scanners vuln --ignore-unfixed \
             --severity CRITICAL,HIGH --exit-code 1 \
             --format json --output "/evidence/${{ matrix.name }}.json" \

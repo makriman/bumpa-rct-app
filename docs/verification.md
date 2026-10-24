@@ -136,3 +136,19 @@ alert delivery are explicitly accepted gaps for the controlled pilot, not
 completed controls, and remain required before public/unrestricted launch. The
 temporary shared PIN also needs rotation/expiry and eventual replacement with
 per-user proof of possession.
+
+## Merchant business onboarding — 2026-10-23
+
+Implemented the seven-question merchant flow from the Google Doc, independently of admin account provisioning. Web and WhatsApp share durable draft/review state and an explicitly confirmed business profile. Current facts are included in Hermes requests even without Bumpa metrics. Profile-update proposals require a separate-purpose signed context and explicit confirmation; these tokens do not authorize connector writes or generated media.
+
+Local evidence in the working checkout:
+
+- `make quality` passed: backend 648 passed / 1 skipped, 85.27% coverage; consumer web 120, admin web 34, research web 18, operations 110, and sandbox 3 tests passed. Formatting, lint, typing, API contracts, Compose, React Doctor, Lighthouse, bundle isolation and production contracts passed. The existing host-specific flock and bind-ownership skips remain reported by the gate.
+- After final context-purpose hardening, 45 focused onboarding/action/chat/WhatsApp tests passed, strict typing passed, and React Doctor reported no issues. The isolated candidate API suite passed separately: 605 passed, 1 skipped (the difference is unrelated voice/security work excluded from this candidate).
+- PostgreSQL migration and RLS gate passed using a disposable local database: all 27 tenant tables, including merchant business profiles, were tested under a role that cannot bypass RLS.
+- Desktop/mobile browser coverage exercises all seven answers, multi-select/custom channels, uncertain order volume, review correction, pause/reload/resume, failed-save retry, saved-profile transition and horizontal overflow. Axe scans the question, review and saved states without violations.
+- Synthetic screenshots: `artifacts/onboarding-{welcome,channels,review,saved}-{desktop,mobile}-chromium.png`.
+
+This evidence does not establish live WhatsApp delivery, live Hermes fact extraction/recall, or merchant usability. Apply additive migration `0019_business_onboarding` before deploying the API, then perform staging and merchant-pilot validation. No production deployment or external messaging was performed for this change. The scoped candidate excludes the unrelated, already-dirty security/dependency and voice-call changes in the primary checkout; current release security work must be integrated separately.
+
+See [business-onboarding.md](business-onboarding.md) for the source comparison, audience rationale, architecture and rollback behavior.

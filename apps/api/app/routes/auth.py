@@ -68,17 +68,36 @@ def request_otp(
         return OtpRequested(
             status="accepted",
             expires_in_seconds=settings.otp_ttl_minutes * 60,
+            resend_after_seconds=0,
             delivery="web_pin",
         )
     # Eligibility spans tenant-scoped identity/membership rows before a tenant
     # principal exists. Restrict this privileged context to the bounded auth
     # transaction, then resolve only the submitted normalized phone.
     set_security_context(db, privileged=True)
-    if find_login_eligible_user(db, phone_e164) is None:
+    eligible = (
+        find_login_eligible_user(db, phone_e164)
+        if settings.is_local
+        else find_mapped_login_user(db, phone_e164)
+    )
+    if eligible is None:
         # Preserve the same public response shape without creating a credential
         # or spending a provider message on an unknown/inactive destination.
-        return OtpRequested(expires_in_seconds=settings.otp_ttl_minutes * 60)
-    otp, code = issue_otp(db, phone_e164, settings)
+        return OtpRequested(
+            expires_in_seconds=settings.otp_ttl_minutes * 60,
+            resend_after_seconds=settings.otp_request_cooldown_seconds,
+        )
+    try:
+        otp, code = issue_otp(db, phone_e164, settings)
+    except HTTPException as exc:
+        if exc.status_code != 429:
+            raise
+        # Suppress a duplicate send without exposing whether this phone has a
+        # current approved challenge. The same public shape covers unknowns.
+        return OtpRequested(
+            expires_in_seconds=settings.otp_ttl_minutes * 60,
+            resend_after_seconds=settings.otp_request_cooldown_seconds,
+        )
     try:
         if settings.whatsapp_backend == "meta":
             MetaWhatsAppClient.from_settings(settings).send_otp(phone_e164, code)
@@ -117,6 +136,7 @@ def request_otp(
         ) from exc
     return OtpRequested(
         expires_in_seconds=settings.otp_ttl_minutes * 60,
+        resend_after_seconds=settings.otp_request_cooldown_seconds,
         dev_code=code if settings.is_local and settings.expose_local_otp else None,
     )
 

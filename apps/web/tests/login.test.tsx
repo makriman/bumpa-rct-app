@@ -263,4 +263,54 @@ describe("pilot web sign-in", () => {
       phone_e164: "+919876543210",
     });
   });
+
+  it("supports Nigerian OTP resend after the server cooldown and clears the old code", async () => {
+    const response = () =>
+      new Response(
+        JSON.stringify({
+          delivery: "whatsapp",
+          expires_in_seconds: 600,
+          resend_after_seconds: 1,
+        }),
+        { status: 202, headers: { "content-type": "application/json" } },
+      );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => response());
+    render(<LoginPage />);
+    fireEvent.click(screen.getByRole("button", { name: /Country code/ }));
+    fireEvent.click(screen.getByRole("option", { name: "NG +234" }));
+    fireEvent.change(screen.getByLabelText("Mobile number"), {
+      target: { value: "08012345678" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue securely" }));
+    await screen.findByRole("heading", { name: "Check WhatsApp." });
+    expect(screen.getByText(/If this number is approved/)).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Request another code in 1s" }),
+    ).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Six-digit WhatsApp code"), {
+      target: { value: "111111" },
+    });
+    await waitFor(
+      () =>
+        expect(
+          screen.getByRole("button", { name: "Request another code" }),
+        ).toBeEnabled(),
+      { timeout: 2000 },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Request another code" }),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Six-digit WhatsApp code")).toHaveValue(""),
+    );
+    for (const [url, init] of fetchMock.mock.calls) {
+      expect(String(url)).toContain("/auth/request-otp");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        phone_e164: "+2348012345678",
+      });
+    }
+  });
 });

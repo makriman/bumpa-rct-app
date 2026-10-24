@@ -19,6 +19,7 @@ hermes_data
 **/*[Ss]ecret*.md
 /.secrets/
 /.evidence/
+/ops-hotfixes/
 *.pem
 *.key
 *.p12

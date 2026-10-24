@@ -1,4 +1,15 @@
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
+
+const businessProfile = JSON.parse(
+  readFileSync(
+    new URL(
+      "../tests/fixtures/business-profile-completed.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 
 const fixturePort = 3099;
 const expectedCookie = "bb_session=e2e-session-fixture";
@@ -163,6 +174,15 @@ const server = createServer(async (request, response) => {
       answer,
       data_freshness: null,
     });
+    return;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v1/settings/business-profile" &&
+    authorised
+  ) {
+    json(response, 200, businessProfile);
     return;
   }
 

@@ -25,6 +25,7 @@ for private_input in \
   'Secrets.md' \
   '.secrets/runtime-token' \
   '.evidence/private.json' \
+  'ops-hotfixes/previous.env.production' \
   'operator.pem' \
   'operator.key' \
   'operator.p12' \

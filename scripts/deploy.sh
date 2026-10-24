@@ -28,6 +28,8 @@ source "$ROOT_DIR/scripts/rollback_containment.sh"
 source "$ROOT_DIR/scripts/provider_readiness.sh"
 
 previous_boundary_valid=0
+previous_release_file_sha256=""
+validated_preserved_digest=""
 automatic_rollback_available=0
 previous_revision=""
 previous_image_tag=""
@@ -158,9 +160,8 @@ if [[ -e .deployed-release.json ]]; then
   previous_temporary_web_pin_expires_at="$RELEASE_TEMPORARY_WEB_PIN_EXPIRES_AT"
   previous_whatsapp_backend="$RELEASE_WHATSAPP_BACKEND"
   previous_boundary_valid=1
+  previous_release_file_sha256="$(sha256sum .deployed-release.json | awk '{print $1}')"
 fi
-
-./scripts/validate_env.sh .env.production production
 
 value_for() {
   local key="$1"
@@ -322,12 +323,38 @@ run_production_smoke() {
     ./scripts/smoke_test.sh
 }
 
+verify_cached_rollback_images() {
+  local image image_id
+  for image in "$@"; do
+    if [[ ! "$image" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]] \
+      || ! image_id="$(docker image inspect --format '{{.Id}}' "$image")" \
+      || [[ ! "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      echo "Verified immutable rollback image is unavailable in the local cache" >&2
+      return 1
+    fi
+  done
+}
+
 running_image() {
   local service="$1"
+  local recorded_reference="${2:-}"
   local container_id configured_ref image_id repository immutable_ref last_component
   container_id="$("${compose[@]}" ps --status running -q "$service")"
   if [[ -n "$container_id" ]]; then
     configured_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+    image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+    if [[ ! "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      echo "Unable to resolve the running image identity for $service" >&2
+      return 1
+    fi
+    # Registry publication can add an immutable alias for an already-running
+    # local image. Accept that recorded alias only when Docker resolves it to
+    # the exact same immutable image identity; a stale record still fails.
+    if [[ "$recorded_reference" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]] \
+      && [[ "$(docker image inspect --format '{{.Id}}' "$recorded_reference" 2>/dev/null || true)" == "$image_id" ]]; then
+      printf '%s\n' "$recorded_reference"
+      return
+    fi
     if [[ "$configured_ref" =~ @sha256:[a-f0-9]{64}$ ]]; then
       printf '%s\n' "$configured_ref"
       return
@@ -338,7 +365,6 @@ running_image() {
     if [[ "$last_component" == *:* ]]; then
       repository="${repository%:*}"
     fi
-    image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
     immutable_ref="$(
       docker image inspect --format '{{json .RepoDigests}}' "$image_id" |
         jq --raw-output --arg prefix "$repository@sha256:" \
@@ -373,7 +399,7 @@ if ((previous_boundary_valid)); then
       postgres) recorded_image="$previous_postgres_image" ;;
       redis) recorded_image="$previous_redis_image" ;;
     esac
-    actual_image="$(running_image "$service")"
+    actual_image="$(running_image "$service" "$recorded_image")"
     if ! running_service_matches_recorded_topology \
         "$was_recorded" "$actual_image" "$recorded_image"; then
       echo "Running $service image does not match the verified release boundary" >&2
@@ -387,6 +413,52 @@ if ((previous_boundary_valid)); then
     "$previous_research_web_was_recorded" \
     "$previous_research_web_image" "$target_research_web_image")"
   automatic_rollback_available=1
+fi
+
+# Validate preservation only after the entire recorded/running topology agrees.
+# The proof was captured from the observed prior environment, never this target.
+if ((previous_boundary_valid)); then
+  if [[ "$(sha256sum .deployed-release.json | awk '{print $1}')" != "$previous_release_file_sha256" ]]; then
+    echo "Verified prior release record changed during preflight" >&2
+    exit 2
+  fi
+fi
+target_validation_args=(.env.production production)
+preserving_recorded_auth=0
+if ((previous_boundary_valid)) \
+  && [[ "$previous_auth_login_mode" == temporary_static_pin \
+    && "$AUTH_LOGIN_MODE" == temporary_static_pin \
+    && "$TEMPORARY_WEB_PIN_EXPIRES_AT" == "$previous_temporary_web_pin_expires_at" ]] \
+  && jq --exit-status '.preserved_configuration != null' .deployed-release.json >/dev/null; then
+  prior_api_container="$("${compose[@]}" ps --status running -q api)"
+  prior_api_id="$(docker inspect --format '{{.Image}}' "$prior_api_container")"
+  target_validation_args+=(--preserve-recorded-auth .deployed-release.json "$prior_api_id")
+  preserving_recorded_auth=1
+fi
+./scripts/validate_env.sh "${target_validation_args[@]}"
+if ((preserving_recorded_auth)); then
+  validated_preserved_digest="$(jq --raw-output '.preserved_configuration.non_release_environment_sha256' .deployed-release.json)"
+fi
+
+pilot_snapshot=/var/lib/bumpabestie/onboarding-existing-pilot.json
+pilot_snapshot_sha256=""
+if [[ -e "$pilot_snapshot" || -L "$pilot_snapshot" ]]; then
+  if [[ ! -f "$pilot_snapshot" || -L "$pilot_snapshot" \
+    || "$(stat -c '%a' "$pilot_snapshot")" != 600 \
+    || "$(stat -c '%u:%g' "$pilot_snapshot")" != "$(stat -c '%u:%g' .env.production)" ]]; then
+    echo "Existing-pilot snapshot must be a private owned regular file" >&2
+    exit 2
+  fi
+  python3 - "$pilot_snapshot" <<'PY'
+import json
+import runpy
+import sys
+from pathlib import Path
+
+validate = runpy.run_path('apps/api/app/cli/arm_pilot_onboarding.py')['validate_snapshot']
+validate(json.loads(Path(sys.argv[1]).read_text()))
+PY
+  pilot_snapshot_sha256="$(sha256sum "$pilot_snapshot" | awk '{print $1}')"
 fi
 
 if ((previous_boundary_valid == 0)); then
@@ -461,7 +533,7 @@ persist_release_metadata() {
   local verifier_host="${18}"
   local expires_at="${19}"
   local whatsapp_backend="${20}"
-  local deployed_at revision_tmp release_tmp
+  local deployed_at revision_tmp release_tmp persisted_api_id
 
   validate_release_pointer_values \
     "$revision" "$image_tag" "$infra_image_tag" \
@@ -538,6 +610,35 @@ persist_release_metadata() {
     }' > "$release_tmp"; then
     rm -f "$revision_tmp" "$release_tmp"
     return 1
+  fi
+  if [[ -n "$validated_preserved_digest" ]]; then
+    if ! persisted_api_id="$(docker image inspect --format '{{.Id}}' "$api_image")" \
+      || [[ ! "$persisted_api_id" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      rm -f "$revision_tmp" "$release_tmp"
+      return 1
+    fi
+    if ! python3 - "$release_tmp" "$validated_preserved_digest" "$persisted_api_id" <<'PY'
+import json
+import sys
+from pathlib import Path
+from scripts.validate_preserved_auth import configuration_digest
+
+target, expected, image_id = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if configuration_digest(Path('.env.production').read_bytes()) != expected:
+    raise SystemExit('Nonrelease configuration drifted after preservation validation')
+record = json.loads(target.read_text())
+if record['auth']['login_mode'] != 'temporary_static_pin':
+    raise SystemExit('Preserved authentication mode changed')
+record['preserved_configuration'] = {
+    'schema_version': 1, 'policy': 'unchanged-expired-pin-no-new-logins',
+    'non_release_environment_sha256': expected, 'running_api_image_id': image_id,
+}
+target.write_text(json.dumps(record, indent=2) + '\n')
+PY
+    then
+      rm -f "$revision_tmp" "$release_tmp"
+      return 1
+    fi
   fi
   if ! chmod 0600 "$revision_tmp" "$release_tmp" \
     || ! mv "$release_tmp" .deployed-release.json \
@@ -616,10 +717,11 @@ rollback() {
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
     rollback_services=(api web admin-web research-web caddy)
-    rollback_images=(api web admin-web research-web)
+    rollback_image_refs=("$previous_api_image" "$previous_web_image" \
+      "$rollback_admin_web_image" "$rollback_research_web_image")
     if ((previous_hermes_running)) && [[ -n "$previous_hermes_image" ]]; then
       rollback_services+=(hermes)
-      rollback_images+=(hermes)
+      rollback_image_refs+=("$previous_hermes_image")
     fi
     if ((previous_worker_running && previous_scheduler_running)); then
       rollback_services+=(worker scheduler)
@@ -659,13 +761,17 @@ rollback() {
       if ((!previous_worker_running || !previous_scheduler_running)); then
         "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
       fi
-      "${compose[@]}" pull "${rollback_images[@]}" \
+      # The exact prior images were verified while running; target initializer
+      # and edge images were pulled and revision-checked before this boundary.
+      # Recovery must not depend on registry availability or broader credentials.
+      verify_cached_rollback_images \
+        "${rollback_image_refs[@]}" "$target_api_image" "$target_caddy_image" \
         && API_IMAGE="$target_api_image" \
-          "${compose[@]}" up --no-deps --force-recreate \
+          "${compose[@]}" up --pull never --no-deps --force-recreate \
           --abort-on-container-exit --exit-code-from auth-secret-init auth-secret-init \
-        && "${compose[@]}" up --no-deps --force-recreate \
+        && "${compose[@]}" up --pull never --no-deps --force-recreate \
           --abort-on-container-exit --exit-code-from caddy-init caddy-init \
-        && "${compose[@]}" --profile async up -d --wait --wait-timeout 240 \
+        && "${compose[@]}" --profile async up --pull never -d --wait --wait-timeout 240 \
           --no-deps "${rollback_services[@]}" \
         && run_production_smoke
     }
@@ -856,6 +962,11 @@ fi
 # before crossing the forward-only database boundary so an old API, worker, or
 # scheduler can never overlap the target migration.
 assert_application_writers_stopped
+if [[ -n "$pilot_snapshot_sha256" \
+  && "$(sha256sum "$pilot_snapshot" | awk '{print $1}')" != "$pilot_snapshot_sha256" ]]; then
+  echo "Captured existing-pilot scope changed during preflight" >&2
+  exit 2
+fi
 write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY
 deployment_started=1
 "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis
@@ -866,6 +977,17 @@ docker exec \
   --env "APP_POSTGRES_PASSWORD=$(value_for APP_POSTGRES_PASSWORD)" \
   "$postgres_container" /docker-entrypoint-initdb.d/10-app-role.sh
 "${compose[@]}" --profile tools run --rm migrate
+if [[ -n "$pilot_snapshot_sha256" ]]; then
+  if [[ ! -f "$pilot_snapshot" || -L "$pilot_snapshot" \
+    || "$(stat -c '%a' "$pilot_snapshot")" != 600 \
+    || "$(stat -c '%u:%g' "$pilot_snapshot")" != "$(stat -c '%u:%g' .env.production)" \
+    || "$(sha256sum "$pilot_snapshot" | awk '{print $1}')" != "$pilot_snapshot_sha256" ]]; then
+    echo "Captured existing-pilot scope changed before application" >&2
+    exit 2
+  fi
+  "${compose[@]}" --profile tools run --rm -T --no-deps migrate \
+    python -m app.cli.arm_pilot_onboarding --apply <"$pilot_snapshot"
+fi
 "${compose[@]}" --profile tools run --rm --no-deps \
   hermes-profile-reconcile
 "${compose[@]}" --profile async up -d --wait --wait-timeout 240 --remove-orphans \

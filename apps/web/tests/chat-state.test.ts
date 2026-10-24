@@ -6,6 +6,50 @@ import {
 } from "@/lib/chat-state";
 
 describe("chat state", () => {
+  it("keeps text typed before the empty-route mount effect finishes", () => {
+    const typing = chatReducer(initialChatState, {
+      type: "DRAFT_CHANGED",
+      draft: "Help me price my new stock",
+    });
+    expect(chatReducer(typing, { type: "EMPTY_ROUTE_ENTERED" }).draft).toBe(
+      "Help me price my new stock",
+    );
+  });
+
+  it("keeps an optimistic first send when empty-route setup finishes", () => {
+    const sending = chatReducer(initialChatState, {
+      type: "SEND_STARTED",
+      userMessageId: "pending-fresh",
+      text: "What should I restock?",
+      clientMessageId: "fresh-client",
+      requestId: "fresh-send",
+    });
+    const settled = chatReducer(sending, { type: "EMPTY_ROUTE_ENTERED" });
+    expect(settled.phase).toBe("sending");
+    expect(settled.failedSend?.clientMessageId).toBe("fresh-client");
+    expect(settled.messages[0].content).toBe("What should I restock?");
+    expect(settled.activeSendRequestId).toBe("fresh-send");
+  });
+
+  it("clears an old conversation when navigating to the empty route", () => {
+    const existing = {
+      ...initialChatState,
+      conversationId: "old-chat",
+      draft: "Old draft",
+    };
+    expect(chatReducer(existing, { type: "EMPTY_ROUTE_ENTERED" })).toEqual(
+      initialChatState,
+    );
+  });
+
+  it("still clears a fresh draft when the user explicitly starts a new chat", () => {
+    const typing = chatReducer(initialChatState, {
+      type: "DRAFT_CHANGED",
+      draft: "Old draft",
+    });
+    expect(chatReducer(typing, { type: "RESET" })).toEqual(initialChatState);
+  });
+
   it("keeps a failed message retryable with the same client message id", () => {
     const sending = chatReducer(initialChatState, {
       type: "SEND_STARTED",
