@@ -135,6 +135,13 @@ loopback `DATABASE_URL` for a restricted application role and disposable Redis.
 Then run `uv run --locked python scripts/verify_business_onboarding.py`.
 The script rejects superuser/bypass roles and remote/production configurations.
 
+## Merge and release boundary
+
+PR 116 contains PR 115 and the cherry-picked final onboarding work from PR 117.
+The recommended merge is PR 116 alone after its final checks; do not apply PR 117
+again. Keep the source drafts as provenance. If merging creates another release
+SHA, verify CI for that exact SHA before publication and promotion.
+
 ## Fresh release handoff and rollback
 
 1. Use a fresh clean checkout of the final accepted SHA. Verify exact-SHA CI,
@@ -154,9 +161,17 @@ The script rejects superuser/bypass roles and remote/production configurations.
    Hermes/Meta canary to verify actual recall, wording, Nigerian-number eligibility
    and delivery. Local mock OTP/transport tests do not establish those facts.
 5. Roll back with the coordinator's prior app/auth image boundary while retaining
-   compatible forward schema and patched infrastructure. Do not drop reviewed
+   compatible forward schema and patched infrastructure. The existing coordinator
+   restores the prior Hermes image with the prior application/auth boundary;
+   Caddy/Postgres/backup and operations tooling stay forward. Verify persisted
+   Hermes session/state compatibility against the actual prior image before
+   promotion; the live baseline is not inferred from a Git checkout. Do not drop reviewed
    business memory as an outage rollback. Use verified restore only through the
    documented recovery procedure if compatibility cannot be maintained.
 
-Outstanding at record creation: final replacement-SHA CI and image matrix, real provider canaries, and merchant/real-network usability. No production
-state, real participant conversation or deployment has been accessed or changed.
+Outstanding at record creation: final replacement-SHA CI and image matrix, real provider canaries, and merchant/real-network usability. A subsequent read-only access check verified public readiness and the existing
+non-root SSH/coordinator mechanism. Private origin coordinates are retained in the
+handoff, outside Git. The origin checkout reports nine dirty paths; the separate
+release must inspect/preserve those patches and verify actual image digests.
+No production services/configuration, real participant conversation or deployment
+were changed; no application secrets were read.
