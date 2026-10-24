@@ -636,7 +636,9 @@ def chat_reply(
     elif normalized == "back":
         command = OnboardingCommand(action="back", expected_revision=state["revision"])
     elif normalized.endswith("?") or re.match(
-        r"^(?:can you|could you|please help|help me|how (?:can|do|should)|what (?:can|should|is)|why (?:is|are))\b",
+        r"^(?:(?:please|abeg)\s+)?(?:can you|could you|help me|show me|tell me|check my|"
+        r"calculate|draft|write|summari[sz]e|wetin|how (?:can|do|should|i fit|we fit|much|many|to)|"
+        r"what (?:can|should|is|are|do)|why (?:is|are))\b",
         normalized,
     ):
         # A business question interrupts setup; never turn it into a saved fact.

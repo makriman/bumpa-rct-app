@@ -155,6 +155,17 @@ for (const simulateFailure of [false, true]) {
       page.getByRole("heading", { name: "I’ve got you, Bestie." }),
     ).toBeVisible();
     expect(Object.keys(profile.answers)).toHaveLength(7);
+    const firstUsefulQuestion = page.getByRole("button", {
+      name: "Help me get more customers this week.",
+    });
+    await expect(firstUsefulQuestion).toBeInViewport();
+    const savedDetails = page.locator(".onboarding-saved-details");
+    await expect(savedDetails).not.toHaveAttribute("open");
+    await savedDetails.getByText("Review my saved business details").click();
+    await expect(
+      savedDetails.getByText("Just me (1 person)", { exact: true }),
+    ).toBeVisible();
+    await savedDetails.getByText("Review my saved business details").click();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({

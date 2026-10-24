@@ -3400,6 +3400,14 @@ a {
 .onboarding-next {
   margin: 28px 0;
 }
+.onboarding-saved-details > summary {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--ink);
+  text-decoration: underline;
+}
 .onboarding-error {
   margin-top: 16px;
   overflow-wrap: anywhere;

@@ -18,10 +18,12 @@ from app.db.models import (
     BumpaConnection,
     BumpaSyncRun,
     Conversation,
+    HermesProfile,
     Tenant,
     TenantMembership,
     User,
 )
+from app.services import chat as chat_service
 from app.services.agent_actions import (
     AgentActionError,
     create_action_context_token,
@@ -177,6 +179,87 @@ def test_whatsapp_numbered_answers_and_interruptions(
     assert "Reply SAVE" in (reply("1") or "")
     assert "How can I help" in (reply("SAVE") or "")
     assert state_for(db, tenant)["answers"]["team_size"] == "Just me (1 person)"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Abeg help me price my cakes",
+        "Wetin I fit do to get more customers",
+        "How I fit get more customers",
+        "Please help me price my cakes",
+    ],
+)
+def test_unpunctuated_help_interrupts_without_becoming_a_fact(
+    business: tuple[Session, Tenant, User],
+    message: str,
+) -> None:
+    db, tenant, user = business
+    command(db, tenant, user, "start")
+    assert chat_reply(db, tenant, user.id, message, channel="whatsapp") is None
+    state = state_for(db, tenant)
+    assert state["status"] == "paused"
+    assert state["draft"] == {}
+    assert state["answers"] == {}
+
+
+def test_interrupted_onboarding_reply_rolls_back_answer_before_retry(
+    business: tuple[Session, Tenant, User],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, tenant, user = business
+    db.add(
+        HermesProfile(
+            tenant_id=tenant.id,
+            profile_name="review-atomic",
+            profile_path="/profiles/review-atomic",
+            api_port=8700,
+            provider="local",
+            status="active",
+            encrypted_api_key="local-review-only",
+        )
+    )
+    command(db, tenant, user, "start")
+    db.commit()
+    original = chat_service._record_successful_chat_events
+
+    def interrupted(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Simulated interruption before the reply is durable")
+
+    monkeypatch.setattr(chat_service, "_record_successful_chat_events", interrupted)
+    with pytest.raises(RuntimeError, match="Simulated interruption"):
+        chat_service.handle_chat(
+            db,
+            tenant=tenant,
+            user=user,
+            message=ANSWERS["offering"],
+            channel="whatsapp",
+            external_message_id="review-atomic-answer",
+        )
+    db.rollback()
+    assert state_for(db, tenant)["step"] == "offering"
+    assert state_for(db, tenant)["draft"] == {}
+    assert (
+        db.scalar(
+            select(AgentMessage.id).where(
+                AgentMessage.external_message_id == "review-atomic-answer",
+            )
+        )
+        is None
+    )
+
+    monkeypatch.setattr(chat_service, "_record_successful_chat_events", original)
+    _, _, outgoing, _ = chat_service.handle_chat(
+        db,
+        tenant=tenant,
+        user=user,
+        message=ANSWERS["offering"],
+        channel="whatsapp",
+        external_message_id="review-atomic-answer",
+    )
+    assert state_for(db, tenant)["step"] == "customers"
+    assert state_for(db, tenant)["draft"]["offering"] == ANSWERS["offering"]
+    assert "Question 2 of 7" in outgoing.content
 
 
 def test_order_prefill_requires_exact_complete_current_month_boundary(

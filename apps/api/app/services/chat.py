@@ -324,7 +324,11 @@ def handle_chat(
     # MCP tools run in a separate authenticated service transaction. Persist the
     # initiating conversation/message first so tenant-bound actions and media can
     # reference them with real foreign keys while Hermes is working.
-    db.commit()
+    # Deterministic setup/clarification replies have no MCP work. Keep their
+    # state changes and reply in one transaction so an interrupted request can
+    # retry without advancing setup or leaving an inbound without its response.
+    if fixed_response is None:
+        db.commit()
     started = monotonic()
     usage_metadata: dict[str, object] = {"provider": profile.provider}
     provider_called = False

@@ -476,6 +476,17 @@ function SavedBusinessProfile({
           ))}
         </div>
       )}
+      {!profilePage && (
+        <details className="onboarding-saved-details">
+          <summary>Review my saved business details</summary>
+          <ProfileAnswers
+            profile={profile}
+            answers={profile.answers}
+            onEdit={(field) => void act({ action: "edit", field })}
+            busy={busy}
+          />
+        </details>
+      )}
       <div className="onboarding-actions">
         {!profilePage && (
           <button
