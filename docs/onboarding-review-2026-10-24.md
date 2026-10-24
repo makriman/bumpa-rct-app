@@ -61,6 +61,9 @@ current reviewed profile. Provider secrets remain server-side.
 - Load the reviewed profile when an existing conversation has no messages; the
   route matrix now requires its actual heading instead of accepting a permanent
   loading placeholder.
+- Preserve fresh text and optimistic first sends when the empty-chat route mounts.
+  Exact-head CI exposed a late reset after the composer became interactive; four
+  regression cases also preserve explicit New chat clearing and existing-route exits.
 - Give existing authenticated E2E fixtures a valid reviewed profile endpoint;
   otherwise screenshot tests accidentally exercised a missing-route error panel.
 - Repair release-blocking dependency locks, Caddy certificates and pinned runtime
@@ -105,7 +108,7 @@ raw report hashes. Local image tags are evidence, not publishable release refere
 
 | Gate | Current local evidence |
 | --- | --- |
-| `make quality` with pinned Node/locked Python | Passed; API 641 passed, 1 skipped, 85.51% branch coverage; web/admin/research 120/34/18 unit tests; lint/format/mypy/contracts/builds/isolation/Lighthouse |
+| `make quality` with pinned Node/locked Python | Passed; API 641 passed, 1 skipped, 85.51% branch coverage; web/admin/research 124/34/18 unit tests; lint/format/mypy/contracts/builds/isolation/Lighthouse |
 | Operational unit tests after image changes | 113 passed |
 | Sandbox typecheck and tenant/filesystem boundary tests | Passed, 3 tests |
 | PostgreSQL migration 18→19 and non-bypass RLS | Passed, 27 tenant tables |

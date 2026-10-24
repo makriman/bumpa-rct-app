@@ -39,6 +39,7 @@ export type ChatState = {
 
 export type ChatAction =
   | { type: "RESET" }
+  | { type: "EMPTY_ROUTE_ENTERED" }
   | { type: "DRAFT_CHANGED"; draft: string }
   | {
       type: "LOAD_STARTED";
@@ -96,6 +97,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "RESET":
       return initialChatState;
+    case "EMPTY_ROUTE_ENTERED":
+      // Mount/route effects can run after a new chat becomes interactive. Keep
+      // its fresh draft or optimistic send; only leave an existing conversation.
+      return state.conversationId === null ? state : initialChatState;
     case "DRAFT_CHANGED":
       return { ...state, draft: action.draft };
     case "LOAD_STARTED":

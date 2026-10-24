@@ -124,7 +124,7 @@ export function ChatWorkspace({
       }
       void loadConversation(initialConversationId);
     } else {
-      dispatch({ type: "RESET" });
+      dispatch({ type: "EMPTY_ROUTE_ENTERED" });
     }
   }, [initialConversationId, loadConversation]);
 
