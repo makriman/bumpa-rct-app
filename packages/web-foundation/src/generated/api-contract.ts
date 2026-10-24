@@ -1239,6 +1239,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/settings/business-profile": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Business Profile */
+    get: operations["get_business_profile_v1_settings_business_profile_get"];
+    put?: never;
+    /** Save Business Profile */
+    post: operations["save_business_profile_v1_settings_business_profile_post"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/settings/mcp-connections": {
     parameters: {
       query?: never;
@@ -2076,6 +2094,31 @@ export interface components {
       store_currency: string;
       /** Store Timezone */
       store_timezone: string;
+    };
+    /** OnboardingCommand */
+    OnboardingCommand: {
+      /**
+       * Action
+       * @enum {string}
+       */
+      action:
+        | "start"
+        | "answer"
+        | "back"
+        | "edit"
+        | "complete"
+        | "pause"
+        | "resume"
+        | "confirm_update"
+        | "reject_update";
+      /** Detail */
+      detail?: string | null;
+      /** Expected Revision */
+      expected_revision: number;
+      /** Field */
+      field?: string | null;
+      /** Value */
+      value?: string | string[] | null;
     };
     /** OnboardingCompleteRequest */
     OnboardingCompleteRequest: {
@@ -5581,6 +5624,82 @@ export interface operations {
       };
     };
     requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_business_profile_v1_settings_business_profile_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  save_business_profile_v1_settings_business_profile_post: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["OnboardingCommand"];
+      };
+    };
     responses: {
       /** @description Successful Response */
       200: {
