@@ -61,7 +61,8 @@ test("Nigerian OTP login supports bounded resend and recoverable wrong codes", a
   expect(requests).toBe(2);
   await code.fill("222222");
   await page.getByRole("button", { name: "Verify and sign in" }).click();
-  await expect(page.getByRole("alert")).toContainText(
+  await expect(page.locator("#pin-error")).toHaveAttribute("role", "alert");
+  await expect(page.locator("#pin-error")).toContainText(
     "Invalid or expired code",
   );
   await expect(

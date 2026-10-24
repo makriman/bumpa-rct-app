@@ -4,7 +4,7 @@ from datetime import timedelta
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -187,6 +187,8 @@ def test_production_otp_keeps_mapped_identity_scope_and_secure_cookie(
         unknown = client.post("/v1/auth/request-otp", json={"phone_e164": unmapped})
         assert unknown.status_code == 202 and unknown.json()["dev_code"] is None
         assert sends == []
+        with SessionLocal() as db:
+            assert db.scalar(select(OtpSession.id).where(OtpSession.phone_e164 == unmapped)) is None
         requested = client.post("/v1/auth/request-otp", json={"phone_e164": mapped})
         assert requested.status_code == 202 and requested.json()["dev_code"] is None
         assert sends == [(mapped, "000012")]
