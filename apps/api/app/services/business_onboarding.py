@@ -637,7 +637,7 @@ def chat_reply(
         command = OnboardingCommand(action="back", expected_revision=state["revision"])
     elif normalized.endswith("?") or re.match(
         r"^(?:(?:please|abeg)\s+)?(?:can you|could you|help me|show me|tell me|check my|"
-        r"calculate|draft|write|summari[sz]e|wetin|how (?:can|do|should|i fit|we fit|much|many|to)|"
+        r"calculate|draft|write|summari[sz]e|wetin|how (?:can|do|should|i fit|i go|we fit|much|many|to)|"
         r"what (?:can|should|is|are|do)|why (?:is|are))\b",
         normalized,
     ):
