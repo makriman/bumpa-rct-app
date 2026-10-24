@@ -1093,6 +1093,10 @@ def _deliver_once(
             outbound.status = "rejected"
         else:
             outbound.status = "failed"
+        outbound.payload = {
+            **(outbound.payload or {}),
+            "provider_error": _meta_provider_error_payload(exc),
+        }
         db.commit()
         if outbound.status in {"ambiguous", "rejected"}:
             raise PermanentJobError("WhatsApp delivery cannot be retried safely") from exc
@@ -1191,6 +1195,10 @@ def _deliver_media_once(
             exc.category == "provider" and exc.http_status is not None and exc.http_status >= 500
         )
         outbound.status = "ambiguous" if ambiguous else ("failed" if exc.retryable else "rejected")
+        outbound.payload = {
+            **(outbound.payload or {}),
+            "provider_error": _meta_provider_error_payload(exc),
+        }
         db.commit()
         if outbound.status in {"ambiguous", "rejected"}:
             raise PermanentJobError("WhatsApp media delivery cannot be retried safely") from exc
@@ -1218,6 +1226,22 @@ def _messaging_provider(
             )
         return MetaWhatsAppClient.from_settings(settings)
     raise PermanentJobError("WhatsApp delivery is disabled")
+
+
+def _meta_provider_error_payload(exc: MetaProviderError) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "category": exc.category,
+        "retryable": exc.retryable,
+    }
+    if exc.http_status is not None:
+        payload["http_status"] = exc.http_status
+    if exc.provider_code is not None:
+        payload["provider_code"] = exc.provider_code
+    if exc.request_id_hash is not None:
+        payload["request_id_hash"] = exc.request_id_hash
+    if exc.retry_after_seconds is not None:
+        payload["retry_after_seconds"] = exc.retry_after_seconds
+    return payload
 
 
 def _idempotency_key(event_id: str, purpose: str) -> str:

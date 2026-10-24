@@ -1930,6 +1930,18 @@ if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
   exit 1
 fi
 
+awk '
+  /^HERMES_DEFAULT_MODEL=/ {
+    print "HERMES_DEFAULT_MODEL=claude-haiku-4-5-20251001"; next
+  }
+  { print }
+' "$live_env" > "$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production >/dev/null 2>&1; then
+  echo "Production validation accepted a non-Sonnet Hermes model" >&2
+  exit 1
+fi
+
 # The third-party Hermes base is digest-pinned, but its Debian security overlay
 # is intentionally refreshed on every protected and publication build. A cached
 # apt layer can otherwise retain a package after Debian has shipped a fix.

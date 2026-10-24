@@ -500,6 +500,10 @@ PY
       echo "HERMES_DEFAULT_MODEL contains invalid characters" >&2
       failed=1
     fi
+    if [[ "$app_env" == "production" && ! "$(value_for HERMES_DEFAULT_MODEL)" =~ (^|[-_.:/])sonnet([-_.:/]|$) ]]; then
+      echo "HERMES_DEFAULT_MODEL must be a Sonnet-class model in production" >&2
+      failed=1
+    fi
     hermes_port_start="$(value_for HERMES_PROFILE_PORT_START)"
     hermes_port_end="$(value_for HERMES_PROFILE_PORT_END)"
     hermes_control_port="$(value_for HERMES_CONTROL_PORT)"

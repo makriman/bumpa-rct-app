@@ -885,7 +885,11 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             MetaWhatsAppClient,
             "send_text",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("transport", retryable=True)
+                MetaProviderError(
+                    "transport",
+                    retryable=True,
+                    request_id="meta-request-alpha",
+                )
             ),
         )
         with pytest.raises(PermanentJobError, match="cannot be retried"):
@@ -906,6 +910,11 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             )
         )
         assert ambiguous is not None and ambiguous.status == "ambiguous"
+        assert ambiguous.payload["provider_error"] == {
+            "category": "transport",
+            "retryable": True,
+            "request_id_hash": hashlib.sha256(b"meta-request-alpha").hexdigest(),
+        }
         with pytest.raises(PermanentJobError, match="reconciliation"):
             whatsapp._deliver_once(
                 db,
@@ -947,7 +956,13 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             MetaWhatsAppClient,
             "send_text",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("provider", retryable=True, http_status=429)
+                MetaProviderError(
+                    "rate_limited",
+                    retryable=True,
+                    http_status=429,
+                    provider_code=131047,
+                    retry_after_seconds=6,
+                )
             ),
         )
         with pytest.raises(MetaProviderError):
@@ -968,6 +983,51 @@ def test_outbound_text_failures_are_persisted_for_safe_retry(
             )
         )
         assert retryable is not None and retryable.status == "failed"
+        assert retryable.payload["provider_error"] == {
+            "category": "rate_limited",
+            "retryable": True,
+            "http_status": 429,
+            "provider_code": "131047",
+            "retry_after_seconds": 6,
+        }
+
+        monkeypatch.setattr(
+            MetaWhatsAppClient,
+            "send_text",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                MetaProviderError(
+                    "provider",
+                    retryable=False,
+                    http_status=400,
+                    provider_code="130497",
+                )
+            ),
+        )
+        with pytest.raises(PermanentJobError, match="cannot be retried"):
+            whatsapp._deliver_once(
+                db,
+                event=event,
+                purpose="provider-rejected",
+                phone="+2348000000044",
+                body="Rejected send",
+                settings=settings,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                meta_sender=("123456789", "987654321"),
+            )
+        provider_rejected = db.scalar(
+            select(WhatsappMessage).where(
+                WhatsappMessage.idempotency_key
+                == whatsapp._idempotency_key(event.id, "provider-rejected")
+            )
+        )
+        assert provider_rejected is not None and provider_rejected.status == "rejected"
+        assert provider_rejected.payload["provider_error"] == {
+            "category": "provider",
+            "retryable": False,
+            "http_status": 400,
+            "provider_code": "130497",
+        }
 
 
 def test_outbound_media_upload_delivery_and_failure_classification(
@@ -1042,7 +1102,12 @@ def test_outbound_media_upload_delivery_and_failure_classification(
             MetaWhatsAppClient,
             "send_media",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                MetaProviderError("provider", retryable=False, http_status=400)
+                MetaProviderError(
+                    "provider",
+                    retryable=False,
+                    http_status=400,
+                    provider_code="130497",
+                )
             ),
         )
         rejected = {**kwargs, "purpose": "media-rejected"}
@@ -1055,6 +1120,12 @@ def test_outbound_media_upload_delivery_and_failure_classification(
             )
         )
         assert rejected_row is not None and rejected_row.status == "rejected"
+        assert rejected_row.payload["provider_error"] == {
+            "category": "provider",
+            "retryable": False,
+            "http_status": 400,
+            "provider_code": "130497",
+        }
 
 
 def test_immediate_read_receipts_and_basic_event_guards(

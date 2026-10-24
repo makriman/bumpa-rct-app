@@ -25,6 +25,21 @@ Never:
 - report unavailable data as zero;
 - run the local `make restore` convenience target for a production restore.
 
+## Hermes WhatsApp model policy
+
+Production WhatsApp replies through Hermes must stay on a Sonnet-class Claude
+model. Do not switch `HERMES_DEFAULT_MODEL` or the generated tenant Hermes
+profiles to Haiku, Fable or Opus to solve launch latency. The production target is
+the cheapest Sonnet-class model available to the live Anthropic API key; as of
+2026-08-18, Anthropic's public pricing makes `claude-sonnet-5` the lowest-priced
+Sonnet API model. If pricing or model availability changes, choose the cheapest
+available Sonnet and record the evidence before changing production.
+
+Latency work belongs in the official Hermes WhatsApp integration and bridge
+efficiency: worker concurrency, FIFO scope, profile/session reuse, progress timing,
+prompt/context/tool cost and the WhatsApp-Hermes handoff. A model-family downgrade
+is not an acceptable speed fix for the launch lane.
+
 ## Temporary web-login containment
 
 The active temporary mapped-login boundary is documented in

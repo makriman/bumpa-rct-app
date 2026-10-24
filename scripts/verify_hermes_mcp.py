@@ -12,6 +12,7 @@ import asyncio
 import re
 import stat
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -108,14 +109,25 @@ async def verify_profile(profile: Path, mcp_url: str) -> int:
         # Imported only in the production runtime so repository-only contract
         # tests do not need to install the Hermes dependency graph.
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client import streamable_http
 
-        async with streamablehttp_client(
-            mcp_url,
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=10,
-            sse_read_timeout=20,
-        ) as (read_stream, write_stream, _session_id):
+        async with AsyncExitStack() as stack:
+            headers = {"Authorization": f"Bearer {key}"}
+            if hasattr(streamable_http, "streamablehttp_client"):
+                transport = streamable_http.streamablehttp_client(
+                    mcp_url, headers=headers, timeout=10, sse_read_timeout=20
+                )
+            else:
+                import httpx2
+
+                http_client = await stack.enter_async_context(
+                    httpx2.AsyncClient(headers=headers, timeout=20, follow_redirects=False)
+                )
+                transport = streamable_http.streamable_http_client(
+                    mcp_url, http_client=http_client
+                )
+            streams = await stack.enter_async_context(transport)
+            read_stream, write_stream = streams[:2]
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
                 result = await session.list_tools()
