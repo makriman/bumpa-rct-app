@@ -49,9 +49,11 @@ test("Nigerian OTP login supports bounded resend and recoverable wrong codes", a
   const code = page.getByLabel("Six-digit WhatsApp code");
   await expect(code).toHaveAttribute("autocomplete", "one-time-code");
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-  await page.screenshot({
-    path: `../../artifacts/otp-login-${testInfo.project.name}.png`,
-    fullPage: true,
+  const screenshot = testInfo.outputPath("otp-login.png");
+  await page.screenshot({ path: screenshot, fullPage: true });
+  await testInfo.attach("otp-login-screen", {
+    path: screenshot,
+    contentType: "image/png",
   });
   await code.fill("111111");
   await page
