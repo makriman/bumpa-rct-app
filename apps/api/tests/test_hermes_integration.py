@@ -372,6 +372,7 @@ def test_profile_provisioning_allocates_unique_ports_and_private_files(tmp_path:
             config_text = (profile_path / "config.yaml").read_text()
             assert "disabled_toolsets" in config_text
             assert "hard_stop_enabled: true" in config_text
+            assert "gateway:\n  standalone: true\n" in config_text
             for toolset in hermes_module.DISABLED_SME_TOOLSETS:
                 assert f"    - {toolset}\n" in config_text
             assert "    - delegation\n" not in config_text

@@ -1936,19 +1936,20 @@ fi
 grep -Fq '      fail-fast: false' .github/workflows/ci.yml
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/ci.yml
 grep -Fq "          no-cache: \${{ matrix.name == 'hermes' }}" .github/workflows/publish-images.yml
-grep -Fq "dpkg-query --show --showformat='\${Version}' libxfont2" infra/hermes/Dockerfile
-grep -Fq "ge '1:2.0.6-1+deb13u1'" infra/hermes/Dockerfile
-grep -Fq 'go get google.golang.org/grpc@v1.82.1' infra/caddy/Dockerfile
+grep -Fq 'apt-get upgrade --yes --no-install-recommends' infra/hermes/Dockerfile
+grep -Fq 'go get google.golang.org/grpc@v1.84.0' infra/caddy/Dockerfile
 grep -Fq 'go version -m /out/caddy' infra/caddy/Dockerfile
-grep -Fq 'httplib2==0.32.0' infra/hermes/Dockerfile
-grep -Fq 'mcp==1.28.1' infra/hermes/Dockerfile
-grep -Fq 'pillow==12.3.0' infra/hermes/Dockerfile
-grep -Fq 'pyasn1==0.6.4' infra/hermes/Dockerfile
-grep -Fq 'npm prune --prefix /opt/hermes --omit=dev --workspaces=false' infra/hermes/Dockerfile
-grep -Fq '/opt/hermes/node_modules/@eslint/config-array/node_modules/brace-expansion' infra/hermes/Dockerfile
+grep -Fq 'cryptography==50.0.2' infra/hermes/Dockerfile
+grep -Fq 'certifi==2026.10.19' infra/hermes/Dockerfile
+grep -Fq 'pillow==13.0.0' infra/hermes/Dockerfile
+grep -Fq 'aiohttp==3.14.5' infra/hermes/Dockerfile
+grep -Fq 'infra/hermes/package.json infra/hermes/package-lock.json' infra/hermes/Dockerfile
+grep -Fq 'npm-cli.js ci --prefix /opt/hermes' infra/hermes/Dockerfile
 grep -Fq '/usr/local/lib/node_modules/npm' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/node_modules/.bin/agent-browser --help' infra/hermes/Dockerfile
 grep -Fq 'from PIL import Image' infra/hermes/Dockerfile
 grep -Fq '/opt/hermes/.venv/bin/hermes --help' infra/hermes/Dockerfile
+grep -Fq 'infra/hermes/browser-runtime.json' infra/hermes/Dockerfile
+grep -Fq '/opt/hermes/.venv/bin/python /tmp/upgrade_browser.py' infra/hermes/Dockerfile
 
 echo "Production environment and immutable Compose contracts passed"

@@ -1155,6 +1155,8 @@ delegation:
   max_spawn_depth: 1
   orchestrator_enabled: false
   subagent_auto_approve: false
+gateway:
+  standalone: true
 """,
         "SOUL.md": SME_SOUL,
     }

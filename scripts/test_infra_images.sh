@@ -21,10 +21,10 @@ header_sink="bumpabestie-infra-header-sink-$suffix"
 hermes_runtime="bumpabestie-infra-hermes-runtime-$suffix"
 hermes_secret_dir="$(mktemp -d)"
 
-postgres_image="bumpabestie-postgres:infra-test"
-backup_image="bumpabestie-backup:infra-test"
-caddy_image="bumpabestie-caddy:infra-test"
-hermes_image="bumpabestie-hermes:infra-test"
+postgres_image="${INFRA_POSTGRES_IMAGE:-bumpabestie-postgres:infra-test}"
+backup_image="${INFRA_BACKUP_IMAGE:-bumpabestie-backup:infra-test}"
+caddy_image="${INFRA_CADDY_IMAGE:-bumpabestie-caddy:infra-test}"
+hermes_image="${INFRA_HERMES_IMAGE:-bumpabestie-hermes:infra-test}"
 legacy_postgres_image="postgres:16.9-alpine@sha256:7c688148e5e156d0e86df7ba8ae5a05a2386aaec1e2ad8e6d11bdf10504b1fb7"
 database_password="infra-test-postgres-only"
 
@@ -83,6 +83,8 @@ docker run --rm \
       "model:" \
       "  provider: anthropic" \
       "  default: claude-sonnet-5" \
+      "gateway:" \
+      "  standalone: true" \
       "agent:" \
       "  disabled_toolsets:" \
       "    - terminal" \
@@ -191,6 +193,8 @@ docker run --rm \
     printf "%s\n" \
       "model:" \
       "  provider: anthropic" \
+      "gateway:" \
+      "  standalone: true" \
       "security:" \
       "  allow_private_urls: false" \
       > "$profile/config.yaml"
@@ -443,7 +447,7 @@ test "$(
     --tuples-only --no-align \
     --command "SELECT count(*) FROM pg_roles WHERE rolname = 'infra_preserved_role' AND rolcanlogin AND NOT rolsuper AND NOT rolbypassrls"
 )" = 1
-docker exec "$primary" postgres --version | grep -F 'PostgreSQL) 16.14' >/dev/null
+docker exec "$primary" postgres --version | grep -F 'PostgreSQL) 16.15' >/dev/null
 
 # Reproduce the ownership created by the former backup image entrypoint, then
 # exercise the production one-shot migration before invoking the backup with
@@ -505,7 +509,7 @@ manifest_json="$(
     "cd '$backup_path' && sha256sum --check SHA256SUMS >/dev/null && cat manifest.json"
 )"
 jq --exit-status \
-  '.format == 3 and .postgres.server_version_num == "160014" and
+  '.format == 3 and .postgres.server_version_num == "160015" and
    .application_revision == "infra-test" and .backup_image_tag == "infra-test" and
    .backup_image_ref == "bumpabestie-backup@sha256:infra-test" and
    (.includes | index("hermes_runtime") != null) and
@@ -619,13 +623,13 @@ docker run --rm --volume "$hermes_data:/artifacts:ro" --entrypoint sh "$backup_i
 docker run --rm --volume "$hermes_staging:/artifacts:ro" --entrypoint sh "$backup_image" \
   -c 'test "$(cat /artifacts/control-plane/expected.txt)" = expected-hermes-staging && test ! -e /artifacts/stale'
 
-docker run --rm --entrypoint gosu "$postgres_image" --version | grep -F 'go1.26.5' >/dev/null
-docker run --rm --entrypoint postgres "$postgres_image" --version | grep -F 'PostgreSQL) 16.14' >/dev/null
-docker run --rm --entrypoint caddy "$caddy_image" version | grep -Fx 'v2.11.4' >/dev/null
-docker run --rm --entrypoint caddy "$caddy_image" build-info | grep -F 'go1.26.5' >/dev/null
+docker run --rm --entrypoint gosu "$postgres_image" --version | grep -F 'go1.27.3' >/dev/null
+docker run --rm --entrypoint postgres "$postgres_image" --version | grep -F 'PostgreSQL) 16.15' >/dev/null
+docker run --rm --entrypoint caddy "$caddy_image" version | grep -Fx 'v2.11.7' >/dev/null
+docker run --rm --entrypoint caddy "$caddy_image" build-info | grep -F 'go1.27.3' >/dev/null
 docker run --rm --entrypoint caddy "$caddy_image" build-info \
   | grep -F 'google.golang.org/grpc' \
-  | grep -F 'v1.82.1' >/dev/null
+  | grep -F 'v1.84.0' >/dev/null
 adapted_caddy_config="$(
   docker run --rm \
     --network none \

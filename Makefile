@@ -87,7 +87,7 @@ e2e-linux: ## Run production-build browser checks in the pinned Linux Playwright
 		-v bumpabestie-playwright-web-node-modules:/work/apps/web/node_modules \
 		-v bumpabestie-playwright-admin-node-modules:/work/apps/admin-web/node_modules \
 		-v bumpabestie-playwright-research-node-modules:/work/apps/research-web/node_modules \
-		-w /work mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48 \
+		-w /work mcr.microsoft.com/playwright:v1.64.1-noble@sha256:7852dc5a7d72f5fe458a597d690f6c42fbc8e9e26ddfa95f8e6ef552558d9bbf \
 		bash -lc 'set -Eeuo pipefail; for app in web admin-web research-web; do cd "/work/apps/$$app"; npm ci; npm run test:e2e; done'
 
 temporary-auth-e2e: ## Exercise the real provider-free browser auth path in disposable Compose

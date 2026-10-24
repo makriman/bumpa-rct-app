@@ -1,4 +1,4 @@
-FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df AS builder
+FROM python:3.12-alpine@sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 COPY apps/api/pyproject.toml apps/api/uv.lock ./
-RUN pip install --no-cache-dir uv==0.11.8 && uv sync --frozen --no-dev --no-install-project
+RUN pip install --no-cache-dir uv==0.13.5 && uv sync --frozen --no-dev --no-install-project
 ENV PATH="/app/.venv/bin:${PATH}"
 
 COPY apps/api/app ./app
@@ -14,14 +14,16 @@ COPY apps/api/alembic.ini ./alembic.ini
 COPY apps/api/alembic ./alembic
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-alpine@sha256:6d43704baacd1bfbe7c295d7f13079d5d8104ed33568873133f8fc69980419df AS runtime
+FROM python:3.12-alpine@sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:${PATH}"
 
 WORKDIR /app
-RUN addgroup --system app && adduser --system --ingroup app app
+RUN python -m pip uninstall --yes pip \
+    && rm -rf /usr/local/lib/python3.12/ensurepip \
+    && addgroup --system app && adduser --system --ingroup app app
 COPY --from=builder --chown=app:app /app /app
 COPY --chmod=0555 scripts/init_runtime_secrets.sh /usr/local/bin/init-runtime-secrets
 COPY --chmod=0555 scripts/init_auth_secret.sh /usr/local/bin/init-auth-secret
