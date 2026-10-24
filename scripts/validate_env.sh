@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-env_file="${1:-.env}"
+validation_env_file="${1:-.env}"
 expected_environment="${2:-local}"
 preserved_auth_record=""
 preserved_running_api_id=""
@@ -14,8 +14,8 @@ if (($# > 2)); then
   preserved_running_api_id="$5"
 fi
 
-if [[ ! -f "$env_file" ]]; then
-  echo "Environment file not found: $env_file" >&2
+if [[ ! -f "$validation_env_file" ]]; then
+  echo "Environment file not found: $validation_env_file" >&2
   exit 2
 fi
 
@@ -23,13 +23,11 @@ failed=0
 preserved_auth_valid=0
 if [[ -n "$preserved_auth_record" ]]; then
   validator_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if (
-    # shellcheck source=scripts/release_boundary.sh
-    source "$validator_dir/release_boundary.sh"
-    load_release_boundary "$preserved_auth_record" \
-      && python3 "$validator_dir/validate_preserved_auth.py" \
-        "$env_file" "$preserved_auth_record" "$preserved_running_api_id"
-  ); then
+  # shellcheck source=scripts/release_boundary.sh
+  source "$validator_dir/release_boundary.sh"
+  if load_release_boundary "$preserved_auth_record" \
+    && python3 "$validator_dir/validate_preserved_auth.py" \
+      "$validation_env_file" "$preserved_auth_record" "$preserved_running_api_id"; then
     preserved_auth_valid=1
   else
     echo "Recorded auth preservation failed" >&2
@@ -40,7 +38,7 @@ duplicate_keys="$(
   awk -F= '
     /^[A-Za-z_][A-Za-z0-9_]*=/ { count[$1]++ }
     END { for (key in count) if (count[key] > 1) print key }
-  ' "$env_file" | sort
+  ' "$validation_env_file" | sort
 )"
 if [[ -n "$duplicate_keys" ]]; then
   while IFS= read -r key; do
@@ -53,7 +51,7 @@ malformed_lines="$(
   awk '
     /^[[:space:]]*($|#)/ { next }
     !/^[A-Za-z_][A-Za-z0-9_]*=/ { print NR }
-  ' "$env_file"
+  ' "$validation_env_file"
 )"
 if [[ -n "$malformed_lines" ]]; then
   while IFS= read -r line_number; do
@@ -64,7 +62,7 @@ fi
 
 value_for() {
   local key="$1"
-  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$env_file"
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$validation_env_file"
 }
 
 required=(
@@ -266,7 +264,7 @@ for old_id, secret in old_keys.items():
     echo "CADDY_SITE_SCHEME must be https in production" >&2
     failed=1
   fi
-  if grep -Eq '^(DEV_FIXED_OTP|DEV_OTP_SINK)=' "$env_file"; then
+  if grep -Eq '^(DEV_FIXED_OTP|DEV_OTP_SINK)=' "$validation_env_file"; then
     echo "Development OTP controls must not be present in production" >&2
     failed=1
   fi
@@ -737,4 +735,4 @@ if ((failed)); then
   exit 2
 fi
 
-echo "Environment contract valid for $expected_environment: $env_file"
+echo "Environment contract valid for $expected_environment: $validation_env_file"

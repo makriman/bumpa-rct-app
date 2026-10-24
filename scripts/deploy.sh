@@ -323,6 +323,18 @@ run_production_smoke() {
     ./scripts/smoke_test.sh
 }
 
+verify_cached_rollback_images() {
+  local image image_id
+  for image in "$@"; do
+    if [[ ! "$image" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]] \
+      || ! image_id="$(docker image inspect --format '{{.Id}}' "$image")" \
+      || [[ ! "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      echo "Verified immutable rollback image is unavailable in the local cache" >&2
+      return 1
+    fi
+  done
+}
+
 running_image() {
   local service="$1"
   local recorded_reference="${2:-}"
@@ -705,10 +717,11 @@ rollback() {
     echo "Attempting application rollback while retaining forward-only data and edge infrastructure." >&2
     set +e
     rollback_services=(api web admin-web research-web caddy)
-    rollback_images=(api web admin-web research-web)
+    rollback_image_refs=("$previous_api_image" "$previous_web_image" \
+      "$rollback_admin_web_image" "$rollback_research_web_image")
     if ((previous_hermes_running)) && [[ -n "$previous_hermes_image" ]]; then
       rollback_services+=(hermes)
-      rollback_images+=(hermes)
+      rollback_image_refs+=("$previous_hermes_image")
     fi
     if ((previous_worker_running && previous_scheduler_running)); then
       rollback_services+=(worker scheduler)
@@ -748,13 +761,17 @@ rollback() {
       if ((!previous_worker_running || !previous_scheduler_running)); then
         "${compose[@]}" rm -f worker scheduler 2>/dev/null || true
       fi
-      "${compose[@]}" pull "${rollback_images[@]}" \
+      # The exact prior images were verified while running; target initializer
+      # and edge images were pulled and revision-checked before this boundary.
+      # Recovery must not depend on registry availability or broader credentials.
+      verify_cached_rollback_images \
+        "${rollback_image_refs[@]}" "$target_api_image" "$target_caddy_image" \
         && API_IMAGE="$target_api_image" \
-          "${compose[@]}" up --no-deps --force-recreate \
+          "${compose[@]}" up --pull never --no-deps --force-recreate \
           --abort-on-container-exit --exit-code-from auth-secret-init auth-secret-init \
-        && "${compose[@]}" up --no-deps --force-recreate \
+        && "${compose[@]}" up --pull never --no-deps --force-recreate \
           --abort-on-container-exit --exit-code-from caddy-init caddy-init \
-        && "${compose[@]}" --profile async up -d --wait --wait-timeout 240 \
+        && "${compose[@]}" --profile async up --pull never -d --wait --wait-timeout 240 \
           --no-deps "${rollback_services[@]}" \
         && run_production_smoke
     }

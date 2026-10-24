@@ -1289,7 +1289,8 @@ test "$(grep -Ec '^[[:space:]]*run_production_smoke$' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke; then' scripts/deploy.sh)" = 1
 test "$(grep -Fc '&& run_production_smoke' scripts/deploy.sh)" = 2
 grep -Fq 'if docker start "${previous_writer_containers[@]}" >/dev/null' scripts/deploy.sh
-grep -Fq '&& "${compose[@]}" --profile async up -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq '&& "${compose[@]}" --profile async up --pull never -d --wait --wait-timeout 240' scripts/deploy.sh
+grep -Fq 'verify_cached_rollback_images' scripts/deploy.sh
 grep -Fq 'COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type' infra/hermes/Dockerfile
 if grep -Fq 'SMOKE_SCHEME=https SMOKE_PORT=443 ./scripts/smoke_test.sh' scripts/deploy.sh; then
   echo "Deployment bypasses the bounded direct-origin and edge smoke gates" >&2

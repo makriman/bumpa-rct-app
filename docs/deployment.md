@@ -870,8 +870,17 @@ the fail-closed disabled boundary; the first compatibility promotion must theref
 be the documented disabled phase.
 
 After migrations begin, a failed later release can restore the prior application
-images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only:
-automatic rollback never recreates an older infrastructure image and never reverses
+images and rerun smoke. Caddy, PostgreSQL and Redis remain forward-only.
+The rollback callback uses only immutable images already verified in the local
+Docker cache, including the target API initializer and target edge image, and
+sets `--pull never` for every recreation. A missing/invalid cache entry fails
+through normal containment and the maintenance interlock; no mutable tag,
+registry pull or image build is substituted. Preserve and verify an image archive
+of the actual running boundary before promotion, including locally built hotfix
+images. Host-loss recovery requires loading that verified archive on a replacement
+host; cache/archive on the same host is not off-host disaster recovery.
+
+Automatic rollback never recreates an older infrastructure image and never reverses
 migrations. Only after rollback smoke passes, the script persists a hybrid boundary:
 the prior application revision/tag and API/web/Hermes references with the target
 infrastructure tag and Caddy/PostgreSQL/backup references. Its separate
