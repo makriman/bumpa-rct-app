@@ -79,6 +79,59 @@ def main() -> None:
         tenant_id, other_id = tenant.id, other.id
         consent = tenant.research_consent_status
 
+    # Concurrent, simulated first inbound messages must show the same pending
+    # question; a greeting is never silently saved as an answer. No Meta sends.
+    from app.core.crypto import secret_hash
+    from app.services.business_onboarding import arm_pilot_inbound_defaults, chat_reply, state_for
+
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.user_id == owner.id))
+        assert identity is not None
+        fingerprint = secret_hash("onboarding-existing-pilot:" + phone, settings.otp_secret)
+        arm_pilot_inbound_defaults(
+            db,
+            [
+                {
+                    "identity_id": identity.id,
+                    "tenant_id": tenant_id,
+                    "user_id": owner.id,
+                    "role": "owner",
+                    "phone_fingerprint": fingerprint,
+                }
+            ],
+            settings.otp_secret,
+        )
+        db.commit()
+        identity_id, owner_id = identity.id, owner.id
+
+    def first_inbound(_: int) -> str | None:
+        with SessionLocal() as db:
+            set_security_context(db, privileged=True)
+            business = db.get(Tenant, tenant_id)
+            assert business is not None
+            result = chat_reply(
+                db,
+                business,
+                owner_id,
+                "hi",
+                channel="whatsapp",
+                whatsapp_identity=(identity_id, fingerprint),
+            )
+            db.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_replies = list(pool.map(first_inbound, range(2)))
+    assert all("Question 1 of 7" in str(reply) for reply in first_replies)
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        business = db.get(Tenant, tenant_id)
+        assert business is not None and state_for(db, business)["draft"] == {}
+    print(
+        "Postgres existing-pilot first-inbound concurrency passed: same question, no greeting saved, no external sends."
+    )
+
     with TestClient(app, raise_server_exceptions=False) as client:
 
         def login(number: str) -> dict[str, str]:

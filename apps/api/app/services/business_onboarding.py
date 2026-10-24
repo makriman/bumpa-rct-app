@@ -19,13 +19,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.crypto import secret_hash
 from app.core.time import utcnow
 from app.db.models import (
     BumpaConnection,
     BumpaSyncRun,
     MerchantBusinessProfile,
+    PhoneIdentity,
     Tenant,
     TenantMembership,
+    User,
 )
 from app.services.audit import audit
 from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
@@ -123,6 +126,7 @@ QUESTIONS: list[dict[str, Any]] = [
     },
 ]
 KEYS = [str(q["key"]) for q in QUESTIONS]
+GREETINGS = {"hi", "hello", "hey", "good morning", "good afternoon", "good evening"}
 WELCOME = (
     "Hi 👋🏽 I’m BumpaBestie, your AI business assistant. I’m here to help you make "
     "better decisions and grow your business.\n\n"
@@ -188,6 +192,70 @@ def save_state(db: Session, tenant_id: str, state: dict[str, Any]) -> None:
     else:
         row.state = state
     db.flush()
+
+
+def arm_pilot_inbound_defaults(
+    db: Session, identities: list[dict[str, str]], otp_secret: str
+) -> dict[str, int]:
+    """Arm only captured approved identities; never enroll or reset a business."""
+    verified: list[tuple[PhoneIdentity, TenantMembership]] = []
+    for captured in identities:
+        result = db.execute(
+            select(PhoneIdentity, TenantMembership)
+            .join(
+                TenantMembership,
+                (TenantMembership.tenant_id == PhoneIdentity.tenant_id)
+                & (TenantMembership.user_id == PhoneIdentity.user_id),
+            )
+            .join(Tenant, Tenant.id == PhoneIdentity.tenant_id)
+            .join(User, User.id == PhoneIdentity.user_id)
+            .where(
+                PhoneIdentity.id == captured["identity_id"],
+                PhoneIdentity.tenant_id == captured["tenant_id"],
+                PhoneIdentity.user_id == captured["user_id"],
+                PhoneIdentity.status == "approved",
+                TenantMembership.status == "active",
+                Tenant.status == "active",
+                User.status == "active",
+            )
+        ).one_or_none()
+        if result is None:
+            raise ValueError("Captured pilot mapping changed; recapture scope before proceeding")
+        identity, membership = result
+        fingerprint = secret_hash("onboarding-existing-pilot:" + identity.phone_e164, otp_secret)
+        if fingerprint != captured["phone_fingerprint"] or membership.role != captured["role"]:
+            raise ValueError("Captured pilot identity changed; no defaults were applied")
+        verified.append((identity, membership))
+    counts = {
+        "captured": len(verified),
+        "armed": 0,
+        "completed_preserved": 0,
+        "already_configured": 0,
+        "non_editors_preserved": 0,
+    }
+    for identity, membership in sorted(verified, key=lambda row: (row[0].tenant_id, row[0].id)):
+        if membership.role not in {"owner", "admin"}:
+            counts["non_editors_preserved"] += 1
+            continue
+        tenant = locked_tenant(db, identity.tenant_id)
+        state = state_for(db, tenant)
+        if state["status"] == "completed":
+            counts["completed_preserved"] += 1
+            continue
+        defaults = state.setdefault("whatsapp_first_inbound", {})
+        if identity.id in defaults:
+            counts["already_configured"] += 1
+            continue
+        defaults[identity.id] = {
+            "phone_fingerprint": secret_hash(
+                "onboarding-existing-pilot:" + identity.phone_e164, otp_secret
+            ),
+            "pending": True,
+        }
+        state["revision"] += 1
+        save_state(db, tenant.id, state)
+        counts["armed"] += 1
+    return counts
 
 
 def can_edit(db: Session, tenant_id: str, user_id: str) -> bool:
@@ -584,6 +652,19 @@ def text_prompt(state: dict[str, Any], hint: dict[str, str] | None = None) -> st
     return result + "\n\nYou can reply BACK or LATER at any time."
 
 
+def is_help_request(normalized: str) -> bool:
+    return (
+        normalized.endswith("?")
+        or re.match(
+            r"^(?:(?:please|abeg)\s+)?(?:can you|could you|help me|show me|tell me|check my|"
+            r"calculate|draft|write|summari[sz]e|wetin|how (?:can|do|should|i fit|i go|we fit|much|many|to)|"
+            r"what (?:can|should|is|are|do)|why (?:is|are))\b",
+            normalized,
+        )
+        is not None
+    )
+
+
 def chat_reply(
     db: Session,
     tenant: Tenant,
@@ -593,6 +674,7 @@ def chat_reply(
     channel: str,
     conversation_id: str | None = None,
     media_type: str | None = None,
+    whatsapp_identity: tuple[str, str] | None = None,
 ) -> str | None:
     """Handle explicit setup, greetings and active onboarding without an LLM call.
 
@@ -642,6 +724,65 @@ def chat_reply(
             if cmd == "confirm_update"
             else "Okay, I’ve kept your business profile as it was."
         )
+    default = (
+        state.get("whatsapp_first_inbound", {}).get(whatsapp_identity[0])
+        if channel == "whatsapp" and whatsapp_identity
+        else None
+    )
+    auto_resume = bool(
+        default
+        and default.get("pending")
+        and whatsapp_identity is not None
+        and default.get("phone_fingerprint") == whatsapp_identity[1]
+    )
+    if auto_resume and default is not None:
+        default["pending"] = False
+        state["revision"] += 1
+        save_state(db, tenant.id, state)
+        explicit = (
+            normalized in PAUSE_COMMANDS
+            or normalized
+            in {
+                "onboarding",
+                "set up my business",
+                "business profile",
+                "update my business profile",
+                "let's start",
+                "lets start",
+                "resume onboarding",
+                "start setup",
+                "make we start",
+                "make we begin",
+                "continue setup",
+                "continue onboarding",
+                "make we continue",
+                "back",
+                "save",
+                "yes",
+                "looks good",
+                "save my business profile",
+            }
+            or re.fullmatch(r"edit [1-7]", normalized)
+        )
+        if state["status"] != "completed" and not explicit:
+            was_new = state["status"] == "not_started"
+            needs_prompt = state["status"] in {"not_started", "paused"} or normalized in GREETINGS
+            if state["status"] in {"not_started", "paused"}:
+                tenant = apply_command(
+                    db,
+                    tenant,
+                    user_id,
+                    OnboardingCommand(action="resume", expected_revision=state["revision"]),
+                )
+                state = state_for(db, tenant)
+            if not is_help_request(normalized) and needs_prompt:
+                introduction = (
+                    "Hi 👋🏽 Let’s get to know your business so my advice fits. "
+                    "You can answer in English or Pidgin, or reply LATER for business help first.\n\n"
+                    if was_new
+                    else "Let’s pick up your business setup where you left off.\n\n"
+                )
+                return introduction + text_prompt(state, order_hint(db, tenant))
     if normalized in PAUSE_COMMANDS:
         if state["status"] in {"in_progress", "review"}:
             apply_command(
@@ -680,25 +821,15 @@ def chat_reply(
         and state["status"] != "completed"
     ):
         command = OnboardingCommand(action="resume", expected_revision=state["revision"])
-    elif state["status"] == "not_started" and normalized in {
-        "hi",
-        "hello",
-        "hey",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    }:
+    elif state["status"] == "not_started" and normalized in GREETINGS:
         return WELCOME
+    elif state["status"] in {"in_progress", "review"} and normalized in GREETINGS:
+        return text_prompt(state, order_hint(db, tenant))
     elif state["status"] not in {"in_progress", "review"}:
         return None
     elif normalized == "back":
         command = OnboardingCommand(action="back", expected_revision=state["revision"])
-    elif normalized.endswith("?") or re.match(
-        r"^(?:(?:please|abeg)\s+)?(?:can you|could you|help me|show me|tell me|check my|"
-        r"calculate|draft|write|summari[sz]e|wetin|how (?:can|do|should|i fit|i go|we fit|much|many|to)|"
-        r"what (?:can|should|is|are|do)|why (?:is|are))\b",
-        normalized,
-    ):
+    elif is_help_request(normalized):
         # A business question interrupts setup; never turn it into a saved fact.
         apply_command(
             db,

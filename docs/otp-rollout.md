@@ -85,10 +85,12 @@ and recorded/running image boundary must be reconciled before promising rollback
 
 Merchant business setup is independent from login-factor selection and remains
 available to authorized WhatsApp identities. Code/images can be prepared while
-OTP is pending, but that is not an end-to-end production rollout. Do not bypass
-the coordinator, remove working pilot access or silently restore an expired PIN
-to force an onboarding-only release. A different containment/rollback auth
-boundary needs explicit approval and verification.
+OTP is pending. An explicitly authorized onboarding release may preserve the
+exact observed expired-PIN boundary through the guarded recorded-auth proof
+described in deployment.md. Ordinary expiry validation remains strict; no PIN is
+reset/extended and no live OTP mode is activated. Existing mapped sessions retain
+their checks; new sign-ins remain unavailable until the separately approved OTP
+cutover. Do not bypass the coordinator or claim mock tests establish delivery.
 
 Local coverage includes provider-failure sanitization, cooldown privacy, resend
 supersession, purpose isolation, expiry, mapping and replay. The protected CI

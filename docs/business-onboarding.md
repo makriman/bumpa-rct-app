@@ -1,5 +1,16 @@
 # Merchant onboarding and business memory
 
+An owner-authorized existing-pilot rollout can arm the next WhatsApp inbound for
+an explicitly captured set of approved identity IDs and keyed phone fingerprints,
+including secondary numbers. This is an operator-only migration-lane command,
+not public enrollment or a proactive campaign. New or paused setup opens its
+pending question; active setup accepts the next answer. Greetings repeat the
+pending question without becoming a business fact. Completed setup is preserved.
+The marker is consumed transactionally with chat state, so replay cannot restart
+setup. Media/voice handling, immediate help, LATER, opt-outs, membership/tenant
+authorization and web continuity remain in force. Future identities receive no
+default merely because they share a user or tenant with the captured pilot.
+
 Source: [Bumpa Bestie Onboarding](https://docs.google.com/document/d/1PWA6WIh0sZbNHmrmx1wEA__2Efrlff4uBpFTazrzxPI/edit).
 
 ## Comparison with the previous app

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.core.crypto import secret_hash
 from app.core.rate_limit import (
     RateLimitExceeded,
     RateLimitUnavailable,
@@ -740,6 +741,12 @@ def _process_message(
                     reply_to_external_message_id=reply_to_meta_message_id,
                     media_metadata=processed.metadata,
                     event_callback=progress.on_event,
+                    whatsapp_identity=(
+                        identity.id,
+                        secret_hash(
+                            "onboarding-existing-pilot:" + identity.phone_e164, settings.otp_secret
+                        ),
+                    ),
                     settings=settings,
                 )
             finally:

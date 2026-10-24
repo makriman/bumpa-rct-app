@@ -3,6 +3,16 @@ set -Eeuo pipefail
 
 env_file="${1:-.env}"
 expected_environment="${2:-local}"
+preserved_auth_record=""
+preserved_running_api_id=""
+if (($# > 2)); then
+  if (($# != 5)) || [[ "$expected_environment" != production || "$3" != --preserve-recorded-auth ]]; then
+    echo "Invalid recorded-auth preservation arguments" >&2
+    exit 2
+  fi
+  preserved_auth_record="$4"
+  preserved_running_api_id="$5"
+fi
 
 if [[ ! -f "$env_file" ]]; then
   echo "Environment file not found: $env_file" >&2
@@ -10,6 +20,21 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 failed=0
+preserved_auth_valid=0
+if [[ -n "$preserved_auth_record" ]]; then
+  validator_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if (
+    source "$validator_dir/release_boundary.sh"
+    load_release_boundary "$preserved_auth_record" \
+      && python3 "$validator_dir/validate_preserved_auth.py" \
+        "$env_file" "$preserved_auth_record" "$preserved_running_api_id"
+  ); then
+    preserved_auth_valid=1
+  else
+    echo "Recorded auth preservation failed" >&2
+    failed=1
+  fi
+fi
 duplicate_keys="$(
   awk -F= '
     /^[A-Za-z_][A-Za-z0-9_]*=/ { count[$1]++ }
@@ -306,8 +331,10 @@ if expires_at.tzinfo is None or expires_at.astimezone(timezone.utc) <= datetime.
     raise SystemExit(1)
 PY
     then
-      echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
-      failed=1
+      if ((preserved_auth_valid == 0)); then
+        echo "TEMPORARY_WEB_PIN_EXPIRES_AT must be a future timezone-aware timestamp" >&2
+        failed=1
+      fi
     fi
   elif [[ -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER)" || \
     -n "$(value_for TEMPORARY_WEB_PIN_VERIFIER_FILE)" || \

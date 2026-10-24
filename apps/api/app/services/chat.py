@@ -224,6 +224,7 @@ def handle_chat(
     media_metadata: dict[str, object] | None = None,
     event_callback: Callable[[str, dict[str, object]], None] | None = None,
     fixed_response: str | None = None,
+    whatsapp_identity: tuple[str, str] | None = None,
     settings: Settings | None = None,
 ) -> tuple[Conversation, AgentMessage, AgentMessage, object | None]:
     effective_settings = settings or get_settings()
@@ -292,6 +293,7 @@ def handle_chat(
             channel=channel,
             conversation_id=conversation.id,
             media_type=str((media_metadata or {}).get("type", "text")),
+            whatsapp_identity=whatsapp_identity,
         )
     context, freshness = build_business_context(db, tenant.id)
     if channel in {"web", "whatsapp"}:

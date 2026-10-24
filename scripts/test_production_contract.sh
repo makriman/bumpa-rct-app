@@ -30,6 +30,8 @@ live_env="$(mktemp)"
 verification_env="$(mktemp)"
 temporary_verification_env="$(mktemp)"
 pilot_env="$(mktemp)"
+preserved_env="$(mktemp)"
+preserved_record="$(mktemp)"
 disabled_auth_env="$(mktemp)"
 whatsapp_auth_env="$(mktemp)"
 versioned_auth_env="$(mktemp)"
@@ -77,7 +79,7 @@ cleanup() {
   fi
   rm -f "$contract_env" "$invalid_env" "$duplicate_env" "$live_env" \
     "$verification_env" "$temporary_verification_env" "$disabled_auth_env" "$whatsapp_auth_env" \
-    "$versioned_auth_env" "$pilot_env" \
+    "$versioned_auth_env" "$pilot_env" "$preserved_env" "$preserved_record" \
     "$offsite_env" "$offsite_hook" "$offsite_marker"
   rm -rf "$contract_secrets" "$hermes_health_probe"
   docker volume rm --force "$auth_secret_init_volume" >/dev/null 2>&1 || true
@@ -1233,7 +1235,7 @@ deploy_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/deploy.sh | cu
 deploy_env_line="$(grep -n -F 'if [[ ! -f .env.production ]]' scripts/deploy.sh | cut -d: -f1)"
 release_helper_line="$(grep -n -F 'source "$ROOT_DIR/scripts/release_boundary.sh"' scripts/deploy.sh | cut -d: -f1)"
 release_load_line="$(grep -n -F 'load_release_boundary .deployed-release.json' scripts/deploy.sh | cut -d: -f1)"
-target_validate_line="$(grep -n -F './scripts/validate_env.sh .env.production production' scripts/deploy.sh | cut -d: -f1)"
+target_validate_line="$(grep -n -F './scripts/validate_env.sh "${target_validation_args[@]}"' scripts/deploy.sh | cut -d: -f1)"
 scheduled_lock_line="$(grep -n -F 'acquire_maintenance_lock' scripts/scheduled_backup.sh | cut -d: -f1)"
 scheduled_env_line="$(grep -n -F "env_file=\"\${ENV_FILE:-.env.production}\"" scripts/scheduled_backup.sh | cut -d: -f1)"
 require_single_line_number deploy_lock_line "$deploy_lock_line"
@@ -1251,7 +1253,8 @@ if [[ -z "$deploy_lock_line" || -z "$deploy_env_line" || "$deploy_lock_line" -ge
 fi
 if [[ -z "$release_helper_line" || -z "$release_load_line" || -z "$target_validate_line" \
   || "$release_helper_line" -ge "$release_load_line" \
-  || "$release_load_line" -ge "$target_validate_line" ]]; then
+  || "$release_load_line" -ge "$target_validate_line" \
+  || "$target_validate_line" -ge "$image_pull_line" ]]; then
   echo "Deployment does not load the previous release boundary before target preflight" >&2
   exit 1
 fi
@@ -1860,6 +1863,47 @@ awk '
 ' "$temporary_verification_env" > "$pilot_env"
 chmod 0600 "$pilot_env"
 ./scripts/validate_env.sh "$pilot_env" production >/dev/null
+awk '/^TEMPORARY_WEB_PIN_EXPIRES_AT=/ { print "TEMPORARY_WEB_PIN_EXPIRES_AT=2020-01-01T00:00:00Z"; next } {print}' \
+  "$pilot_env" >"$preserved_env"
+chmod 0600 "$preserved_env" "$preserved_record"
+if ./scripts/validate_env.sh "$preserved_env" production >/dev/null 2>&1; then
+  echo "Ordinary validation accepted an expired PIN boundary" >&2
+  exit 1
+fi
+python3 - "$preserved_env" "$preserved_record" <<'PY'
+import json
+import sys
+from pathlib import Path
+from scripts.validate_preserved_auth import configuration_digest
+
+env_path, record_path = map(Path, sys.argv[1:])
+env = dict(line.split('=', 1) for line in env_path.read_text().splitlines() if line and not line.startswith('#'))
+record = {'revision': env['DEPLOY_REF'], 'operations_revision': env['DEPLOY_REF'],
+    'image_tag': env['IMAGE_TAG'], 'infra_image_tag': env['INFRA_IMAGE_TAG'],
+    'images': {key: env[name] for key, name in {
+        'api': 'API_IMAGE', 'worker': 'API_IMAGE', 'scheduler': 'API_IMAGE', 'web': 'WEB_IMAGE',
+        'admin_web': 'ADMIN_WEB_IMAGE', 'research_web': 'RESEARCH_WEB_IMAGE', 'caddy': 'CADDY_IMAGE',
+        'postgres': 'POSTGRES_IMAGE', 'backup': 'BACKUP_IMAGE', 'hermes': 'HERMES_IMAGE'}.items()},
+    'auth': {key: env[name] for key, name in {
+        'login_mode': 'AUTH_LOGIN_MODE', 'temporary_web_pin_verifier_file': 'TEMPORARY_WEB_PIN_VERIFIER_FILE',
+        'temporary_web_pin_verifier_file_host': 'TEMPORARY_WEB_PIN_VERIFIER_FILE_HOST',
+        'temporary_web_pin_expires_at': 'TEMPORARY_WEB_PIN_EXPIRES_AT', 'whatsapp_backend': 'WHATSAPP_BACKEND'}.items()},
+    'preserved_configuration': {'schema_version': 1, 'policy': 'unchanged-expired-pin-no-new-logins',
+        'running_api_image_id': 'sha256:' + 'c' * 64,
+        'non_release_environment_sha256': configuration_digest(env_path.read_bytes())}}
+record['images']['redis'] = 'redis@sha256:' + 'a' * 64
+record_path.write_text(json.dumps(record))
+PY
+./scripts/validate_env.sh "$preserved_env" production --preserve-recorded-auth "$preserved_record" \
+  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" >/dev/null
+awk '/^TEMPORARY_WEB_PIN_EXPIRES_AT=/ { print "TEMPORARY_WEB_PIN_EXPIRES_AT=2099-01-01T00:00:00Z"; next } {print}' \
+  "$preserved_env" >"$invalid_env"
+chmod 0600 "$invalid_env"
+if ./scripts/validate_env.sh "$invalid_env" production --preserve-recorded-auth "$preserved_record" \
+  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" >/dev/null 2>&1; then
+  echo "Recorded auth preservation accepted changed selectors" >&2
+  exit 1
+fi
 pilot_rendered="$(docker compose --env-file "$pilot_env" \
   -f compose.yaml -f compose.prod.yaml --profile async --profile tools config --format json)"
 if ! jq --exit-status '

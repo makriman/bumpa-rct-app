@@ -36,6 +36,7 @@ lighthouse-reports/
 *.tsbuildinfo
 
 # Runtime data and generated artifacts
+/ops-hotfixes/
 backups/
 releases/
 /exports/
