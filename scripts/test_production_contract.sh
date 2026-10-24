@@ -1269,7 +1269,7 @@ grep -Fq 'running_service_matches_recorded_topology' scripts/deploy.sh
 grep -Fq 'select_surface_rollback_image' scripts/deploy.sh
 grep -Fq '"$hybrid_admin_web" == "$rollback_admin_web_image"' scripts/deploy.sh
 grep -Fq '"$hybrid_research_web" == "$rollback_research_web_image"' scripts/deploy.sh
-grep -Fq 'actual_image="$(running_image "$service")"' scripts/deploy.sh
+grep -Fq 'actual_image="$(running_image "$service" "$recorded_image")"' scripts/deploy.sh
 grep -Fq 'automatic_rollback_available=1' scripts/deploy.sh
 grep -Fq 'elif ((deployment_started && automatic_rollback_available))' scripts/deploy.sh
 grep -Fq 'SMOKE_ORIGIN_ADDRESS=127.0.0.1' scripts/deploy.sh

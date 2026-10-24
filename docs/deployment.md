@@ -810,7 +810,11 @@ temporary verifier paths and expiry, and `WHATSAPP_BACKEND`). It validates that
 record as private, immutable metadata and compares its
 API, worker, scheduler, web, Hermes, Caddy, PostgreSQL and Redis references with
 the actual running containers before enabling automatic rollback. A mismatch is a
-hard preflight stop. Any pre-deployment failure after a valid record is loaded
+hard preflight stop. An immutable registry alias added while preserving a locally
+built image is accepted only when Docker resolves the recorded digest to the
+exact running image identity. Publishing an alias does not adopt or repair a stale
+release record; preserve and reconcile its provenance before promotion.
+Any pre-deployment failure after a valid record is loaded
 atomically restores all nine prior release pointers and the recorded authentication
 boundary in `.env.production`. A legacy record without the auth object loads as
 the fail-closed disabled boundary; the first compatibility promotion must therefore

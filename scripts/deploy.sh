@@ -324,10 +324,24 @@ run_production_smoke() {
 
 running_image() {
   local service="$1"
+  local recorded_reference="${2:-}"
   local container_id configured_ref image_id repository immutable_ref last_component
   container_id="$("${compose[@]}" ps --status running -q "$service")"
   if [[ -n "$container_id" ]]; then
     configured_ref="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+    image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+    if [[ ! "$image_id" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+      echo "Unable to resolve the running image identity for $service" >&2
+      return 1
+    fi
+    # Registry publication can add an immutable alias for an already-running
+    # local image. Accept that recorded alias only when Docker resolves it to
+    # the exact same immutable image identity; a stale record still fails.
+    if [[ "$recorded_reference" =~ ^[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]] \
+      && [[ "$(docker image inspect --format '{{.Id}}' "$recorded_reference" 2>/dev/null || true)" == "$image_id" ]]; then
+      printf '%s\n' "$recorded_reference"
+      return
+    fi
     if [[ "$configured_ref" =~ @sha256:[a-f0-9]{64}$ ]]; then
       printf '%s\n' "$configured_ref"
       return
@@ -338,7 +352,6 @@ running_image() {
     if [[ "$last_component" == *:* ]]; then
       repository="${repository%:*}"
     fi
-    image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
     immutable_ref="$(
       docker image inspect --format '{{json .RepoDigests}}' "$image_id" |
         jq --raw-output --arg prefix "$repository@sha256:" \
@@ -373,7 +386,7 @@ if ((previous_boundary_valid)); then
       postgres) recorded_image="$previous_postgres_image" ;;
       redis) recorded_image="$previous_redis_image" ;;
     esac
-    actual_image="$(running_image "$service")"
+    actual_image="$(running_image "$service" "$recorded_image")"
     if ! running_service_matches_recorded_topology \
         "$was_recorded" "$actual_image" "$recorded_image"; then
       echo "Running $service image does not match the verified release boundary" >&2
