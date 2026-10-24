@@ -164,6 +164,10 @@ def test_whatsapp_numbered_answers_and_interruptions(
     assert state_for(db, tenant)["status"] == "paused"
     assert state_for(db, tenant)["draft"] == {}
     reply("RESUME ONBOARDING")
+    assert reply("Abeg help me price my cakes") is None
+    assert state_for(db, tenant)["status"] == "paused"
+    assert state_for(db, tenant)["draft"] == {}
+    reply("RESUME ONBOARDING")
     reply(ANSWERS["offering"])
     reply(ANSWERS["customers"])
     assert "Question 4 of 7" in (reply("1, 6") or "")
