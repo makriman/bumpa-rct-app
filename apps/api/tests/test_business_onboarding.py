@@ -463,3 +463,88 @@ def test_business_profile_api_authorization_and_schema(client: Any) -> None:
             elif row:
                 row.state = previous
             db.commit()
+
+
+@pytest.mark.parametrize(
+    "media_type", ["image", "sticker", "video", "document", "location", "contacts"]
+)
+def test_attachment_during_setup_reaches_agent_without_becoming_a_profile_fact(
+    business: tuple[Session, Tenant, User],
+    monkeypatch: pytest.MonkeyPatch,
+    media_type: str,
+) -> None:
+    db, tenant, user = business
+    db.add(
+        HermesProfile(
+            tenant_id=tenant.id,
+            profile_name="media-review",
+            profile_path="/profiles/media-review",
+            api_port=8700,
+            provider="local",
+            status="active",
+            encrypted_api_key="local-test-only",
+        )
+    )
+    command(db, tenant, user, "start")
+    command(db, tenant, user, "answer", field="offering", value=ANSWERS["offering"])
+    db.commit()
+    seen: list[str] = []
+
+    def respond(_self: Any, _profile: str, message: str, _context: str) -> str:
+        seen.append(message)
+        return "Synthetic attachment answer."
+
+    monkeypatch.setattr(chat_service.LocalAgentRuntime, "respond", respond)
+    prompt = "Please examine this image and help with the business task it shows."
+    _, _, outgoing, _ = chat_service.handle_chat(
+        db,
+        tenant=tenant,
+        user=user,
+        message=prompt,
+        channel="whatsapp",
+        external_message_id=f"media-review-{media_type}",
+        media_metadata={"type": media_type},
+        provider_content_parts=[{"type": "text", "text": prompt}],
+    )
+    assert seen == [prompt]
+    assert outgoing.content == "Synthetic attachment answer."
+    state = state_for(db, tenant)
+    assert state["status"] == "paused"
+    assert state["step"] == "customers"
+    assert state["draft"] == {"offering": ANSWERS["offering"]}
+    assert state["answers"] == {}
+
+
+@pytest.mark.parametrize("media_type", ["audio", "voice"])
+def test_transcribed_voice_note_can_answer_a_setup_question(
+    business: tuple[Session, Tenant, User],
+    media_type: str,
+) -> None:
+    db, tenant, user = business
+    command(db, tenant, user, "start")
+    reply = chat_reply(
+        db, tenant, user.id, ANSWERS["offering"], channel="whatsapp", media_type=media_type
+    )
+    assert reply is not None and "Question 2 of 7" in reply
+    state = state_for(db, tenant)
+    assert state["status"] == "in_progress"
+    assert state["draft"] == {"offering": ANSWERS["offering"]}
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_attachment_caption_does_not_execute_a_setup_command(
+    business: tuple[Session, Tenant, User],
+    completed: bool,
+) -> None:
+    db, tenant, user = business
+    if completed:
+        complete(db, tenant, user)
+    before = view(db, tenant, editable=True, user_id=user.id)
+    assert (
+        chat_reply(db, tenant, user.id, "onboarding", channel="whatsapp", media_type="document")
+        is None
+    )
+    after = view(db, tenant, editable=True, user_id=user.id)
+    assert after["status"] == before["status"]
+    assert after["revision"] == before["revision"]
+    assert after["answers"] == before["answers"]

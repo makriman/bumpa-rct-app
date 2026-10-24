@@ -2,7 +2,7 @@
 
 This is the review candidate in draft [PR 116](https://github.com/makriman/bumpa-rct-app/pull/116).
 Status at record creation: do not deploy from this workspace. Exact-commit CI and
-strict Linux reruns are pending; this checkpoint does not grant release acceptance. The final handoff must
+exact-head image checks are pending; this checkpoint does not grant release acceptance. The final handoff must
 record the candidate SHA and its CI run separately from this self-referencing source.
 
 ## Provenance and goals
@@ -53,6 +53,9 @@ current reviewed profile. Provider secrets remain server-side.
   The model/tool path still commits its initiating message before MCP use.
 - Route recognizable English/Pidgin business help requests out of active setup,
   including unpunctuated requests, instead of saving them as profile facts.
+- Route non-text attachments to the agent while pausing setup and preserving the
+  existing draft; generated media prompts never become profile answers. Preserve
+  transcribed audio/voice-note answers and ignore setup commands in attachment captions.
 - Put useful next questions before an expandable saved-details review. Browser
   tests require the first realistic question to fit fully in the mobile viewport.
 - Load the reviewed profile when an existing conversation has no messages; the
@@ -102,7 +105,7 @@ raw report hashes. Local image tags are evidence, not publishable release refere
 
 | Gate | Current local evidence |
 | --- | --- |
-| `make quality` with pinned Node/locked Python | Passed; API 631 passed, 1 skipped, 85.50% branch coverage; web/admin/research 120/34/18 unit tests; lint/format/mypy/contracts/builds/isolation/Lighthouse |
+| `make quality` with pinned Node/locked Python | Passed; API 641 passed, 1 skipped, 85.51% branch coverage; web/admin/research 120/34/18 unit tests; lint/format/mypy/contracts/builds/isolation/Lighthouse |
 | Operational unit tests after image changes | 113 passed |
 | Sandbox typecheck and tenant/filesystem boundary tests | Passed, 3 tests |
 | PostgreSQL migration 18→19 and non-bypass RLS | Passed, 27 tenant tables |
@@ -113,7 +116,7 @@ raw report hashes. Local image tags are evidence, not publishable release refere
 | Full npm audits: consumer/admin/research/Sandbox/Hermes | Zero findings |
 | API/Caddy/Postgres/backup/Hermes/Sandbox image scans | Zero fixable critical/high findings, unchanged CI policy |
 | Final combined infrastructure contract | Passed activation/restart, patch upgrade, persistence, checksum backup and isolated restore |
-| Pinned Linux Playwright | Consumer 78 passed, 4 viewport-specific skips; four timestamp-fixed visual tests passed. Changed Linux screenshots manually inspected; strict consumer/admin/research reruns underway |
+| Pinned Linux Playwright | Strict consumer 78 passed, 4 viewport-specific skips; admin 34 passed; research 28 passed. Changed Linux screenshots manually inspected; thresholds unchanged |
 
 An initial overlay-only pip-audit invocation inspected zero packages and was
 discarded; only the exported frozen lock audit above is evidence. A final
@@ -155,5 +158,5 @@ The script rejects superuser/bypass roles and remote/production configurations.
    business memory as an outage rollback. Use verified restore only through the
    documented recovery procedure if compatibility cannot be maintained.
 
-Outstanding at record creation: final exact-SHA CI and strict Linux reruns, real provider canaries, and merchant/real-network usability. No production
+Outstanding at record creation: final replacement-SHA CI and image matrix, real provider canaries, and merchant/real-network usability. No production
 state, real participant conversation or deployment has been accessed or changed.

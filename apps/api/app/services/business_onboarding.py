@@ -564,6 +564,7 @@ def chat_reply(
     *,
     channel: str,
     conversation_id: str | None = None,
+    media_type: str | None = None,
 ) -> str | None:
     """Handle explicit setup, greetings and active onboarding without an LLM call.
 
@@ -574,6 +575,17 @@ def chat_reply(
         return None
     tenant = locked_tenant(db, tenant.id)
     state = state_for(db, tenant)
+    if media_type in {"image", "sticker", "video", "document", "location", "contacts"}:
+        # Media prompts and extracted evidence are not an answer to the pending
+        # setup question. Keep the draft and let the agent handle the attachment.
+        if state["status"] in {"in_progress", "review"}:
+            apply_command(
+                db,
+                tenant,
+                user_id,
+                OnboardingCommand(action="pause", expected_revision=state["revision"]),
+            )
+        return None
     normalized = message.strip().casefold().replace("’", "'")
     pending = state.get("pending_update")
     if normalized.startswith("save profile") or normalized == "keep profile":

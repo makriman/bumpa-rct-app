@@ -285,7 +285,13 @@ def handle_chat(
     event_source = external_message_id or inbound.id
     if fixed_response is None and (media_metadata or {}).get("type") != "voice_call":
         fixed_response = chat_reply(
-            db, tenant, user.id, message, channel=channel, conversation_id=conversation.id
+            db,
+            tenant,
+            user.id,
+            message,
+            channel=channel,
+            conversation_id=conversation.id,
+            media_type=str((media_metadata or {}).get("type", "text")),
         )
     context, freshness = build_business_context(db, tenant.id)
     if channel in {"web", "whatsapp"}:
