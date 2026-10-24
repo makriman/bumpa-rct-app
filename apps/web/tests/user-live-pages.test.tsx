@@ -107,7 +107,7 @@ describe("deployment-facing user pages", () => {
   });
 
   it("shows a retryable error instead of substituting chat history", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
       jsonResponse({ detail: "Conversation service is unavailable" }, 503),
     );
 
@@ -119,7 +119,8 @@ describe("deployment-facing user pages", () => {
     expect(
       screen.getByText("Conversation service is unavailable"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    for (const button of screen.getAllByRole("button", { name: "Try again" }))
+      expect(button).toBeEnabled();
     expect(
       screen.queryByText(/Best sellers this week/),
     ).not.toBeInTheDocument();

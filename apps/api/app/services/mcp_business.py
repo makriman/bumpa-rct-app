@@ -23,6 +23,7 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal, set_security_context
 from app.services.agent_actions import prepare_pending_action
+from app.services.business_onboarding import propose_update
 from app.services.business_tools import (
     business_overview,
     business_profile,
@@ -147,6 +148,30 @@ def get_business_profile() -> dict[str, Any]:
     """Get the current tenant's business identity, store timezone and currency."""
 
     return _run_tool("get_business_profile", business_profile)
+
+
+@business_mcp.tool()
+def propose_business_profile_update(
+    changes: dict[str, Any],
+    action_context_token: str,
+) -> dict[str, Any]:
+    """Propose lasting changes to merchant facts; never save without confirmation.
+
+    Keys: offering, customers, channels, monthly_orders, team_size, goal, challenge.
+    Use get_business_profile for current facts. Team size includes the owner; if
+    an added employee count does not establish the new total, ask one question.
+    Use exact onboarding option labels for choice fields. Return the exact
+    preview and copy the exact confirmation phrase returned by this tool.
+    """
+    return _run_tool(
+        "propose_business_profile_update",
+        lambda db, tenant_id: propose_update(
+            db,
+            tenant_id,
+            changes=changes,
+            action_context_token=action_context_token,
+        ),
+    )
 
 
 @business_mcp.tool()

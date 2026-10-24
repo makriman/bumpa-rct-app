@@ -180,10 +180,11 @@ def test_material_replacement_retains_audit_history_but_never_falls_back_to_stor
         assert db.scalar(select(func.count()).select_from(BumpaOrderItem)) == 0
         assert latest_available_metrics(db, tenant.id) == {}
         assert latest_complete_orders_run(db, tenant.id) is None
-        assert build_business_context(db, tenant.id) == (
-            "No synced Bumpa metrics are available yet. Data freshness: unavailable.",
-            None,
-        )
+        context, freshness = build_business_context(db, tenant.id)
+        assert "No synced Bumpa metrics are available yet. Data freshness: unavailable." in context
+        assert "Business: Boundary History" in context
+        assert "Total sales:" not in context
+        assert freshness is None
         principal = Principal(
             user=User(name="Boundary owner"),
             platform_roles=frozenset(),

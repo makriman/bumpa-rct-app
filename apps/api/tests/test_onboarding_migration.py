@@ -65,7 +65,7 @@ def test_onboarding_migration_is_in_head_lineage_and_has_forced_tenant_rls(
 ) -> None:
     config = _config("sqlite://", monkeypatch)
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_current_head() == "0018_agent_capability_audit"
+    assert scripts.get_current_head() == "0019_business_onboarding"
     assert scripts.get_revision("0018_agent_capability_audit").down_revision == (
         "0017_agent_capabilities"
     )
