@@ -6,7 +6,7 @@ import hmac
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -49,6 +49,7 @@ def create_action_context_token(
     conversation_id: str,
     channel: str,
     initiating_message_id: str | None = None,
+    purpose: Literal["actions", "business_profile"] = "actions",
 ) -> str:
     payload = {
         "tenant_id": tenant_id,
@@ -60,7 +61,8 @@ def create_action_context_token(
         "expires_at": int(utcnow().timestamp()) + ACTION_CONTEXT_TTL_SECONDS,
     }
     encoded = _encode_json(payload)
-    return f"{encoded}.{_signature(settings, 'context', encoded)}"
+    domain = "context" if purpose == "actions" else "business_profile_context"
+    return f"{encoded}.{_signature(settings, domain, encoded)}"
 
 
 def decode_action_context_token(
@@ -68,10 +70,12 @@ def decode_action_context_token(
     token: str,
     *,
     expected_tenant_id: str,
+    purpose: Literal["actions", "business_profile"] = "actions",
 ) -> ActionContext:
     try:
         encoded, supplied_signature = token.split(".", 1)
-        expected_signature = _signature(settings, "context", encoded)
+        domain = "context" if purpose == "actions" else "business_profile_context"
+        expected_signature = _signature(settings, domain, encoded)
         if not hmac.compare_digest(supplied_signature, expected_signature):
             raise ValueError("signature")
         payload = json.loads(_decode(encoded))

@@ -1170,6 +1170,15 @@ def _fixture_pair(
             )
         )
         add(
+            models.MerchantBusinessProfile(
+                id=f"business-profile-{suffix}",
+                tenant_id=tenant_id,
+                state={"answers": {"offering": f"Synthetic business {side}"}},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
             models.PhoneIdentity(
                 id=f"phone-{suffix}",
                 tenant_id=tenant_id,

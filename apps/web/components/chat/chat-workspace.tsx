@@ -4,6 +4,7 @@ import { ChatCircleIcon, ListIcon, PlusIcon } from "@phosphor-icons/react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { ChatComposer } from "@/components/chat/chat-composer";
+import { useBusinessOnboarding } from "@/components/business-onboarding";
 import { ChatMessageList } from "@/components/chat/chat-message-list";
 import { ChatSidebar } from "@/components/chat/chat-sidebar";
 import { apiRequest } from "@/lib/api";
@@ -31,10 +32,23 @@ export function ChatWorkspace({
   initialConversationId?: string | null;
 }) {
   const router = useRouter();
-  const [state, dispatch] = useReducer(chatReducer, initialChatState);
+  const [state, dispatch] = useReducer(chatReducer, {
+    ...initialChatState,
+    conversationId: initialConversationId,
+    phase: initialConversationId ? "loading" : "empty",
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const onboarding = useBusinessOnboarding(
+    !initialConversationId && state.messages.length === 0,
+  );
+  const setupActive =
+    !!onboarding.profile?.can_edit &&
+    ["not_started", "in_progress", "review"].includes(
+      onboarding.profile.status,
+    ) &&
+    state.messages.length === 0;
   const endRef = useRef<HTMLDivElement>(null);
   const activeLoadRequestRef = useRef<string | null>(null);
   const activeSendRequestRef = useRef<string | null>(null);
@@ -233,6 +247,8 @@ export function ChatWorkspace({
 
   return (
     <main
+      id="main-content"
+      tabIndex={-1}
       className={`bestie-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}
     >
       <ChatSidebar
@@ -281,14 +297,19 @@ export function ChatWorkspace({
           }}
           onRetrySend={retrySend}
           onSuggestion={sendMessage}
+          onboarding={onboarding}
           state={state}
         />
-        <ChatComposer
-          disabled={["sending", "retrying"].includes(state.phase)}
-          draft={state.draft}
-          onDraftChange={(draft) => dispatch({ type: "DRAFT_CHANGED", draft })}
-          onSend={() => sendMessage()}
-        />
+        {!setupActive && (
+          <ChatComposer
+            disabled={["sending", "retrying"].includes(state.phase)}
+            draft={state.draft}
+            onDraftChange={(draft) =>
+              dispatch({ type: "DRAFT_CHANGED", draft })
+            }
+            onSend={() => sendMessage()}
+          />
+        )}
       </section>
     </main>
   );

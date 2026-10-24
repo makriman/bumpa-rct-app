@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AppShell } from "@/components/app-shell";
+import { BusinessOnboarding } from "@/components/business-onboarding";
 import {
   ProfileDialogs,
   ProfileOverview,
@@ -178,12 +179,15 @@ export default function ProfilePage() {
       )}
 
       {status === "ready" && profile && (
-        <ProfileOverview
-          busy={busy}
-          onConfirmSessions={() => setConfirmSessions(true)}
-          profile={profile}
-          source={source}
-        />
+        <>
+          <BusinessOnboarding profilePage />
+          <ProfileOverview
+            busy={busy}
+            onConfirmSessions={() => setConfirmSessions(true)}
+            profile={profile}
+            source={source}
+          />
+        </>
       )}
       <ProfileDialogs
         busy={busy}

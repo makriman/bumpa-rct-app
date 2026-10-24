@@ -38,6 +38,8 @@ from app.schemas import (
 )
 from app.services.audit import audit
 from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
+from app.services.business_onboarding import OnboardingCommand, apply_command
+from app.services.business_onboarding import view as business_onboarding_view
 from app.services.home_assistant import (
     HomeAssistantConnectionError,
     encrypt_home_assistant_credentials,
@@ -55,6 +57,32 @@ from app.services.mcp_oauth import (
 )
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+@router.get("/business-profile")
+def get_business_profile(
+    principal: Principal = Depends(require_tenant),
+    db: Session = Depends(get_db),
+) -> dict:
+    assert principal.tenant is not None
+    return business_onboarding_view(
+        db,
+        principal.tenant,
+        user_id=principal.user.id,
+        editable=bool(principal.membership and principal.membership.role in {"owner", "admin"}),
+    )
+
+
+@router.post("/business-profile")
+def save_business_profile(
+    payload: OnboardingCommand,
+    principal: Principal = Depends(require_tenant_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    assert principal.tenant is not None
+    tenant = apply_command(db, principal.tenant, principal.user.id, payload)
+    db.commit()
+    return business_onboarding_view(db, tenant, editable=True, user_id=principal.user.id)
 
 
 @router.get("/profile")
