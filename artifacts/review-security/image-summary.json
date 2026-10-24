@@ -12,13 +12,13 @@
       "raw_sha256": "2d8c2c2f3d2fcd6e3224a2d1a2fc7e889a53d2ccd2ecbd27a24bcfe89f1baa2e"
     },
     "api": {
-      "created_at": "2026-10-24T04:04:51.988268635Z",
-      "image_id": "sha256:98b0fd2ecccff1ca46acc539ab4a9480f679586e74d6ba3e4e8a621bc0b7e105",
+      "created_at": "2026-10-24T04:23:34.68747371Z",
+      "image_id": "sha256:7f1c10e34f34439126342fc991a5abceffa3a9561cbff6cc21f87bf8fc98b022",
       "repo_digests": [
-        "bumpabestie-api@sha256:98b0fd2ecccff1ca46acc539ab4a9480f679586e74d6ba3e4e8a621bc0b7e105"
+        "bumpabestie-api@sha256:7f1c10e34f34439126342fc991a5abceffa3a9561cbff6cc21f87bf8fc98b022"
       ],
       "fixable_critical_high": 0,
-      "raw_sha256": "8935415b1bc93f4416e62bdfe32060b6f8c21254f5fefc3e62b89f7dd4303245"
+      "raw_sha256": "99a68427c906c7942984175953112a87e72454522901126b1bcdedccaa86664b"
     },
     "backup": {
       "created_at": "2026-10-24T04:04:56.960655512Z",

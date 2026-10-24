@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "cf-typegen": "wrangler types",
+    "cf-typegen": "wrangler types && node scripts/normalize-generated-types.mjs",
     "typecheck": "npm run cf-typegen && tsc --noEmit",
     "test": "vitest run",
     "dev": "wrangler dev",

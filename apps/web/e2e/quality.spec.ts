@@ -446,6 +446,7 @@ test("populated chat visual baseline does not regress", async ({ page }) => {
 });
 
 test("sending chat visual baseline does not regress", async ({ page }) => {
+  await page.clock.setFixedTime("2026-07-21T08:02:00Z");
   let releaseSend: () => void = () => undefined;
   const sendGate = new Promise<void>((resolve) => {
     releaseSend = resolve;
@@ -484,6 +485,7 @@ test("sending chat visual baseline does not regress", async ({ page }) => {
 test("recoverable chat error visual baseline does not regress", async ({
   page,
 }) => {
+  await page.clock.setFixedTime("2026-07-21T08:02:00Z");
   await grantTestSession(page);
   await mockChatVisualData(page, {
     onSend: async (route) => {

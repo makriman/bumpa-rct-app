@@ -27,9 +27,13 @@ def main() -> None:
         or url.host not in {"127.0.0.1", "localhost"}
         or settings.whatsapp_backend != "mock"
         or settings.agent_backend != "mock"
+        or settings.bumpa_backend != "mock"
+        or settings.auth_login_mode != "whatsapp_otp"
         or settings.seed_demo_data
     ):
-        raise RuntimeError("Use a disposable loopback Postgres test database and mock providers")
+        raise RuntimeError(
+            "Use a disposable loopback Postgres test database, mock providers and WhatsApp OTP mode"
+        )
     suffix = uuid4().hex
     phone = "+234800" + str(int(suffix[:8], 16) % 10_000_000).zfill(7)
     member_phone = "+234801" + phone[-7:]
