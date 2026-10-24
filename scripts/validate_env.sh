@@ -24,6 +24,7 @@ preserved_auth_valid=0
 if [[ -n "$preserved_auth_record" ]]; then
   validator_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if (
+    # shellcheck source=scripts/release_boundary.sh
     source "$validator_dir/release_boundary.sh"
     load_release_boundary "$preserved_auth_record" \
       && python3 "$validator_dir/validate_preserved_auth.py" \
