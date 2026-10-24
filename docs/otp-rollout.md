@@ -16,7 +16,8 @@ replacement provider or public registration.
 - Codes use cryptographically random six-digit values in production and are
   persisted only as OTP-secret-peppered hashes. Local fixed codes remain limited
   to local/test mode. Authentication secrets never enter browser bundles.
-- Issuance and verification serialize on the existing user row. Only the newest
+- Issuance and verification serialize using per-phone transaction advisory locks,
+  without adding UPDATE privileges on user records. Only the newest
   login-purpose challenge can be verified; resending consumes prior login codes.
   Other challenge purposes cannot affect login cooldown or code verification.
 - Expiry is exclusive, consumption is single-use, and failed attempts serialize

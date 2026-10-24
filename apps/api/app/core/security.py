@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import jwt
 from fastapi import HTTPException, status
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -205,11 +205,18 @@ def verify_temporary_web_pin(
     return user
 
 
+def _lock_login_challenge(db: Session, phone: str, settings: Settings) -> None:
+    # Serialize even the first challenge without requiring UPDATE on users.
+    # HMAC keeps raw/guessable phone values out of PostgreSQL lock metadata.
+    if db.get_bind().dialect.name == "postgresql":
+        digest = secret_hash(f"login-challenge-lock:{phone}", settings.otp_secret)
+        key = int.from_bytes(bytes.fromhex(digest)[:8], "big", signed=True)
+        db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
 def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, str]:
     normalized = normalize_phone(phone)
-    # Serialize issuance and verification for an existing login identity, even
-    # when no challenge exists yet. PostgreSQL row locks survive until commit.
-    db.scalar(select(User.id).where(User.primary_phone_e164 == normalized).with_for_update())
+    _lock_login_challenge(db, normalized, settings)
     now = utcnow()
     latest = db.scalar(
         select(OtpSession)
@@ -252,7 +259,7 @@ def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, 
 
 def verify_otp(db: Session, phone: str, code: str, settings: Settings) -> User:
     normalized = normalize_phone(phone)
-    db.scalar(select(User.id).where(User.primary_phone_e164 == normalized).with_for_update())
+    _lock_login_challenge(db, normalized, settings)
     otp = db.scalar(
         select(OtpSession)
         .where(OtpSession.phone_e164 == normalized, OtpSession.purpose == "login")
