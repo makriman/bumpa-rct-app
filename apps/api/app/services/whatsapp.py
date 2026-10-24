@@ -1455,6 +1455,8 @@ class _WhatsAppProgress:
             return
 
     def _send(self, body: str) -> None:
+        if self._done.is_set():
+            return
         assert self._meta_sender is not None
         try:
             client = MetaWhatsAppClient.for_inbound_reply(
@@ -1463,6 +1465,10 @@ class _WhatsAppProgress:
                 phone_number_id=self._meta_sender[1],
             )
             client.mark_read(self._inbound_message_id, typing=True)
+            # A slow provider read request may finish after the final answer.
+            # Avoid sending an obsolete progress bubble after that answer.
+            if self._done.is_set():
+                return
             with SessionLocal() as progress_db:
                 set_security_context(progress_db, tenant_id=self._tenant_id)
                 progress_event = progress_db.get(WebhookEvent, self._event_id)

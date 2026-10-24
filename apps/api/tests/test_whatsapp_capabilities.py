@@ -156,6 +156,43 @@ def test_progress_body_is_delivered_once_even_when_a_worker_restarts(
     assert sent == [generic, sales]
 
 
+def test_progress_stops_if_answer_finishes_during_typing_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _factory()
+    with factory() as db:
+        tenant, user = _seed_authorized_phone(db)
+        event = WebhookEvent(
+            provider="whatsapp",
+            external_event_id="progress-finished-during-read",
+            signature_valid=True,
+            payload={},
+        )
+        db.add(event)
+        db.commit()
+        event_id, tenant_id, user_id = event.id, tenant.id, user.id
+    progress = whatsapp._WhatsAppProgress(
+        settings=_meta_settings(),
+        event_id=event_id,
+        inbound_message_id="inbound-id",
+        phone="+2348000000044",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        meta_sender=("123456789", "987654321"),
+    )
+    monkeypatch.setattr(whatsapp, "SessionLocal", factory)
+    # A slow read/typing request can finish after the final answer is ready.
+    monkeypatch.setattr(
+        MetaWhatsAppClient, "mark_read", lambda *_args, **_kwargs: progress.finish()
+    )
+    sent: list[str] = []
+    monkeypatch.setattr(
+        whatsapp, "_deliver_once", lambda *_args, **kwargs: sent.append(kwargs["body"])
+    )
+    progress._send(whatsapp._progress_body("get_sales"))
+    assert sent == []
+
+
 def _seed_authorized_phone(db: Session) -> tuple[Tenant, User]:
     tenant = Tenant(
         slug="whatsapp-capabilities",
