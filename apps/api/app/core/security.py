@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import jwt
 from fastapi import HTTPException, status
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -206,10 +207,13 @@ def verify_temporary_web_pin(
 
 def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, str]:
     normalized = normalize_phone(phone)
+    # Serialize issuance and verification for an existing login identity, even
+    # when no challenge exists yet. PostgreSQL row locks survive until commit.
+    db.scalar(select(User.id).where(User.primary_phone_e164 == normalized).with_for_update())
     now = utcnow()
     latest = db.scalar(
         select(OtpSession)
-        .where(OtpSession.phone_e164 == normalized)
+        .where(OtpSession.phone_e164 == normalized, OtpSession.purpose == "login")
         .order_by(OtpSession.created_at.desc())
     )
     if latest:
@@ -221,7 +225,18 @@ def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, 
     code = (
         settings.effective_local_otp_code
         if settings.is_local
-        else f"{int.from_bytes(uuid4().bytes[:4]):010d}"[-6:]
+        else f"{secrets.randbelow(1_000_000):06d}"
+    )
+    # Resending replaces the login challenge. An older code must never become
+    # eligible again after the newest challenge is consumed or expires.
+    db.execute(
+        update(OtpSession)
+        .where(
+            OtpSession.phone_e164 == normalized,
+            OtpSession.purpose == "login",
+            OtpSession.consumed_at.is_(None),
+        )
+        .values(consumed_at=now)
     )
     otp = OtpSession(
         phone_e164=normalized,
@@ -237,13 +252,20 @@ def issue_otp(db: Session, phone: str, settings: Settings) -> tuple[OtpSession, 
 
 def verify_otp(db: Session, phone: str, code: str, settings: Settings) -> User:
     normalized = normalize_phone(phone)
+    db.scalar(select(User.id).where(User.primary_phone_e164 == normalized).with_for_update())
     otp = db.scalar(
         select(OtpSession)
-        .where(OtpSession.phone_e164 == normalized, OtpSession.consumed_at.is_(None))
+        .where(OtpSession.phone_e164 == normalized, OtpSession.purpose == "login")
         .order_by(OtpSession.created_at.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     generic = HTTPException(status_code=401, detail="Invalid or expired code")
-    if not otp or _aware_timestamp(otp.expires_at) < utcnow().timestamp():
+    if (
+        not otp
+        or otp.consumed_at is not None
+        or _aware_timestamp(otp.expires_at) <= utcnow().timestamp()
+    ):
         raise generic
     if otp.attempts >= settings.otp_max_attempts:
         raise HTTPException(status_code=423, detail="Code is locked")
@@ -254,7 +276,11 @@ def verify_otp(db: Session, phone: str, code: str, settings: Settings) -> User:
         if otp.attempts >= settings.otp_max_attempts:
             raise HTTPException(status_code=423, detail="Code is locked")
         raise generic
-    user = find_login_eligible_user(db, normalized)
+    user = (
+        find_login_eligible_user(db, normalized)
+        if settings.is_local
+        else find_mapped_login_user(db, normalized)
+    )
     if not user:
         otp.consumed_at = utcnow()
         db.commit()
@@ -309,7 +335,7 @@ def decode_access_token(db: Session, token: str, settings: Settings) -> User:
     if user:
         resolver = (
             find_mapped_login_user
-            if settings.auth_login_mode == "temporary_static_pin"
+            if settings.auth_login_mode == "temporary_static_pin" or not settings.is_local
             else find_login_eligible_user
         )
         eligible_user = resolver(db, user.primary_phone_e164)

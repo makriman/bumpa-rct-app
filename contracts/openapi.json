@@ -2136,6 +2136,12 @@
             "title": "Expires In Seconds",
             "type": "integer"
           },
+          "resend_after_seconds": {
+            "default": 30,
+            "minimum": 0.0,
+            "title": "Resend After Seconds",
+            "type": "integer"
+          },
           "status": {
             "default": "sent",
             "enum": [

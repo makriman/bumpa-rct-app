@@ -84,6 +84,7 @@ class OtpRequest(BaseModel):
 class OtpRequested(BaseModel):
     status: Literal["sent", "accepted"] = "sent"
     expires_in_seconds: int
+    resend_after_seconds: int = Field(default=30, ge=0)
     delivery: Literal["whatsapp", "web_pin"] = "whatsapp"
     dev_code: str | None = None
 

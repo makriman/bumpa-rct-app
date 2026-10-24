@@ -177,6 +177,7 @@ def test_web_pin_request_is_generic_provider_free_and_typed(
         expected = {
             "status": "accepted",
             "expires_in_seconds": 600,
+            "resend_after_seconds": 0,
             "delivery": "web_pin",
             "dev_code": None,
         }

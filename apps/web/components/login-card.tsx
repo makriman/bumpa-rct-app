@@ -20,6 +20,7 @@ export type LoginState = {
   requestedPhone: string;
   delivery: LoginDelivery | null;
   expiresInSeconds: number;
+  resendSeconds: number;
   pin: string;
   error: string;
   pending: PendingAction;
@@ -58,6 +59,7 @@ export function LoginCard({
     delivery,
     error,
     expiresInSeconds,
+    resendSeconds,
     nationalNumber,
     pending,
     pin,
@@ -178,7 +180,7 @@ export function LoginCard({
           <p>
             {delivery === "web_pin"
               ? "WhatsApp sign-in is paused. Use the six-digit temporary PIN shared with the project team; no WhatsApp message was sent."
-              : `We sent a six-digit code to your approved number. It expires in ${Math.max(1, Math.ceil(expiresInSeconds / 60))} minutes.`}
+              : `If this number is approved, check WhatsApp for a six-digit code. It expires in ${Math.max(1, Math.ceil(expiresInSeconds / 60))} minutes. Only the latest code will work.`}
           </p>
           <div className="auth-phone-chip">
             <CheckCircleIcon aria-hidden="true" />
@@ -241,6 +243,20 @@ export function LoginCard({
                   : "Verify and sign in"}
             </button>
           </form>
+          {delivery === "whatsapp" && (
+            <button
+              className="button button-ghost button-small"
+              type="button"
+              disabled={pending !== null || resendSeconds > 0}
+              onClick={() => void onRequestAccess()}
+            >
+              {pending === "request"
+                ? "Requesting code…"
+                : resendSeconds > 0
+                  ? `Request another code in ${resendSeconds}s`
+                  : "Request another code"}
+            </button>
+          )}
           <p className="auth-privacy-note">
             Having trouble? Check the selected country and the mobile number
             before trying again.
@@ -250,6 +266,7 @@ export function LoginCard({
         <SessionAccessState
           error={error}
           pending={pending}
+          delivery={delivery}
           retry={onRetrySession}
           unauthorized={step === "unauthorized"}
         />
@@ -274,11 +291,13 @@ function SessionAccessState({
   pending,
   retry,
   unauthorized,
+  delivery,
 }: {
   error: string;
   pending: PendingAction;
   retry: () => Promise<void>;
   unauthorized: boolean;
+  delivery: LoginDelivery | null;
 }) {
   return (
     <>
@@ -293,17 +312,16 @@ function SessionAccessState({
       <p>
         {unauthorized
           ? "Your sign-in succeeded, but this account does not have an active Bumpa Bestie workspace membership."
-          : "Your PIN has already been accepted. We are resolving your workspace access now; you will not need to enter it again."}
+          : delivery === "whatsapp"
+            ? "Your code has already been accepted. We are resolving your workspace access now; you will not need another code."
+            : "Your PIN has already been accepted. We are resolving your workspace access now; you will not need to enter it again."}
       </p>
       {unauthorized && (
         <div className="auth-notice" role="status">
           <CheckCircleIcon aria-hidden="true" />
           <div>
             <strong>Your session is active</strong>
-            <span>
-              We kept your completed sign-in and will not ask for the PIN again
-              while checking access.
-            </span>
+            <span>We kept your completed sign-in while checking access.</span>
           </div>
         </div>
       )}

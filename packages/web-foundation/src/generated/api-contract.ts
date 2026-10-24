@@ -2372,6 +2372,11 @@ export interface components {
       /** Expires In Seconds */
       expires_in_seconds: number;
       /**
+       * Resend After Seconds
+       * @default 30
+       */
+      resend_after_seconds: number;
+      /**
        * Status
        * @default sent
        * @enum {string}

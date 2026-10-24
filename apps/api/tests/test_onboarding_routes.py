@@ -9,7 +9,7 @@ from app.db.session import SessionLocal
 from app.jobs import handlers as _handlers  # noqa: F401 - register worker handlers
 from app.jobs.runtime import claim_job, complete_job, registry
 from app.main import app
-from tests.conftest import auth_headers
+from tests.conftest import approved_login_mapping, auth_headers
 
 
 def _tenant_payload(slug: str) -> dict[str, object]:
@@ -59,21 +59,22 @@ def test_production_tenant_creation_requires_resumable_onboarding(
     operator = auth_headers(client, "+2348099990001")
     production_settings = get_settings().model_copy(update={"app_env": "production"})
     app.dependency_overrides[get_settings] = lambda: production_settings
-    try:
-        response = client.post(
-            "/v1/admin/tenants",
-            headers=operator,
-            json=_tenant_payload("production-bypass-denied"),
-        )
-    finally:
-        app.dependency_overrides.pop(get_settings, None)
+    with approved_login_mapping("+2348099990001"):
+        try:
+            response = client.post(
+                "/v1/admin/tenants",
+                headers=operator,
+                json=_tenant_payload("production-bypass-denied"),
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == {
-        "code": "tenant_onboarding_required",
-        "message": "Production tenants must be created through the resumable onboarding workflow",
-        "retryable": False,
-    }
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "tenant_onboarding_required",
+            "message": "Production tenants must be created through the resumable onboarding workflow",
+            "retryable": False,
+        }
 
 
 def test_direct_tenant_create_and_update_reject_invalid_iana_timezones(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -45,3 +46,36 @@ def auth_headers(client: TestClient, phone: str, tenant_id: str | None = None) -
     if tenant_id:
         headers["X-Tenant-ID"] = tenant_id
     return headers
+
+
+@contextmanager
+def approved_login_mapping(phone: str) -> Generator[None, None, None]:
+    """Give a synthetic privileged test user the existing production pilot mapping."""
+    from sqlalchemy import select
+
+    from app.db.models import PhoneIdentity, Tenant, TenantMembership, User
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.primary_phone_e164 == phone))
+        tenant = db.scalar(select(Tenant).where(Tenant.status == "active").limit(1))
+        assert user is not None and tenant is not None
+        membership = TenantMembership(
+            tenant_id=tenant.id, user_id=user.id, role="member", status="active"
+        )
+        identity = PhoneIdentity(
+            tenant_id=tenant.id, user_id=user.id, phone_e164=phone, status="approved"
+        )
+        db.add_all([membership, identity])
+        db.commit()
+        membership_id, identity_id = membership.id, identity.id
+    try:
+        yield
+    finally:
+        with SessionLocal() as db:
+            identity = db.get(PhoneIdentity, identity_id)
+            membership = db.get(TenantMembership, membership_id)
+            assert identity is not None and membership is not None
+            db.delete(identity)
+            db.delete(membership)
+            db.commit()

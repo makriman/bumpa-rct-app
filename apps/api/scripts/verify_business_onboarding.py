@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
 from app.core.config import get_settings
-from app.db.models import HermesProfile, PhoneIdentity, Tenant, TenantMembership, User
+from app.db.models import HermesProfile, OtpSession, PhoneIdentity, Tenant, TenantMembership, User
 from app.db.session import SessionLocal, set_security_context
 from app.main import app
 
@@ -199,12 +199,73 @@ def main() -> None:
         member_view = client.get(endpoint, headers=member_headers).json()
         assert member_view["answers"] == final["answers"] and not member_view["can_edit"]
 
+        sends: list[str] = []
+        with patch(
+            "app.routes.auth.LocalMessagingProvider.send_otp",
+            side_effect=lambda destination, _code: sends.append(destination),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                requests = list(
+                    pool.map(
+                        lambda _: client.post("/v1/auth/request-otp", json={"phone_e164": phone}),
+                        range(2),
+                    )
+                )
+        assert [r.status_code for r in requests] == [202, 202]
+        assert sends == [phone], sends
+        code = next(r.json()["dev_code"] for r in requests if r.json()["dev_code"] is not None)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            statuses = list(
+                pool.map(
+                    lambda _: (
+                        client.post(
+                            "/v1/auth/verify-otp", json={"phone_e164": phone, "code": code}
+                        ).status_code
+                    ),
+                    range(2),
+                )
+            )
+        assert sorted(statuses) == [200, 401], statuses
+
+        # The next challenge's failed attempts must be serialized too.
+        requested = client.post("/v1/auth/request-otp", json={"phone_e164": phone})
+        wrong_code = "999999" if requested.json()["dev_code"] != "999999" else "000000"
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            statuses = list(
+                pool.map(
+                    lambda _: (
+                        client.post(
+                            "/v1/auth/verify-otp", json={"phone_e164": phone, "code": wrong_code}
+                        ).status_code
+                    ),
+                    range(5),
+                )
+            )
+        assert sorted(statuses) == [401, 401, 401, 401, 423], statuses
+        assert (
+            client.post(
+                "/v1/auth/verify-otp",
+                json={"phone_e164": phone, "code": requested.json()["dev_code"]},
+            ).status_code
+            == 423
+        )
+        with SessionLocal() as db:
+            latest = db.scalar(
+                select(OtpSession)
+                .where(OtpSession.phone_e164 == phone, OtpSession.purpose == "login")
+                .order_by(OtpSession.created_at.desc())
+            )
+            assert latest is not None and latest.attempts == 5
+
     with SessionLocal() as db:
         set_security_context(db, tenant_id=tenant_id)
         assert db.get(Tenant, tenant_id).research_consent_status == consent
     print(
         "Postgres HTTP onboarding passed: verified +234 mock login, seven answers, retry atomicity, "
         "duplicate replay, concurrent revisions, member/cross-tenant denials and unchanged consent."
+    )
+    print(
+        "Postgres OTP concurrency passed: one successful consumption, four failed attempts then lockout, no replay."
     )
 
 

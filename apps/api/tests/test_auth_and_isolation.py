@@ -97,6 +97,7 @@ def test_otp_request_is_generic_and_side_effect_free_for_unapproved_phones(
     assert requested.json() == {
         "status": "sent",
         "expires_in_seconds": 600,
+        "resend_after_seconds": 30,
         "delivery": "whatsapp",
         "dev_code": None,
     }

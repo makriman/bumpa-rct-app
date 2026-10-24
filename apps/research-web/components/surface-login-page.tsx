@@ -13,6 +13,7 @@ import { assembleE164, countryByIso, type PhoneCountry } from "@/lib/phone";
 type AccessRequestResponse = {
   delivery: "web_pin" | "whatsapp";
   expires_in_seconds: number;
+  resend_after_seconds?: number;
 };
 
 type SessionResponse = { platform_roles: string[] };
@@ -24,6 +25,7 @@ const initialState: SurfaceLoginState = {
   requestedPhone: "",
   delivery: null,
   expiresInSeconds: 0,
+  resendSeconds: 0,
   pin: "",
   error: "",
   pending: null,
@@ -60,8 +62,19 @@ export function SurfaceLoginPage({
     if (state.step === "pin") pinRef.current?.focus();
   }, [state.step]);
 
-  const requestAccess = async (event: FormEvent) => {
-    event.preventDefault();
+  useEffect(() => {
+    if (state.resendSeconds <= 0 || state.step !== "pin") return;
+    const timer = window.setTimeout(() => {
+      dispatch({
+        type: "patch",
+        value: { resendSeconds: state.resendSeconds - 1 },
+      });
+    }, 1_000);
+    return () => window.clearTimeout(timer);
+  }, [state.resendSeconds, state.step]);
+
+  const requestAccess = async (event?: FormEvent) => {
+    event?.preventDefault();
     const phone = assembleE164(country, state.nationalNumber);
     if (!phone.ok) {
       dispatch({ type: "patch", value: { error: phone.error } });
@@ -82,6 +95,8 @@ export function SurfaceLoginPage({
           requestedPhone: phone.e164,
           delivery: result.delivery,
           expiresInSeconds: result.expires_in_seconds,
+          resendSeconds: result.resend_after_seconds ?? 30,
+          pin: "",
           step: "pin",
         },
       });
