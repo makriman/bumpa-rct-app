@@ -530,6 +530,52 @@ test("chat supports retry, durable URLs, history paging, and the mobile drawer",
   ).toBeVisible();
 });
 
+test("chat waits for profile readiness before accepting a draft", async ({
+  page,
+}) => {
+  await grantTestSession(page);
+  let releaseProfile: () => void = () => undefined;
+  const profileGate = new Promise<void>((resolve) => {
+    releaseProfile = resolve;
+  });
+  let markObserved: () => void = () => undefined;
+  const observed = new Promise<void>((resolve) => {
+    markObserved = resolve;
+  });
+  await page.route("**/api/backend/**", async (route) => {
+    const path = apiPath(route);
+    if (await fulfillSession(route)) return;
+    if (path === "/api/backend/settings/business-profile") {
+      markObserved();
+      await profileGate;
+      await fulfillBusinessProfile(route);
+      return;
+    }
+    if (path.startsWith("/api/backend/chat/conversations")) {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    await route.abort("failed");
+  });
+  await page.goto("/chat");
+  await observed;
+  const composer = page.getByRole("textbox", { name: "Message Bumpa Bestie" });
+  try {
+    await expect(
+      page.getByText("Getting your business profile ready…"),
+    ).toBeVisible();
+    await expect(composer).toHaveCount(0);
+  } finally {
+    releaseProfile();
+  }
+  await expect(
+    page.getByRole("heading", { name: "What shall we work on today?" }),
+  ).toBeVisible();
+  await composer.fill("Help me price my new stock");
+  await page.waitForLoadState("networkidle");
+  await expect(composer).toHaveValue("Help me price my new stock");
+});
+
 test("chat recovers after the browser returns online", async ({
   page,
 }, testInfo) => {

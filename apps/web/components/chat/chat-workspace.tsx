@@ -40,9 +40,9 @@ export function ChatWorkspace({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const onboarding = useBusinessOnboarding(
-    state.phase === "empty" && state.messages.length === 0,
-  );
+  const emptyChat = state.phase === "empty" && state.messages.length === 0;
+  const onboarding = useBusinessOnboarding(emptyChat);
+  const setupPending = emptyChat && onboarding.loading;
   const setupActive =
     !!onboarding.profile?.can_edit &&
     ["not_started", "in_progress", "review"].includes(
@@ -300,7 +300,7 @@ export function ChatWorkspace({
           onboarding={onboarding}
           state={state}
         />
-        {!setupActive && (
+        {!setupActive && !setupPending && (
           <ChatComposer
             disabled={["sending", "retrying"].includes(state.phase)}
             draft={state.draft}

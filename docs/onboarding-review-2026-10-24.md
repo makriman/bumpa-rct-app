@@ -64,6 +64,9 @@ current reviewed profile. Provider secrets remain server-side.
 - Preserve fresh text and optimistic first sends when the empty-chat route mounts.
   Exact-head CI exposed a late reset after the composer became interactive; four
   regression cases also preserve explicit New chat clearing and existing-route exits.
+  A second CI trace showed fill starting before profile loading finished. The
+  composer now appears only after that initial decision; a withheld-response
+  browser case and 30 strict repeated readiness/send/offline checks cover it.
 - Give existing authenticated E2E fixtures a valid reviewed profile endpoint;
   otherwise screenshot tests accidentally exercised a missing-route error panel.
 - Repair release-blocking dependency locks, Caddy certificates and pinned runtime
