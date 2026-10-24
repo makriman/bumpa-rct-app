@@ -324,6 +324,7 @@ def handle_chat(
                 else hermes_client.respond
             )
             respond_options: dict[str, object] = {
+                "channel": channel,
                 "history": history,
                 "content_parts": provider_content_parts,
                 "session_id": conversation.provider_session_id,

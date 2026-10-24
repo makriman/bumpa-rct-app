@@ -72,6 +72,34 @@ needs, while being clear that you are an AI and never overstating your authority
 - Ask at most one follow-up question when essential.
 """
 
+WHATSAPP_RESPONSE_POLICY = """Reply style for this WhatsApp conversation:
+- Lead with the answer or next useful action. Default to 40–80 words, and stay under 120
+  words unless the user explicitly requests a detailed explanation, full draft or long list.
+- Use short paragraphs of one or two sentences with blank lines between them. For several
+  points, use at most three short '- ' bullets or a short numbered list.
+- Use WhatsApp-native *bold* sparingly for key labels or figures, never Markdown **bold**,
+  headings with #, tables, or Markdown links. Write source URLs directly so they are clickable.
+  Use zero to two relevant emojis when natural; don't decorate every line.
+- Answer simple yes/no questions directly with at most two or three representative examples.
+  Don't dump product variants, sizes, colours, a full catalogue or the entire sales history.
+- If a broad request needs a key detail to produce a useful short answer, ask ONE short,
+  focused question and wait. Do not bundle several questions into one sentence or ask again
+  for information already established. Otherwise give a brief useful answer and optionally
+  offer one specific way to go deeper. Don't turn every reply into a follow-up question.
+- Keep necessary date bounds, currency, material data limitations, uncertainty, citations and
+  action confirmations even if they take extra space. Explain data limitations in plain
+  language; avoid internal terms such as 'canonical coverage' or 'degraded sync quality'.
+- Progress updates and typing indicators are handled by the app. Do not send filler such as
+  'I'm working on it' as your answer, repeat progress messages, or promise a later reply.
+
+Examples of the intended brevity (use only facts actually established in the conversation):
+User: Can you help me draft an email for my next discount?
+Assistant: Happy to help 😊 What discount are you offering?
+User: Do we deal in packaging materials?
+Assistant: Yes 📦 Packaging materials are your main products, including mailer bags,
+ziplock bags and paper bags.
+""".strip()
+
 DISABLED_SME_TOOLSETS = (
     "browser",
     "code_execution",
@@ -371,35 +399,22 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         session_key: str | None = None,
+        channel: str | None = None,
     ) -> HermesResult:
         self._validate_endpoint_identity(endpoint)
         base_url = self._validated_base_url(endpoint.api_url)
         self._breaker.before_request(base_url, self._clock())
         started = self._clock()
-        user_content: str | list[dict[str, Any]] = message
-        if content_parts:
-            user_content = content_parts
-        messages: list[dict[str, object]] = [
-            {"role": "system", "content": SME_SYSTEM_POLICY},
-            {
-                "role": "system",
-                "content": "Tenant business context (authoritative, read-only):\n"
-                + business_context[: self._settings.hermes_max_context_chars],
-            },
-        ]
-        if not session_id:
-            messages.extend(
-                {"role": item["role"], "content": item["content"]}
-                for item in (history or [])[-self._settings.hermes_history_messages :]
-            )
-        messages.append({"role": "user", "content": user_content})
-        payload: dict[str, object] = {
-            "model": endpoint.profile_name,
-            "messages": messages,
-            "stream": False,
-        }
-        if self._settings.hermes_temperature is not None:
-            payload["temperature"] = self._settings.hermes_temperature
+        payload = self._completion_payload(
+            endpoint,
+            message=message,
+            business_context=business_context,
+            history=history,
+            content_parts=content_parts,
+            session_id=session_id,
+            stream=False,
+            channel=channel,
+        )
         continuation_headers: dict[str, str] = {}
         if session_id:
             continuation_headers["X-Hermes-Session-Id"] = session_id
@@ -433,6 +448,7 @@ class HermesClient:
                     content_parts=content_parts,
                     draft=answer,
                     required=required_citations,
+                    channel=channel,
                 )
                 answer = repaired
                 input_tokens += repair_usage.prompt_tokens
@@ -472,6 +488,7 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None,
         draft: str,
         required: int,
+        channel: str | None = None,
     ) -> tuple[str, _Usage, httpx.Response]:
         payload = self._completion_payload(
             endpoint,
@@ -481,6 +498,7 @@ class HermesClient:
             content_parts=content_parts,
             session_id=None,
             stream=False,
+            channel=channel,
         )
         messages = payload.get("messages")
         if not isinstance(messages, list):
@@ -520,6 +538,7 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         session_key: str | None = None,
+        channel: str | None = None,
     ) -> HermesResult:
         """Consume Hermes' bounded OpenAI-compatible SSE stream.
 
@@ -540,6 +559,7 @@ class HermesClient:
             content_parts=content_parts,
             session_id=session_id,
             stream=True,
+            channel=channel,
         )
         continuation_headers: dict[str, str] = {}
         if session_id:
@@ -647,6 +667,7 @@ class HermesClient:
                         content_parts=content_parts,
                         draft=answer,
                         required=required_citations,
+                        channel=channel,
                     )
                     answer = repaired
                     input_tokens += repair_usage.prompt_tokens
@@ -766,16 +787,21 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None,
         session_id: str | None,
         stream: bool,
+        channel: str | None = None,
     ) -> dict[str, object]:
         user_content: str | list[dict[str, Any]] = content_parts or message
         messages: list[dict[str, object]] = [
             {"role": "system", "content": SME_SYSTEM_POLICY},
+        ]
+        if channel == "whatsapp":
+            messages.append({"role": "system", "content": WHATSAPP_RESPONSE_POLICY})
+        messages.append(
             {
                 "role": "system",
                 "content": "Tenant business context (authoritative, read-only):\n"
                 + business_context[: self._settings.hermes_max_context_chars],
             },
-        ]
+        )
         if not session_id:
             messages.extend(
                 {"role": item["role"], "content": item["content"]}

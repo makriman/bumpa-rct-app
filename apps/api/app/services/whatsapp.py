@@ -1354,7 +1354,7 @@ def _low_confidence_clarification(processed: Any) -> str | None:
 
 
 class _WhatsAppProgress:
-    """Emit at most two real-tool-derived progress bubbles after the threshold."""
+    """Emit at most two distinct tool updates and keep typing until completion."""
 
     def __init__(
         self,
@@ -1377,8 +1377,7 @@ class _WhatsAppProgress:
         self._done = Event()
         self._changed = Event()
         self._lock = Lock()
-        self._latest: tuple[int, str] | None = None
-        self._version = 0
+        self._latest: str | None = None
         self._thread: Thread | None = None
         self._started_at = monotonic()
 
@@ -1401,8 +1400,7 @@ class _WhatsAppProgress:
             return
         body = _progress_body(str(data.get("tool") or "approved_tool"))
         with self._lock:
-            self._version += 1
-            self._latest = (self._version, body)
+            self._latest = body
         self._changed.set()
 
     def finish(self) -> None:
@@ -1423,25 +1421,27 @@ class _WhatsAppProgress:
             max(5.0, self._settings.whatsapp_progress_after_seconds),
         )
         last_typing_at = 0.0
-        last_version = 0
-        for index in range(1, 3):
-            while not self._done.is_set():
-                current = monotonic()
-                if current - last_typing_at >= typing_interval:
-                    self._refresh_typing()
-                    last_typing_at = current
-                with self._lock:
-                    latest = self._latest
-                if latest is not None and latest[0] > last_version:
-                    last_version = latest[0]
-                    self._send(index, latest[1])
-                    break
+        sent_bodies: set[str] = set()
+        next_message_at = 0.0
+        while not self._done.is_set():
+            current = monotonic()
+            if current - last_typing_at >= typing_interval:
+                self._refresh_typing()
+                last_typing_at = current
+            with self._lock:
+                latest = self._latest
                 self._changed.clear()
-                self._changed.wait(timeout=0.5)
-            if self._done.is_set():
-                return
-            if self._done.wait(self._settings.whatsapp_progress_after_seconds):
-                return
+            if (
+                latest is not None
+                and latest not in sent_bodies
+                and len(sent_bodies) < 2
+                and current >= next_message_at
+                and not self._done.is_set()
+            ):
+                sent_bodies.add(latest)
+                self._send(latest)
+                next_message_at = monotonic() + self._settings.whatsapp_progress_after_seconds
+            self._changed.wait(timeout=0.5)
 
     def _refresh_typing(self) -> None:
         assert self._meta_sender is not None
@@ -1454,7 +1454,7 @@ class _WhatsAppProgress:
         except (MetaProviderError, ValueError):
             return
 
-    def _send(self, index: int, body: str) -> None:
+    def _send(self, body: str) -> None:
         assert self._meta_sender is not None
         try:
             client = MetaWhatsAppClient.for_inbound_reply(
@@ -1471,7 +1471,9 @@ class _WhatsAppProgress:
                 _deliver_once(
                     progress_db,
                     event=progress_event,
-                    purpose=f"tool-progress:{index}",
+                    # Stable across tool start/completion events and worker retries,
+                    # even when those events arrive in a different order.
+                    purpose=f"tool-progress:{hashlib.sha256(body.encode()).hexdigest()}",
                     phone=self._phone,
                     body=body,
                     settings=self._settings,

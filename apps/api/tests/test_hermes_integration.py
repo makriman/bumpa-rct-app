@@ -21,6 +21,7 @@ from app.db.session import SessionLocal
 from app.main import app
 from app.providers import hermes as hermes_module
 from app.providers.hermes import (
+    WHATSAPP_RESPONSE_POLICY,
     HermesAuthenticationError,
     HermesCircuitBreaker,
     HermesCircuitOpen,
@@ -834,6 +835,7 @@ def test_stream_buffers_external_draft_until_citation_repair_passes(tmp_path: Pa
         HermesEndpoint("tenant_profile", "http://hermes:8700/v1", "private-key"),
         message="Should I expand to Ghana? Cite sources.",
         business_context="bounded",
+        channel="whatsapp",
         on_event=lambda name, data: events.append((name, data)),
     )
 
@@ -843,6 +845,11 @@ def test_stream_buffers_external_draft_until_citation_repair_passes(tmp_path: Pa
         if name == "message.delta" and isinstance(data.get("delta"), str)
     )
     assert len(requests) == 2
+    assert all(
+        {"role": "system", "content": WHATSAPP_RESPONSE_POLICY}
+        in json.loads(request.content)["messages"]
+        for request in requests
+    )
     assert "Unsafe draft" not in streamed
     assert streamed == result.content
     assert "https://gipc.gov.gh/" in result.content
