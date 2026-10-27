@@ -1,0 +1,33 @@
+{
+  "subscriptions": [
+    {
+      "id": null,
+      "cadence": "daily",
+      "status": "off",
+      "revision": 0,
+      "phone_identity_id": null,
+      "recipient_preview": null,
+      "timezone": "Africa/Lagos",
+      "local_hour": 8,
+      "weekday": 0,
+      "effective": false,
+      "delivery_available": false
+    },
+    {
+      "id": null,
+      "cadence": "weekly",
+      "status": "off",
+      "revision": 0,
+      "phone_identity_id": null,
+      "recipient_preview": null,
+      "timezone": "Africa/Lagos",
+      "local_hour": 8,
+      "weekday": 0,
+      "effective": false,
+      "delivery_available": false
+    }
+  ],
+  "recipients": [],
+  "store_timezone": "Africa/Lagos",
+  "notice": "Optional business messages. Research participation is separate. Pause here or reply STOP on the selected number. START alone does not create a subscription."
+}

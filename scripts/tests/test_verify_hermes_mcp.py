@@ -31,6 +31,71 @@ def private_url(
 
 
 class VerifyHermesMcpTests(unittest.TestCase):
+    def test_legacy_and_v2_transports_authenticate_and_accept_their_stream_shapes(
+        self,
+    ) -> None:
+        class Session:
+            def __init__(self, read: object, write: object) -> None:
+                assert (read, write) == ("read", "write")
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def list_tools(self):
+                return SimpleNamespace(
+                    tools=[SimpleNamespace(name=name) for name in MODULE.REQUIRED_TOOLS]
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            profile = Path(temporary)
+            (profile / ".env").write_text("API_SERVER_KEY=" + "p" * 48 + "\n")
+            (profile / ".env").chmod(0o600)
+            for legacy in (True, False):
+
+                @asynccontextmanager
+                async def transport(url, **kwargs):
+                    assert url == private_url()
+                    if legacy:
+                        assert kwargs["headers"] == {
+                            "Authorization": "Bearer " + "p" * 48
+                        }
+                    else:
+                        assert kwargs["http_client"] == "authenticated-client"
+                    yield ("read", "write", None) if legacy else ("read", "write")
+
+                @asynccontextmanager
+                async def client(**kwargs):
+                    assert kwargs["headers"] == {"Authorization": "Bearer " + "p" * 48}
+                    yield "authenticated-client"
+
+                http = SimpleNamespace(
+                    **{
+                        "streamablehttp_client"
+                        if legacy
+                        else "streamable_http_client": transport
+                    }
+                )
+                with (
+                    self.subTest(legacy=legacy),
+                    patch.dict(
+                        "sys.modules",
+                        {
+                            "mcp": SimpleNamespace(ClientSession=Session),
+                            "mcp.client": SimpleNamespace(streamable_http=http),
+                            "httpx2": SimpleNamespace(AsyncClient=client),
+                        },
+                    ),
+                ):
+                    self.assertEqual(
+                        asyncio.run(MODULE.verify_profile(profile, private_url())), 19
+                    )
+
     def test_profile_verification_supports_both_mcp_transport_generations(self) -> None:
         for modern in (False, True):
             with self.subTest(modern=modern):

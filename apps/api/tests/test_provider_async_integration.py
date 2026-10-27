@@ -121,14 +121,21 @@ def test_nonlocal_whatsapp_ack_is_transactionally_queued_and_handler_processes(
 
     with SessionLocal() as session:
         event = session.scalar(
-            select(WebhookEvent).where(WebhookEvent.external_event_id == "wamid.async-contract-1")
+            select(WebhookEvent).where(
+                WebhookEvent.external_event_id
+                == whatsapp_webhook_ingress.scoped_event_id(json.loads(body), lane=settings.app_env)
+            )
         )
         assert event is not None
         jobs = list(
             session.scalars(
                 select(AsyncJob).where(
                     AsyncJob.kind == "whatsapp.process_webhook",
-                    AsyncJob.idempotency_key == "meta:wamid.async-contract-1",
+                    AsyncJob.idempotency_key
+                    == "meta:"
+                    + whatsapp_webhook_ingress.scoped_event_id(
+                        json.loads(body), lane=settings.app_env
+                    ),
                 )
             ).all()
         )
@@ -189,17 +196,21 @@ def test_nonlocal_whatsapp_batch_rolls_back_before_ack_when_enqueue_fails(
     finally:
         app.dependency_overrides.pop(get_settings, None)
 
+    external_ids = {
+        whatsapp_webhook_ingress.scoped_event_id(item, lane=settings.app_env)
+        for item, _ in whatsapp_webhook_ingress.split_inbox_events(payload)
+    }
     with SessionLocal() as session:
         events = list(
             session.scalars(
-                select(WebhookEvent).where(WebhookEvent.external_event_id.in_(message_ids))
+                select(WebhookEvent).where(WebhookEvent.external_event_id.in_(external_ids))
             ).all()
         )
         jobs = list(
             session.scalars(
                 select(AsyncJob).where(
                     AsyncJob.idempotency_key.in_(
-                        [f"meta:{message_id}" for message_id in message_ids]
+                        [f"meta:{message_id}" for message_id in external_ids]
                     )
                 )
             ).all()
@@ -217,7 +228,9 @@ def test_slow_whatsapp_persistence_does_not_block_liveness(monkeypatch) -> None:
     persistence_started = threading.Event()
     release_persistence = threading.Event()
 
-    def slow_claim(_payload: dict[str, object], _raw: bytes) -> tuple[ClaimedWebhookEvent, ...]:
+    def slow_claim(
+        _payload: dict[str, object], _raw: bytes, _settings
+    ) -> tuple[ClaimedWebhookEvent, ...]:
         persistence_started.set()
         if not release_persistence.wait(timeout=5):
             raise TimeoutError("test did not release synthetic persistence")
@@ -270,7 +283,7 @@ def test_oversized_whatsapp_payload_is_rejected_before_persistence(
     persistence_called = False
 
     def unexpected_persistence(
-        _payload: dict[str, object], _raw: bytes
+        _payload: dict[str, object], _raw: bytes, _settings
     ) -> tuple[ClaimedWebhookEvent, ...]:
         nonlocal persistence_called
         persistence_called = True
@@ -399,13 +412,10 @@ def test_nonlocal_whatsapp_persists_every_batched_message_and_status_before_ack(
     }
 
     external_ids = {
-        "wamid.batch-message-1",
-        "wamid.batch-message-2",
-        "wamid.batch-message-3",
-        "wamid.batch-outbound-1:delivered:100",
-        "wamid.batch-outbound-2:sent:101",
-        "wamid.batch-outbound-3:failed:102",
+        whatsapp_webhook_ingress.scoped_event_id(item, lane=settings.app_env)
+        for item, _ in whatsapp_webhook_ingress.split_inbox_events(payload)
     }
+    assert len(external_ids) == 6
     with SessionLocal() as session:
         events = list(
             session.scalars(

@@ -1,3 +1,19 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.runtime/
+.data/
+.venv/
+coverage.xml
+.coverage
+node_modules/
+.next/
+coverage/
+playwright-report/
+test-results/
+.wrangler/
+dist/
 # Secrets and local configuration
 .env
 .env.*
@@ -11,30 +27,15 @@
 *.p12
 
 # Python
-__pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-coverage.xml
 junit.xml
 htmlcov/
-.venv/
-dist/
 build/
 *.egg-info/
-
 # Node / Next.js
-node_modules/
-.next/
 out/
-coverage/
-playwright-report/
-test-results/
 lighthouse-reports/
 *.tsbuildinfo
-
 # Runtime data and generated artifacts
 /ops-hotfixes/
 backups/
@@ -45,10 +46,10 @@ hermes_data/
 *.pid
 .deployed-revision
 .deployed-release.json
-
 # Editors and operating systems
 .DS_Store
 .idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+.coverage.*

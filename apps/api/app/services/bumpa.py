@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import delete, select, update
@@ -73,7 +74,7 @@ class SyncCompletion:
 class StagedSync:
     live_result: BumpaSyncResult | None
     completion: SyncCompletion
-    dataset_results: dict[str, str]
+    dataset_results: dict[str, Any]
     orders_availability: str
     orders_error: str | None
     orders_count: int | None
@@ -460,12 +461,20 @@ def _stage_sync_publication(
         live_result.orders_availability if live_result is not None else "available"
     )
     orders_error = live_result.orders_error if live_result is not None else None
+    if orders_availability == "available" and orders_error is None:
+        try:
+            _order_publication_scope(db, tenant_id, run_id, snapshot.orders)
+        except ValueError:
+            # Preserve extraction evidence and independently valid analytics,
+            # but an unbounded/mixed pull cannot prove any order's absence.
+            orders_availability = "error"
+            orders_error = "Orders could not establish complete current-boundary publication"
     completion = classify_sync_completion(
         snapshot.datasets,
         orders_availability=orders_availability,
         orders_error=orders_error,
     )
-    results: dict[str, str] = {}
+    results: dict[str, Any] = {}
     for dataset in snapshot.datasets:
         key = f"{dataset.resource}.{dataset.dataset}"
         results[key] = dataset.availability
@@ -531,6 +540,9 @@ def _stage_sync_publication(
             snapshot.orders,
             record_raw_responses=live_result is None,
         )
+        # Server-owned evidence, including verified empty pulls. Provider
+        # dataset keys always contain a dot and cannot supply this key.
+        results["_bumpa_order_publication"] = {"version": 1, "state": "complete"}
     return StagedSync(
         live_result=live_result,
         completion=completion,
@@ -728,6 +740,24 @@ def _promote_orders(
     *,
     record_raw_responses: bool,
 ) -> None:
+    _run, starts_at, ends_at = _order_publication_scope(db, tenant_id, sync_run_id, orders)
+    received = {order.order_id for order in orders}
+    for retained in db.scalars(
+        select(BumpaOrder)
+        .where(
+            BumpaOrder.tenant_id == tenant_id,
+            BumpaOrder.order_date >= starts_at,
+            BumpaOrder.order_date < ends_at,
+        )
+        .with_for_update()
+    ):
+        if retained.bumpa_order_id not in received:
+            # This is a mutable cache publication, not deletion of evidence.
+            # Outside-range and undated retained rows are never inferred absent.
+            retained.raw_payload = {
+                **retained.raw_payload,
+                "_bumpa_publication": {"sync_run_id": sync_run_id, "state": "superseded"},
+            }
     for order in orders:
         existing = db.scalar(
             select(BumpaOrder).where(
@@ -742,7 +772,11 @@ def _promote_orders(
             "currency_code": order.currency_code,
             "total_amount": order.total_amount,
             "order_date": order.order_date,
-            "raw_payload": redact_order_payload(order.payload),
+            "raw_payload": {
+                **redact_order_payload(order.payload),
+                # Stamp AFTER redaction and replace any provider-supplied marker.
+                "_bumpa_publication": {"sync_run_id": sync_run_id, "state": "active"},
+            },
             "shipping_status": _bounded_text(_text(order.payload, "shipping_status"), 80),
             "channel": _bounded_text(_text(order.payload, "channel", "sales_channel"), 80),
             "origin": _bounded_text(_text(order.payload, "origin"), 120),
@@ -808,6 +842,59 @@ def _promote_orders(
                     payload=redact_order_payload(order.payload),
                 )
             )
+
+
+def _order_publication_scope(
+    db: Session,
+    tenant_id: str,
+    sync_run_id: str,
+    orders: Sequence[ProviderOrder],
+) -> tuple[BumpaSyncRun, datetime, datetime]:
+    """Validate the claimed current boundary and whole authoritative membership."""
+    run = db.get(BumpaSyncRun, sync_run_id)
+    connection = db.get(BumpaConnection, run.bumpa_connection_id) if run is not None else None
+    if (
+        run is None
+        or connection is None
+        or run.tenant_id != tenant_id
+        or connection.tenant_id != tenant_id
+        or connection.status != "active"
+        or run.boundary_revision != connection.boundary_revision
+        or run.sync_generation is None
+        or run.sync_generation <= 0
+        or run.sync_generation != connection.published_sync_generation
+        or run.sync_generation > connection.sync_generation
+        or run.status not in {"running", "success", "partial"}
+        or (
+            run.status != "running"
+            and (run.orders_availability != "available" or run.orders_count is None)
+        )
+        or run.error is not None
+        or run.requested_to < run.requested_from
+    ):
+        raise ValueError("Order publication boundary is unavailable")
+    zone = ZoneInfo(connection.store_timezone)
+    starts_at = datetime.combine(run.requested_from, time.min, zone).astimezone(UTC)
+    ends_at = datetime.combine(run.requested_to + timedelta(days=1), time.min, zone).astimezone(UTC)
+    identifiers: set[str] = set()
+    for order in orders:
+        ordered_at = order.order_date
+        if ordered_at is not None:
+            ordered_at = (
+                ordered_at.replace(tzinfo=UTC)
+                if ordered_at.tzinfo is None
+                else ordered_at.astimezone(UTC)
+            )
+        if (
+            not order.order_id
+            or order.order_id in identifiers
+            or order.currency_code != connection.store_currency
+            or ordered_at is None
+            or not starts_at <= ordered_at < ends_at
+        ):
+            raise ValueError("Orders do not establish complete dated single-currency membership")
+        identifiers.add(order.order_id)
+    return run, starts_at, ends_at
 
 
 def _replace_order_items(

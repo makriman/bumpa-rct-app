@@ -150,7 +150,7 @@ services:
     build: !reset null
     group_add:
       - "10000"
-    environment:
+    environment: &production-api-environment
       APP_ENV: production
       AUTH_LOGIN_MODE: ${AUTH_LOGIN_MODE:?Set AUTH_LOGIN_MODE}
       TEMPORARY_WEB_PIN_VERIFIER: ""
@@ -206,6 +206,34 @@ services:
       driver: json-file
       options:
         max-size: 50m
+        max-file: "5"
+
+  voice:
+    image: ${VOICE_IMAGE:-bumpabestie-voice:local}
+    build: !reset null
+    environment:
+      <<: *production-api-environment
+      AUTH_LOGIN_MODE: disabled
+      TEMPORARY_WEB_PIN_VERIFIER_FILE: ""
+      TEMPORARY_WEB_PIN_EXPIRES_AT: ""
+    group_add: ["10000"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    depends_on:
+      app-secrets-init:
+        condition: service_completed_successfully
+    volumes:
+      - runtime_app_secrets:/run/runtime-secrets:ro
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
         max-file: "5"
 
   worker:
@@ -292,6 +320,7 @@ services:
       SANDBOX_TOOLS_ENABLED: "false"
       MANAGED_IMAGE_GENERATION_ENABLED: "false"
       WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_CALLING_ENABLED: "false"
       WHATSAPP_SPEECH_ENABLED: "false"
       WHATSAPP_PROGRESS_ENABLED: "false"
       META_APP_SECRET: ""
@@ -348,6 +377,7 @@ services:
       MANAGED_IMAGE_GENERATION_ENABLED: "false"
       WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
       WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_CALLING_ENABLED: "false"
       WHATSAPP_SPEECH_ENABLED: "false"
       WHATSAPP_PROGRESS_ENABLED: "false"
       PROACTIVE_INSIGHTS_ENABLED: "false"
@@ -381,6 +411,7 @@ services:
       MANAGED_IMAGE_GENERATION_ENABLED: "false"
       WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
       WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_CALLING_ENABLED: "false"
       WHATSAPP_SPEECH_ENABLED: "false"
       WHATSAPP_PROGRESS_ENABLED: "false"
       PROACTIVE_INSIGHTS_ENABLED: "false"

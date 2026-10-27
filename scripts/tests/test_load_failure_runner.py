@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -135,6 +139,65 @@ class LoadFailureRunnerTests(unittest.TestCase):
 
         with self.assertRaises(self.runner.DrillFailure):
             self.runner.validate_rendered_compose(document)
+
+
+class LoadFailureFixtureTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = load_runner()
+
+    def test_staging_receipts_have_configured_numeric_receiver_provenance(self) -> None:
+        document = json.loads(self.runner.payload("lf-0123456789ab-load-001", 1))
+        entry = document["entry"][0]
+        value = entry["changes"][0]["value"]
+
+        self.assertEqual(entry["id"], self.runner.SYNTHETIC_COMPOSE_ENV["META_TEST_SENDER_WABA_ID"])
+        self.assertEqual(
+            value["metadata"]["phone_number_id"],
+            self.runner.SYNTHETIC_COMPOSE_ENV["META_TEST_SENDER_PHONE_NUMBER_ID"],
+        )
+        self.assertTrue(entry["id"].isdigit())
+        self.assertTrue(value["metadata"]["phone_number_id"].isdigit())
+        self.assertTrue(value["messages"][0]["from"].isdigit())
+        self.assertEqual(value["messages"][0]["id"], "lf-0123456789ab-load-001")
+
+    def test_fixture_build_does_not_overwrite_default_or_release_image_tags(self) -> None:
+        project = self.runner.ComposeProject(port=18086)
+
+        self.assertEqual(project.environment["IMAGE_TAG"], "load-failure-fixture")
+        self.assertEqual(project.environment["INFRA_IMAGE_TAG"], "load-failure-fixture")
+
+    def test_failed_gate_captures_run_scoped_database_evidence_before_teardown(self) -> None:
+        calls = []
+
+        class Project:
+            def sql_json(self, query, *, event_prefix):
+                calls.append(("diagnostics", event_prefix))
+                self_query = query
+                if "LIMIT 10" not in self_query or "fixture_events" not in self_query:
+                    raise AssertionError("failure evidence must be bounded and receipt-scoped")
+                return {"job_errors": [{"last_error": "PermanentJobError: job execution failed"}]}
+
+            def run(self, *arguments, **kwargs):
+                calls.append(arguments)
+                return SimpleNamespace(stdout="", stderr="")
+
+        args = SimpleNamespace(port=18086, report=None, skip_build=True, keep=False)
+        fixture_id = "0123456789ab"
+        captured = io.StringIO()
+        with (
+            patch.object(self.runner, "parse_args", return_value=args),
+            patch.object(self.runner, "ComposeProject", return_value=Project()),
+            patch.object(self.runner.uuid, "uuid4", return_value=SimpleNamespace(hex=fixture_id)),
+            patch.object(self.runner, "bootstrap", side_effect=self.runner.DrillFailure("fixture")),
+            contextlib.redirect_stderr(captured),
+            self.assertRaises(self.runner.DrillFailure),
+        ):
+            self.runner.main()
+
+        self.assertEqual(calls[0], ("diagnostics", fixture_id))
+        self.assertEqual(calls[-1], ("down", "--volumes", "--remove-orphans"))
+        self.assertIn("PermanentJobError: job execution failed", captured.getvalue())
 
 
 if __name__ == "__main__":

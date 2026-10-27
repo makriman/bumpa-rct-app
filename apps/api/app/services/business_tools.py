@@ -8,8 +8,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, select
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import (
     BumpaConnection,
@@ -51,6 +52,104 @@ class ResolvedPeriod:
         }
 
 
+def orders_publication_marker_valid(run: BumpaSyncRun) -> bool:
+    """Only this release's server-written publication evidence admits even zero."""
+    marker = (run.dataset_results or {}).get("_bumpa_order_publication")
+    return (
+        isinstance(marker, dict)
+        and type(marker.get("version")) is int
+        and marker.get("version") == 1
+        and marker.get("state") == "complete"
+    )
+
+
+def _publication_filters(run: Any, connection: Any, tenant_id: str) -> tuple[Any, ...]:
+    return (
+        run.tenant_id == tenant_id,
+        connection.tenant_id == tenant_id,
+        connection.status == "active",
+        run.bumpa_connection_id == connection.id,
+        run.boundary_revision == connection.boundary_revision,
+        run.sync_generation > 0,
+        run.sync_generation <= connection.published_sync_generation,
+        run.sync_generation <= connection.sync_generation,
+        run.requested_to >= run.requested_from,
+        run.error.is_(None),
+        run.finished_at.is_not(None),
+        run.status.in_(("success", "partial")),
+        run.completion_quality.in_(("complete", "accepted_partial", "degraded")),
+        run.orders_availability == "available",
+        run.orders_count.is_not(None),
+        run.dataset_results["_bumpa_order_publication"]["version"].as_integer() == 1,
+        run.dataset_results["_bumpa_order_publication"]["state"].as_string() == "complete",
+    )
+
+
+def published_orders_predicate(tenant_id: str) -> ColumnElement[bool]:
+    """Shared SQL guard for canonical reads, including reports and joins to items.
+
+    Unmarked legacy rows, superseded cache members, foreign currencies and old
+    connection boundaries remain retained evidence rather than current facts.
+    """
+    run = aliased(BumpaSyncRun)
+    connection = aliased(BumpaConnection)
+    publication = BumpaOrder.raw_payload["_bumpa_publication"]
+    source = (
+        select(run.id)
+        .join(connection, connection.id == run.bumpa_connection_id)
+        .where(
+            *_publication_filters(run, connection, tenant_id),
+            run.id == publication["sync_run_id"].as_string(),
+            BumpaOrder.currency_code == connection.store_currency,
+        )
+        .correlate(BumpaOrder)
+        .exists()
+    )
+    return and_(
+        BumpaOrder.tenant_id == tenant_id,
+        BumpaOrder.order_date.is_not(None),
+        publication["state"].as_string() == "active",
+        source,
+    )
+
+
+def order_publication_coverage(
+    db: Session, tenant_id: str, period: ResolvedPeriod | None = None
+) -> dict[str, Any]:
+    """Prove range coverage from verified pulls, never from row presence/absence."""
+    runs = db.scalars(
+        select(BumpaSyncRun)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
+        .where(*_publication_filters(BumpaSyncRun, BumpaConnection, tenant_id))
+        .order_by(BumpaSyncRun.requested_from, BumpaSyncRun.requested_to)
+    ).all()
+    runs = [run for run in runs if orders_publication_marker_valid(run)]
+    verified = bool(runs)
+    if period is not None:
+        covered_to = period.date_from - timedelta(days=1)
+        for run in runs:
+            if run.requested_to < period.date_from or run.requested_from > period.date_to:
+                continue
+            if run.requested_from > covered_to + timedelta(days=1):
+                break
+            covered_to = max(covered_to, run.requested_to)
+        verified = covered_to >= period.date_to
+    return {
+        "availability": "available" if verified else "unavailable",
+        "reason": None if verified else "verified_order_publication_required",
+        "requires_verified_sync": not verified,
+        "verified_periods": [
+            {
+                "sync_run_id": run.id,
+                "date_from": run.requested_from.isoformat(),
+                "date_to": run.requested_to.isoformat(),
+                "finished_at": _as_utc(run.finished_at).isoformat() if run.finished_at else None,
+            }
+            for run in runs
+        ],
+    }
+
+
 def tenant_store_context(db: Session, tenant_id: str) -> tuple[Tenant, str, str]:
     tenant = db.get(Tenant, tenant_id)
     if tenant is None:
@@ -72,11 +171,18 @@ def resolve_period(
     db: Session,
     *,
     tenant_id: str,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     now: datetime | None = None,
 ) -> ResolvedPeriod:
+    if (date_from is None) != (date_to is None):
+        raise ValueError("Supply both date_from and date_to")
+    if date_from is not None:
+        if period not in (None, "custom"):
+            raise ValueError("Explicit dates require period=custom or an omitted period")
+        period = "custom"
+    period = period or "this_month"
     _tenant, timezone_name, _currency = tenant_store_context(db, tenant_id)
     timezone = ZoneInfo(timezone_name)
     current = (now or datetime.now(UTC)).astimezone(timezone)
@@ -108,12 +214,25 @@ def resolve_period(
     elif period == "all_available":
         bounds = db.execute(
             select(func.min(BumpaOrder.order_date), func.max(BumpaOrder.order_date)).where(
-                BumpaOrder.tenant_id == tenant_id,
+                published_orders_predicate(tenant_id),
                 BumpaOrder.order_date.is_not(None),
             )
         ).one()
-        start = _as_local_date(bounds[0], timezone) if bounds[0] else today
-        end = _as_local_date(bounds[1], timezone) if bounds[1] else today
+        verified = order_publication_coverage(db, tenant_id)["verified_periods"]
+        start = (
+            _as_local_date(bounds[0], timezone)
+            if bounds[0]
+            else min(date.fromisoformat(item["date_from"]) for item in verified)
+            if verified
+            else today
+        )
+        end = (
+            _as_local_date(bounds[1], timezone)
+            if bounds[1]
+            else max(date.fromisoformat(item["date_to"]) for item in verified)
+            if verified
+            else today
+        )
     else:
         raise ValueError("Unsupported period")
 
@@ -156,7 +275,13 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
     _tenant, timezone, currency = tenant_store_context(db, tenant_id)
     latest = db.scalar(
         select(BumpaSyncRun)
-        .where(BumpaSyncRun.tenant_id == tenant_id)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
+        .where(
+            BumpaSyncRun.tenant_id == tenant_id,
+            BumpaConnection.tenant_id == tenant_id,
+            BumpaConnection.status == "active",
+            BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
+        )
         .order_by(BumpaSyncRun.finished_at.desc().nullslast(), BumpaSyncRun.started_at.desc())
     )
     order_bounds = db.execute(
@@ -164,20 +289,25 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
             func.min(BumpaOrder.order_date),
             func.max(BumpaOrder.order_date),
             func.count(BumpaOrder.id),
-        ).where(BumpaOrder.tenant_id == tenant_id)
+        ).where(published_orders_predicate(tenant_id))
     ).one()
+    publication = order_publication_coverage(db, tenant_id)
     zone = ZoneInfo(timezone)
     dataset_results = latest.dataset_results if latest is not None else {}
     unavailable = sorted(
         key
         for key, value in dataset_results.items()
-        if isinstance(value, dict) and value.get("availability") != "available"
+        if not key.startswith("_")
+        and (value.get("availability") if isinstance(value, dict) else value) != "available"
     )
     return {
         "timezone": timezone,
         "currency": currency,
         "orders": {
-            "count": int(order_bounds[2] or 0),
+            **publication,
+            "count": (
+                int(order_bounds[2] or 0) if publication["availability"] == "available" else None
+            ),
             "date_from": (
                 _as_local_date(order_bounds[0], zone).isoformat() if order_bounds[0] else None
             ),
@@ -195,7 +325,13 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
             "requested_to": latest.requested_to.isoformat() if latest else None,
             "unavailable_datasets": unavailable,
         },
-        "warnings": (["No completed Bumpa sync is available."] if latest is None else []),
+        "warnings": (
+            [
+                "A verified current-boundary order sync is required; retained legacy rows are excluded."
+            ]
+            if publication["availability"] != "available"
+            else []
+        ),
     }
 
 
@@ -203,7 +339,7 @@ def business_overview(
     db: Session,
     tenant_id: str,
     *,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     compare_to: Literal["previous_period", "none"] = "previous_period",
@@ -247,6 +383,7 @@ def business_overview(
         "metrics": current,
         "comparison": comparison,
         "inclusion_rules": [
+            "Only active server-verified order publications from the current connection boundary.",
             "Orders whose order_date falls inside the exact store-local period.",
             "Sales total sums available order total_amount values.",
             "Missing amounts are excluded and reported; cancelled/refunded orders remain visible.",
@@ -259,7 +396,7 @@ def sales_trend(
     db: Session,
     tenant_id: str,
     *,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     granularity: Literal["day", "week", "month"] = "day",
     date_from: date | None = None,
     date_to: date | None = None,
@@ -275,9 +412,10 @@ def sales_trend(
     )
     _tenant, timezone_name, currency = tenant_store_context(db, tenant_id)
     timezone = ZoneInfo(timezone_name)
+    coverage = order_publication_coverage(db, tenant_id, resolved)
     rows = db.execute(
         select(BumpaOrder.order_date, BumpaOrder.total_amount).where(
-            BumpaOrder.tenant_id == tenant_id,
+            published_orders_predicate(tenant_id),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
@@ -285,7 +423,7 @@ def sales_trend(
     buckets: dict[date, dict[str, Any]] = defaultdict(
         lambda: {"sales_total": Decimal("0"), "order_count": 0, "missing_amount_count": 0}
     )
-    for ordered_at, amount in rows:
+    for ordered_at, amount in rows if coverage["availability"] == "available" else []:
         if ordered_at is None:
             continue
         local_day = _as_utc(ordered_at).astimezone(timezone).date()
@@ -314,8 +452,10 @@ def sales_trend(
         "period": resolved.payload(),
         "granularity": granularity,
         "currency": currency,
+        "coverage": coverage,
+        "availability": coverage["availability"],
         "points": points,
-        "row_count": len(rows),
+        "row_count": len(rows) if coverage["availability"] == "available" else None,
         "truncated": False,
     }
 
@@ -324,7 +464,7 @@ def order_breakdown(
     db: Session,
     tenant_id: str,
     *,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     now: datetime | None = None,
@@ -339,15 +479,20 @@ def order_breakdown(
     )
     orders = db.scalars(
         select(BumpaOrder).where(
-            BumpaOrder.tenant_id == tenant_id,
+            published_orders_predicate(tenant_id),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
     ).all()
+    coverage = order_publication_coverage(db, tenant_id, resolved)
+    if coverage["availability"] != "available":
+        orders = []
     return {
         "source": "Bumpa canonical orders",
         "period": resolved.payload(),
-        "order_count": len(orders),
+        "coverage": coverage,
+        "availability": coverage["availability"],
+        "order_count": len(orders) if coverage["availability"] == "available" else None,
         "by_status": _count_values(order.status for order in orders),
         "by_payment_status": _count_values(order.payment_status for order in orders),
         "by_channel": _count_values(order.channel for order in orders),
@@ -359,7 +504,7 @@ def product_performance(
     db: Session,
     tenant_id: str,
     *,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 10,
@@ -386,7 +531,7 @@ def product_performance(
         .join(BumpaOrder, BumpaOrder.id == BumpaOrderItem.order_id)
         .where(
             BumpaOrderItem.tenant_id == tenant_id,
-            BumpaOrder.tenant_id == tenant_id,
+            published_orders_predicate(tenant_id),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
@@ -394,10 +539,15 @@ def product_performance(
         .order_by(func.sum(BumpaOrderItem.total_amount).desc().nullslast())
         .limit(safe_limit)
     ).all()
+    coverage = order_publication_coverage(db, tenant_id, resolved)
+    if coverage["availability"] != "available":
+        rows = []
     return {
         "source": "Bumpa canonical order items",
         "period": resolved.payload(),
         "currency": currency,
+        "coverage": coverage,
+        "availability": coverage["availability"],
         "products": [
             {
                 "product_id": product_id,
@@ -416,7 +566,7 @@ def customer_summary(
     db: Session,
     tenant_id: str,
     *,
-    period: PeriodName | str = "this_month",
+    period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     now: datetime | None = None,
@@ -490,6 +640,7 @@ def _overview_for_resolved_period(
     period: ResolvedPeriod,
 ) -> dict[str, Any]:
     _tenant, _timezone, currency = tenant_store_context(db, tenant_id)
+    coverage = order_publication_coverage(db, tenant_id, period)
     rows = db.execute(
         select(
             func.count(BumpaOrder.id),
@@ -497,20 +648,29 @@ def _overview_for_resolved_period(
             func.count(BumpaOrder.total_amount),
             func.count(func.distinct(BumpaOrder.channel)),
         ).where(
-            BumpaOrder.tenant_id == tenant_id,
+            published_orders_predicate(tenant_id),
             BumpaOrder.order_date >= period.starts_at_utc,
             BumpaOrder.order_date < period.ends_at_utc_exclusive,
         )
     ).one()
     order_count = int(rows[0] or 0)
     amount_count = int(rows[2] or 0)
+    available = coverage["availability"] == "available"
     return {
         "currency": currency,
-        "sales_total": str(rows[1]) if rows[1] is not None else None,
-        "order_count": order_count,
-        "orders_with_amount": amount_count,
-        "orders_missing_amount": order_count - amount_count,
-        "distinct_channels": int(rows[3] or 0),
+        "availability": coverage["availability"],
+        "coverage": coverage,
+        "sales_total": (
+            str(rows[1])
+            if available and rows[1] is not None
+            else "0"
+            if available and order_count == 0
+            else None
+        ),
+        "order_count": order_count if available else None,
+        "orders_with_amount": amount_count if available else None,
+        "orders_missing_amount": order_count - amount_count if available else None,
+        "distinct_channels": int(rows[3] or 0) if available else None,
         "gross_profit": None,
         "net_profit": None,
         "profit_warning": (
@@ -549,7 +709,9 @@ def _decimal_change(current: str | None, previous: str | None) -> dict[str, str 
     }
 
 
-def _integer_change(current: int, previous: int) -> dict[str, int | str | None]:
+def _integer_change(current: int | None, previous: int | None) -> dict[str, int | str | None]:
+    if current is None or previous is None:
+        return {"absolute": None, "percent": None}
     absolute = current - previous
     percent = None if previous == 0 else Decimal(absolute) / Decimal(previous) * Decimal("100")
     return {

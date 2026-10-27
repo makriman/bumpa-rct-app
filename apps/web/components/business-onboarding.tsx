@@ -141,9 +141,36 @@ export function BusinessOnboardingView({
   const heading = useRef<HTMLHeadingElement>(null);
   const currentStep = profile?.step;
   const currentStatus = profile?.status;
+  const previousProfileState = useRef({
+    step: currentStep,
+    status: currentStatus,
+  });
   useEffect(() => {
-    if (currentStatus && currentStatus !== "not_started")
-      heading.current?.focus();
+    const previous = previousProfileState.current;
+    previousProfileState.current = {
+      step: currentStep,
+      status: currentStatus,
+    };
+    // Loading a background profile must not interrupt another control or dialog.
+    // Keep heading focus for setup transitions initiated within onboarding.
+    if (
+      !previous.status ||
+      !currentStatus ||
+      currentStatus === "not_started" ||
+      (previous.step === currentStep && previous.status === currentStatus)
+    )
+      return;
+    const target = heading.current;
+    if (!target) return;
+    const active = document.activeElement;
+    const section = target.closest(".business-onboarding");
+    const modal = document.querySelector('dialog[open], [aria-modal="true"]');
+    if (
+      (active && !active.contains(target) && !section?.contains(active)) ||
+      (modal && !modal.contains(target))
+    )
+      return;
+    target.focus();
   }, [currentStep, currentStatus]);
   const act = async (command: Command) => {
     const succeeded = await controller.act(command);

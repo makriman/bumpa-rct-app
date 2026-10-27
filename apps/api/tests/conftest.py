@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-TEST_ROOT = Path(__file__).parent / ".runtime"
+TEST_ROOT = Path(__file__).parent / ".runtime" / f"run-{os.getpid()}"
 TEST_ROOT.mkdir(parents=True, exist_ok=True)
 DB_PATH = TEST_ROOT / "test.db"
 if DB_PATH.exists():

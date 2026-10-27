@@ -11,6 +11,13 @@ const businessProfile = JSON.parse(
   ),
 );
 
+const proactiveSettings = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/proactive-settings.json", import.meta.url),
+    "utf8",
+  ),
+);
+
 const fixturePort = 3099;
 const expectedCookie = "bb_session=e2e-session-fixture";
 const fixturePhone = "+12025550123";
@@ -183,6 +190,15 @@ const server = createServer(async (request, response) => {
     authorised
   ) {
     json(response, 200, businessProfile);
+    return;
+  }
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v1/settings/proactive-insights" &&
+    authorised
+  ) {
+    json(response, 200, proactiveSettings);
     return;
   }
 

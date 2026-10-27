@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
@@ -37,7 +37,6 @@ from app.services import generated_media as generated_media_service
 from app.services.agent_actions import (
     AgentActionError,
     action_preview,
-    create_action_context_token,
     decide_pending_action,
     prepare_pending_action,
 )
@@ -64,6 +63,7 @@ from app.services.generated_media import (
 from app.services.media import MediaProcessingError, process_whatsapp_content
 from app.services.sandbox import SandboxProviderError
 from app.services.web_research import ResearchProviderError, search_web
+from tests.run_fixture import active_context
 
 
 def _factory() -> sessionmaker[Session]:
@@ -75,6 +75,7 @@ def _factory() -> sessionmaker[Session]:
 def _settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "app_env": "test",
+        "hermes_context_mode": "legacy_native",
         "field_encryption_key": "agent-capabilities-test-field-key",
         "internal_service_token": "agent-capabilities-test-service-token-0001",
         "agent_backend": "hermes",
@@ -84,6 +85,59 @@ def _settings(**overrides: Any) -> Settings:
     }
     values.update(overrides)
     return Settings(**values)
+
+
+def _publish_fixture_orders(
+    db: Session,
+    tenant: Tenant,
+    date_from: date,
+    date_to: date,
+    *,
+    run: BumpaSyncRun | None = None,
+) -> None:
+    """Seed the same trusted boundary and membership evidence as a complete pull."""
+    db.flush()
+    connection = db.scalar(select(BumpaConnection).where(BumpaConnection.tenant_id == tenant.id))
+    if connection is None:
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key="fixture",
+            scope_type="business_id",
+            scope_id=tenant.id,
+            store_timezone=tenant.timezone,
+            store_currency=tenant.currency_code,
+        )
+        db.add(connection)
+        db.flush()
+    orders = list(db.scalars(select(BumpaOrder).where(BumpaOrder.tenant_id == tenant.id)))
+    connection.sync_generation += 1
+    connection.published_sync_generation = connection.sync_generation
+    if run is None:
+        run = BumpaSyncRun(
+            tenant_id=tenant.id,
+            bumpa_connection_id=connection.id,
+            status="success",
+            completion_quality="complete",
+            requested_from=date_from,
+            requested_to=date_to,
+            started_at=datetime(2026, 7, 15, 8, tzinfo=UTC),
+            finished_at=datetime(2026, 7, 15, 9, tzinfo=UTC),
+            orders_availability="available",
+            orders_count=len(orders),
+        )
+        db.add(run)
+    run.boundary_revision = connection.boundary_revision
+    run.sync_generation = connection.sync_generation
+    run.dataset_results = {
+        **(run.dataset_results or {}),
+        "_bumpa_order_publication": {"version": 1, "state": "complete"},
+    }
+    db.flush()
+    for order in orders:
+        order.raw_payload = {
+            **order.raw_payload,
+            "_bumpa_publication": {"sync_run_id": run.id, "state": "active"},
+        }
 
 
 def test_store_local_last_week_reconciles_and_cannot_cross_tenants() -> None:
@@ -150,6 +204,8 @@ def test_store_local_last_week_reconciles_and_cannot_cross_tenants() -> None:
                 ),
             )
         )
+        for tenant in (tenant_a, tenant_b):
+            _publish_fixture_orders(db, tenant, date(2026, 7, 1), date(2026, 7, 31))
         db.commit()
 
         now = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
@@ -265,6 +321,7 @@ def test_business_tool_suite_reports_coverage_mix_products_inventory_and_exact_m
                 ),
             )
         )
+        _publish_fixture_orders(db, tenant, date(2026, 7, 1), date(2026, 7, 31), run=sync)
         db.commit()
         now = datetime(2026, 7, 15, 9, tzinfo=UTC)
 
@@ -323,6 +380,8 @@ def test_period_comparison_and_calculator_boundaries_are_exact() -> None:
                 ),
             )
         )
+        # A 31-day July comparison also includes May 31 in its previous period.
+        _publish_fixture_orders(db, tenant, date(2026, 5, 31), date(2026, 7, 31))
         db.commit()
         now = datetime(2026, 7, 15, 9, tzinfo=UTC)
 
@@ -581,7 +640,8 @@ def test_action_confirmation_is_exact_bound_expiring_and_single_use(
             )
         )
         db.commit()
-        context = create_action_context_token(
+        context = active_context(
+            db,
             settings,
             tenant_id=tenant.id,
             user_id=owner.id,
@@ -647,7 +707,8 @@ def test_action_confirmation_is_exact_bound_expiring_and_single_use(
                 supplied_token=token,
                 decision="confirm",
             )
-        new_request_context = create_action_context_token(
+        new_request_context = active_context(
+            db,
             settings,
             tenant_id=tenant.id,
             user_id=owner.id,
@@ -665,6 +726,7 @@ def test_action_confirmation_is_exact_bound_expiring_and_single_use(
             action_context_token=new_request_context,
         )
         assert retried_action.id != action.id
+        context = new_request_context
 
         second_input = {**exact_input, "subject": "A different exact action"}
         expiring, expiring_token = prepare_pending_action(
@@ -726,7 +788,8 @@ def test_action_confirmation_executes_once_and_records_bounded_failure(
             )
         )
         db.commit()
-        context = create_action_context_token(
+        context = active_context(
+            db,
             settings,
             tenant_id=tenant.id,
             user_id=owner.id,
@@ -835,7 +898,8 @@ def test_action_context_and_preparation_reject_invalid_or_unbounded_inputs() -> 
         )
         db.add_all((conversation, connection))
         db.commit()
-        context = create_action_context_token(
+        context = active_context(
+            db,
             enabled,
             tenant_id=tenant.id,
             user_id=owner.id,
@@ -963,6 +1027,7 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
             tenant_id=tenant.id,
             user_id=owner.id,
             channel="web",
+            provider_session_key="current-workspace",
         )
         db.add(conversation)
         db.flush()
@@ -976,7 +1041,8 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
         )
         db.add(inbound)
         db.commit()
-        context = create_action_context_token(
+        context = active_context(
+            db,
             settings,
             tenant_id=tenant.id,
             user_id=owner.id,
@@ -1016,7 +1082,7 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
             db,
             settings,
             tenant_id=tenant.id,
-            workspace="conversation-1",
+            workspace="current-workspace",
             path="/workspace/weekly-sales.csv",
             filename="weekly-sales.csv",
             mime_type="text/csv",
@@ -1042,7 +1108,7 @@ def test_managed_image_is_bound_to_the_initiating_user_and_conversation(
             db,
             settings,
             tenant_id=tenant.id,
-            workspace="conversation-1",
+            workspace="current-workspace",
             path="/workspace/weekly-sales.pdf",
             filename="weekly-sales.exe",
             mime_type="application/pdf",
@@ -1122,6 +1188,16 @@ def test_generated_media_control_plane_fails_closed(
         lambda *_args, **_kwargs: context,
     )
     with factory() as db:
+        db.add(
+            Conversation(
+                id="conversation-1",
+                tenant_id="tenant-1",
+                user_id="user-1",
+                channel="web",
+                provider_session_key="conversation-1",  # gitleaks:allow -- reviewed test workspace namespace, not a credential
+            )
+        )
+        db.commit()
         with pytest.raises(GeneratedMediaError, match="disabled"):
             generate_and_queue_image(
                 db,

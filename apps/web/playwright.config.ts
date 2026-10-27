@@ -12,6 +12,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   use: {
     baseURL: "http://localhost:3010",
+    timezoneId: "UTC",
     navigationTimeout: 30_000,
     trace: "retain-on-failure",
   },

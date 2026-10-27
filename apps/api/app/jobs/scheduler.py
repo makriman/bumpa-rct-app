@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.time import utcnow
-from app.db.models import BumpaConnection, HermesProfile, Tenant
+from app.db.models import (
+    AgentExecutionRun,
+    BumpaConnection,
+    HermesProfile,
+    ProactiveSubscription,
+    Tenant,
+)
 from app.db.session import SessionLocal, set_security_context
 from app.jobs.runtime import (
     AsyncRuntimeConfig,
@@ -44,6 +50,7 @@ def run_cycle(
     set_security_context(session, privileged=True)
     _ensure_daily_maintenance(session)
     settings = get_settings()
+    _ensure_run_recovery_jobs(session, settings=settings)
     scheduled_syncs = _ensure_bumpa_sync_jobs(session, settings=settings)
     _ensure_proactive_insight_jobs(session, settings=settings)
     _ensure_operational_alert_jobs(session, settings=settings)
@@ -51,6 +58,40 @@ def run_cycle(
     wakeups = recover_stale_wakeups(session, config)
     dispatched = dispatch_due_jobs(session, wake_queue, limit=config.dispatch_batch_size)
     return scheduled_syncs, recovered, wakeups, dispatched
+
+
+def _ensure_run_recovery_jobs(
+    session: Session,
+    *,
+    settings: Settings,
+    now: datetime | None = None,
+) -> int:
+    """Queue at most one bounded, read/reconcile-only sweep per UTC minute.
+
+    The reconciliation service owns the exact run selection and authorization.
+    No model admission or transport delivery is scheduled by this maintenance
+    job, including when its decision says delivery remains pending.
+    """
+    moment = _as_utc(now or utcnow())
+    expired = session.scalar(
+        select(AgentExecutionRun.id)
+        .where(
+            AgentExecutionRun.status.in_(("running", "expired", "reconciling")),
+            AgentExecutionRun.expires_at <= moment,
+        )
+        .limit(1)
+    )
+    if expired is None:
+        return 0
+    slot = moment.strftime("%Y%m%dT%H%MZ")
+    _, created = enqueue_job(
+        session,
+        kind="system.reconcile_expired_runs",
+        payload={"limit": 25, "environment_lane": settings.app_env},
+        idempotency_key=f"run-recovery:{settings.app_env}:{slot}",
+        max_attempts=1,
+    )
+    return int(created)
 
 
 def _ensure_daily_maintenance(session: Session) -> None:
@@ -137,49 +178,35 @@ def _ensure_proactive_insight_jobs(
 
     if not settings.proactive_insights_enabled:
         return 0
+    from app.services.proactive_insights import schedule_subscription_slot
+
     current = _as_utc(now or utcnow())
-    tenants = session.scalars(
-        select(Tenant)
-        .where(
-            Tenant.status == "active",
-            Tenant.research_consent_status == "granted",
-        )
-        .order_by(Tenant.id.asc())
-    ).all()
     created = 0
-    for tenant in tenants:
-        try:
-            local_now = current.astimezone(ZoneInfo(tenant.timezone))
-        except (ZoneInfoNotFoundError, ValueError):
-            logger.warning("insight_schedule_invalid_timezone")
+    for subscription in session.scalars(
+        select(ProactiveSubscription).where(ProactiveSubscription.status == "active")
+    ):
+        if subscription.cadence == "daily" and not settings.daily_insights_enabled:
             continue
-        if settings.daily_insights_enabled and local_now.hour >= settings.daily_insight_local_hour:
-            slot = local_now.date().isoformat()
-            _, was_created = enqueue_job(
-                session,
-                kind="whatsapp.proactive_insight",
-                tenant_id=tenant.id,
-                idempotency_key=f"proactive-insight:daily:{tenant.id}:{slot}",
-                payload={"tenant_id": tenant.id, "cadence": "daily", "slot": slot},
-                max_attempts=3,
-            )
-            created += int(was_created)
-        weekly_is_due = local_now.weekday() > settings.weekly_insight_local_weekday or (
-            local_now.weekday() == settings.weekly_insight_local_weekday
-            and local_now.hour >= settings.weekly_insight_local_hour
+        if subscription.cadence == "weekly" and not settings.weekly_insights_enabled:
+            continue
+        slot = schedule_subscription_slot(subscription, current)
+        if slot is None:
+            continue
+        _, was_created = enqueue_job(
+            session,
+            kind="whatsapp.proactive_insight",
+            tenant_id=subscription.tenant_id,
+            idempotency_key=f"proactive:{subscription.id}:{subscription.revision}:{slot}",
+            payload={
+                "tenant_id": subscription.tenant_id,
+                "cadence": subscription.cadence,
+                "slot": slot,
+                "subscription_id": subscription.id,
+                "subscription_revision": subscription.revision,
+            },
+            max_attempts=3,
         )
-        if settings.weekly_insights_enabled and weekly_is_due:
-            iso_year, iso_week, _ = local_now.isocalendar()
-            slot = f"{iso_year:04d}-W{iso_week:02d}"
-            _, was_created = enqueue_job(
-                session,
-                kind="whatsapp.proactive_insight",
-                tenant_id=tenant.id,
-                idempotency_key=f"proactive-insight:weekly:{tenant.id}:{slot}",
-                payload={"tenant_id": tenant.id, "cadence": "weekly", "slot": slot},
-                max_attempts=3,
-            )
-            created += int(was_created)
+        created += int(was_created)
     return created
 
 

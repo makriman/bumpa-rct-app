@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
-from app.core.crypto import FieldCipher
+from app.core.crypto import FieldCipher, secret_hash
 from app.core.ids import new_id
 from app.core.time import utcnow
 from app.db.base import Base
@@ -29,10 +29,11 @@ from app.db.models import (
     WhatsappDeliveryEvent,
     WhatsappMessage,
 )
-from app.jobs.runtime import PermanentJobError
+from app.jobs.runtime import JobFence, PermanentJobError, bind_job_fence
 from app.providers.hermes import HermesResult
 from app.providers.meta import MetaProviderError, MetaWhatsAppClient
 from app.services import chat, whatsapp
+from app.services.conversation_scope import receiver_scope
 
 
 def _factory() -> sessionmaker[Session]:
@@ -191,6 +192,52 @@ def test_progress_stops_if_answer_finishes_during_typing_refresh(
     )
     progress._send(whatsapp._progress_body("get_sales"))
     assert sent == []
+
+
+@pytest.mark.parametrize("revocation", ["job_lease", "phone_alias"])
+def test_progress_send_checks_current_authority_before_any_meta_call(
+    monkeypatch: pytest.MonkeyPatch, revocation: str
+) -> None:
+    factory = _factory()
+    with factory() as db:
+        tenant, user = _seed_authorized_phone(db)
+        event = WebhookEvent(
+            provider="whatsapp",
+            external_event_id="progress-revoked",
+            signature_valid=True,
+            payload={},
+        )
+        db.add(event)
+        if revocation == "phone_alias":
+            identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.user_id == user.id))
+            assert identity is not None
+            identity.opt_out = True
+        db.commit()
+        progress = whatsapp._WhatsAppProgress(
+            settings=_meta_settings(),
+            event_id=event.id,
+            inbound_message_id="inbound-id",
+            phone="+2348000000044",
+            tenant_id=tenant.id,
+            user_id=user.id,
+            meta_sender=("123456789", "987654321"),
+        )
+    monkeypatch.setattr(whatsapp, "SessionLocal", factory)
+    monkeypatch.setattr(
+        MetaWhatsAppClient,
+        "for_inbound_reply",
+        lambda *_args, **_kwargs: pytest.fail("Revoked progress reached Meta"),
+    )
+    if revocation == "job_lease":
+        fence = JobFence("synthetic-job", "stale-worker", 1, 60)
+        fence.invalidate()
+        with bind_job_fence(fence):
+            progress._send(whatsapp._progress_body("get_sales"))
+    else:
+        progress._send(whatsapp._progress_body("get_sales"))
+    assert progress._done.is_set()
+    with factory() as db:
+        assert db.scalar(select(WhatsappMessage)) is None
 
 
 def _seed_authorized_phone(db: Session) -> tuple[Tenant, User]:
@@ -374,6 +421,7 @@ def test_delivery_status_is_monotonic_and_failure_is_separate() -> None:
             message_type="text",
             text_body="Reply",
             payload={},
+            receiver_scope=receiver_scope("test", None),
             status="sent",
             status_rank=3,
         )
@@ -390,6 +438,7 @@ def test_delivery_status_is_monotonic_and_failure_is_separate() -> None:
             db,
             event,
             {"id": message.meta_message_id, "status": "read", "timestamp": "3"},
+            Settings(_env_file=None, app_env="test"),
         )
         assert message.status == "read"
         assert message.status_rank == 5
@@ -406,6 +455,7 @@ def test_delivery_status_is_monotonic_and_failure_is_separate() -> None:
             db,
             late_event,
             {"id": message.meta_message_id, "status": "delivered", "timestamp": "2"},
+            Settings(_env_file=None, app_env="test"),
         )
         assert message.status == "read"
         assert message.status_rank == 5
@@ -422,6 +472,7 @@ def test_delivery_status_is_monotonic_and_failure_is_separate() -> None:
             db,
             failed_event,
             {"id": message.meta_message_id, "status": "failed", "timestamp": "4"},
+            Settings(_env_file=None, app_env="test"),
         )
         assert message.status == "read"
         assert message.payload["delivery_failure"]["status"] == "failed"
@@ -599,6 +650,12 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
         message: str,
         **_kwargs,
     ):
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.user_id == user.id))
+        assert identity is not None
+        assert _kwargs["whatsapp_identity"] == (
+            identity.id,
+            secret_hash("onboarding-existing-pilot:" + identity.phone_e164, settings.otp_secret),
+        )
         conversation = Conversation(
             tenant_id=tenant.id,
             user_id=user.id,
@@ -627,6 +684,13 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
         )
         db.add_all((incoming, outgoing))
         db.flush()
+        from app.services.agent_execution import begin_run, finish_run
+
+        run = begin_run(db, conversation, incoming, timeout_seconds=180)
+        outgoing.initiating_message_id = incoming.id
+        outgoing.media_metadata = {"event_kind": "reply", "execution_run_id": run.id}
+        run.output_message_id = outgoing.id
+        finish_run(db, run, status="completed")
         media_id = new_id()
         relative = Path("generated-media") / "test" / f"{media_id}.png"
         destination = tmp_path / relative
@@ -639,6 +703,7 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
                 user_id=user.id,
                 conversation_id=conversation.id,
                 agent_message_id=outgoing.id,
+                execution_run_id=run.id,
                 channel="whatsapp",
                 media_type="image",
                 mime_type="image/png",
@@ -659,6 +724,7 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
                 user_id=user.id,
                 conversation_id=conversation.id,
                 agent_message_id=outgoing.id,
+                execution_run_id=run.id,
                 channel="whatsapp",
                 media_type="document",
                 mime_type="text/csv",
@@ -678,6 +744,7 @@ def test_successful_message_delivers_text_generated_media_action_preview_and_con
                 target_summary="Create the exact supplier draft.",
                 action_input={"name": "supplier-draft.txt", "content": "Exact content"},
                 status="pending",
+                approval_binding={"initiating_message_id": incoming.id},
                 idempotency_key="whatsapp-action-preview",
                 confirmation_token_hash="0" * 64,
                 expires_at=utcnow() + timedelta(minutes=10),
@@ -1132,6 +1199,7 @@ def test_immediate_read_receipts_and_basic_event_guards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factory = _factory()
+    monkeypatch.setattr(whatsapp, "SessionLocal", factory)
     client = _meta_client()
     reads: list[tuple[str, bool]] = []
     monkeypatch.setattr(
@@ -1181,10 +1249,8 @@ def test_immediate_read_receipts_and_basic_event_guards(
         meta_sender=("123456789", "987654321"),
     )
     progress._refresh_typing()
-    assert reads == [
-        ("wamid.inbound.receipt", True),
-        ("wamid.inbound.receipt", True),
-    ]
+    # The progress actor is deliberately absent; it cannot trigger typing.
+    assert reads == [("wamid.inbound.receipt", True)]
 
     with factory() as db:
         with pytest.raises(PermanentJobError, match="does not exist"):

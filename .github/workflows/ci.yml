@@ -85,6 +85,13 @@ jobs:
       - name: Migrate database to head
         working-directory: apps/api
         run: uv run alembic upgrade head
+      - name: Rehearse unused canonical and consultant PostgreSQL migrations
+        working-directory: apps/api
+        run: |
+          uv run alembic downgrade 0019_business_onboarding
+          uv run alembic upgrade 0020_canonical_run_boundaries
+          uv run alembic upgrade 0021_consultant_boundaries
+          uv run alembic upgrade head
       - name: Verify Bumpa raw-response migration compatibility
         working-directory: apps/api
         run: |
@@ -204,6 +211,8 @@ jobs:
         run: npm --prefix apps/sandbox-worker ci
       - name: Typecheck generated Worker bindings
         run: npm --prefix apps/sandbox-worker run typecheck
+      - name: Verify generated Worker bindings are reproducible
+        run: git diff --exit-code -- apps/sandbox-worker/worker-configuration.d.ts
       - name: Test tenant and filesystem boundaries
         run: npm --prefix apps/sandbox-worker test
 
@@ -290,7 +299,16 @@ jobs:
   images:
     name: Build linux/amd64 images
     needs:
-      [backend, frontend, repository, bootstrap, infrastructure, resilience]
+      [
+        backend,
+        frontend,
+        sandbox-worker,
+        repository,
+        bootstrap,
+        infrastructure,
+        resilience,
+        security,
+      ]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -299,6 +317,9 @@ jobs:
         include:
           - name: api
             dockerfile: apps/api/Dockerfile
+            target: ""
+          - name: voice
+            dockerfile: apps/api/Dockerfile.voice
             target: ""
           - name: web
             dockerfile: apps/web/Dockerfile

@@ -6,6 +6,7 @@ import signal
 import socket
 import threading
 import time
+from contextlib import nullcontext
 from types import TracebackType
 
 from sqlalchemy.orm import Session
@@ -15,10 +16,16 @@ from app.db.session import SessionLocal, set_security_context
 from app.jobs import handlers as _handlers  # noqa: F401 - import registers worker handlers
 from app.jobs.runtime import (
     AsyncRuntimeConfig,
+    JobDeferredError,
+    JobFence,
+    JobLeaseLostError,
     PermanentJobError,
     RedisWakeQueue,
+    assert_current_job_lease,
+    bind_job_fence,
     claim_job,
     complete_job,
+    defer_job,
     fail_job,
     registry,
     renew_job_lease,
@@ -38,11 +45,13 @@ class JobLeaseKeeper:
         worker_id: str,
         config: AsyncRuntimeConfig,
         wake_queue: RedisWakeQueue,
+        fence: JobFence | None = None,
     ) -> None:
         self.job_id = job_id
         self.worker_id = worker_id
         self.config = config
         self.wake_queue = wake_queue
+        self.fence = fence
         self.interval_seconds = max(
             0.01,
             min(config.heartbeat_ttl_seconds, config.stale_lock_seconds) / 3,
@@ -80,18 +89,29 @@ class JobLeaseKeeper:
             try:
                 with SessionLocal() as lease_session:
                     set_security_context(lease_session, privileged=True)
-                    renewed = renew_job_lease(lease_session, self.job_id, self.worker_id)
+                    renewed = renew_job_lease(
+                        lease_session,
+                        self.job_id,
+                        self.worker_id,
+                        claim_epoch=self.fence.claim_epoch if self.fence else None,
+                        stale_lock_seconds=self.config.stale_lock_seconds,
+                    )
                 if not renewed:
+                    if self.fence:
+                        self.fence.invalidate()
                     logger.warning(
                         "job_lease_lost",
                         extra={"worker_id": self.worker_id, "job_id": self.job_id},
                     )
                     return
             except Exception:
+                if self.fence:
+                    self.fence.invalidate()
                 logger.exception(
                     "job_lease_renewal_failed",
                     extra={"worker_id": self.worker_id, "job_id": self.job_id},
                 )
+                return
 
             if self._stop_event.wait(self.interval_seconds):
                 return
@@ -114,35 +134,69 @@ def process_one(
     job = claim_job(session, job_id, worker_id)
     if not job:
         return "ignored"
+    fence = JobFence(job.id, worker_id, job.claim_epoch, config.stale_lock_seconds)
     lease_keeper = (
         JobLeaseKeeper(
             job_id=job.id,
             worker_id=worker_id,
             config=config,
             wake_queue=wake_queue,
+            fence=fence,
         )
         if wake_queue is not None
         else None
     )
     try:
-        handler = registry.handler_for(job.kind)
-        if lease_keeper is None:
-            result = handler(session, job)
-        else:
-            with lease_keeper:
+        with bind_job_fence(fence):
+            assert_current_job_lease(session)
+            handler = registry.handler_for(job.kind)
+            # Complete while the keeper is still active. Joining a renewal
+            # blocked on this transaction's job-row lock before committing the
+            # result would stall every handler until the join timeout.
+            with lease_keeper if lease_keeper is not None else nullcontext():
                 result = handler(session, job)
-        complete_job(session, job.id, result, worker_id=worker_id)
+                assert_current_job_lease(session)
+                complete_job(
+                    session,
+                    fence.job_id,
+                    result,
+                    worker_id=worker_id,
+                    claim_epoch=fence.claim_epoch,
+                )
         logger.info(
             "job_succeeded",
             extra={"job_id": job.id, "job_kind": job.kind, "attempt": job.attempts},
         )
         return "succeeded"
+    except JobLeaseLostError:
+        session.rollback()
+        status = "lease_lost"
+    except JobDeferredError as exc:
+        session.rollback()
+        status = defer_job(
+            session, fence.job_id, exc, worker_id=worker_id, claim_epoch=fence.claim_epoch
+        )
     except PermanentJobError as exc:
         session.rollback()
-        status = fail_job(session, job.id, exc, config, worker_id=worker_id, permanent=True)
+        status = fail_job(
+            session,
+            fence.job_id,
+            exc,
+            config,
+            worker_id=worker_id,
+            claim_epoch=fence.claim_epoch,
+            permanent=True,
+        )
     except Exception as exc:
         session.rollback()
-        status = fail_job(session, job.id, exc, config, worker_id=worker_id)
+        status = fail_job(
+            session,
+            fence.job_id,
+            exc,
+            config,
+            worker_id=worker_id,
+            claim_epoch=fence.claim_epoch,
+        )
     logger.warning(
         "job_failed",
         extra={"job_id": job.id, "job_kind": job.kind, "status": status},

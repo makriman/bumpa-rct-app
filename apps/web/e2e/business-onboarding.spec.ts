@@ -70,14 +70,20 @@ for (const simulateFailure of [false, true]) {
     ).toBeVisible();
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-welcome-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-welcome.png"),
         fullPage: true,
       });
     await page.getByRole("button", { name: "Let’s start →" }).click();
+    await expect(
+      page.getByRole("heading", { name: "What do you sell or do?" }),
+    ).toBeFocused();
     await page
       .getByRole("textbox", { name: "What do you sell or do?" })
       .fill("Women’s shoes and repairs");
     await page.getByRole("button", { name: "Continue →", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Who usually buys from you?" }),
+    ).toBeFocused();
     await page
       .getByRole("textbox", { name: "Who usually buys from you?" })
       .fill("Working women in Ibadan");
@@ -104,7 +110,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-channels-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-channels.png"),
         fullPage: true,
       });
     await page.getByRole("button", { name: "Continue →", exact: true }).click();
@@ -147,7 +153,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-review-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-review.png"),
         fullPage: true,
       });
     await page
@@ -171,7 +177,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-saved-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-saved.png"),
         fullPage: true,
       });
     expect(
@@ -185,3 +191,65 @@ for (const simulateFailure of [false, true]) {
     ).toBeVisible();
   });
 }
+
+test("a delayed business profile keeps focus inside the open mobile drawer", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-chromium");
+  let finishProfile = () => {};
+  const profileReady = new Promise<void>((resolve) => {
+    finishProfile = resolve;
+  });
+  await grantTestSession(page);
+  await page.route("**/api/backend/**", async (route) => {
+    const path = apiPath(route);
+    if (await fulfillSession(route)) return;
+    if (path.startsWith("/api/backend/chat/conversations")) {
+      await json(route, { items: [], next_cursor: null });
+      return;
+    }
+    if (path === "/api/backend/settings/business-profile") {
+      await profileReady;
+      await json(route, completedProfile);
+      return;
+    }
+    await route.abort("failed");
+  });
+  try {
+    await page.goto("/chat");
+    await expect(
+      page.getByRole("status").filter({
+        hasText: "Getting your business profile ready…",
+      }),
+    ).toBeVisible();
+    const opener = page.getByRole("button", {
+      name: "Open conversation history",
+    });
+    await opener.click();
+    const close = page.getByRole("button", {
+      name: "Close conversation history",
+    });
+    await expect(close).toBeFocused();
+    finishProfile();
+    await expect(
+      page.getByRole("heading", { name: "What shall we work on today?" }),
+    ).toBeVisible();
+    await expect(close).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      page.getByRole("link", { name: "Bumpa Bestie chat home" }),
+    ).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      page.getByRole("button", { name: "Collapse sidebar" }),
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      page.getByRole("link", { name: "Bumpa Bestie chat home" }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(opener).toBeFocused();
+  } finally {
+    finishProfile();
+  }
+});

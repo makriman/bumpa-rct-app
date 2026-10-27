@@ -40,12 +40,13 @@ env_file="${ENV_FILE:-.env.production}"
 compose=(
   docker compose --env-file "$env_file"
   -f compose.yaml -f compose.prod.yaml
-  --profile async --profile tools
+  --profile async --profile tools --profile voice
 )
 # Caddy and the web frontend do not write the database-linked export or Hermes
 # volumes. Keep them serving the application shell while every process that can
 # mutate backup state is quiesced.
 writer_services=(api worker scheduler hermes)
+writer_services+=(voice)
 running_services=()
 writers_quiesced=0
 
@@ -75,6 +76,11 @@ done
 
 if ((${#running_services[@]} > 0)); then
   writers_quiesced=1
+  # Drain voice while the API/Hermes dependencies are still available. Its
+  # synchronous tool calls may take longer than ordinary API shutdown.
+  if [[ " ${running_services[*]} " == *" voice "* ]]; then
+    "${compose[@]}" stop --timeout 360 voice
+  fi
   "${compose[@]}" stop --timeout 60 "${running_services[@]}"
 fi
 

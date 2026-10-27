@@ -1,0 +1,77 @@
+{
+  "image_observed": "sha256:48a64d9eb290d95c50fff2a45c0f35cded8d1b63a5b7273e4a8efc4cde468628",
+  "release_freeze_valid": false,
+  "inventory_scope": "Full selected installed speech notice files plus exact pinned model cards and public upstream/dataset attribution; not a complete container SBOM.",
+  "files": {
+    "Alba-dataset-license.txt": {
+      "bytes": 820,
+      "sha256": "f09b25492b8c18da8b460eceab54a6df72871a7d552aef714bc3ec6fa7c010aa",
+      "public_source": "https://datashare.ed.ac.uk/server/api/core/bitstreams/ca0b398a-635c-48cd-b85a-beb6f8401e0d/content"
+    },
+    "CTranslate2-4.8.3-LICENSE": {
+      "bytes": 1115,
+      "sha256": "54aa79d9fe3c09e67a16dcd95b9e88676405a6ec174efda31036983cf7672ecb",
+      "public_source": "https://raw.githubusercontent.com/OpenNMT/CTranslate2/v4.8.3/LICENSE"
+    },
+    "OpenAI-Whisper-LICENSE.txt": {
+      "bytes": 1063,
+      "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+      "public_source": "https://raw.githubusercontent.com/openai/whisper/main/LICENSE"
+    },
+    "PyAV-LICENSE.txt": {
+      "bytes": 1505,
+      "sha256": "76af0461ffb92e19f1c14449e95557d83a2dfaa1baf202d49e5f1d8746c0da19",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/av-19.0.2.dist-info/licenses/LICENSE.txt"
+    },
+    "alba-MODEL_CARD": {
+      "bytes": 324,
+      "sha256": "fa166b1779404c470b0b6b4ba0238bc4a35bf89d2cd130c6788f697188b737d6",
+      "public_source": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/en/en_GB/alba/medium/MODEL_CARD"
+    },
+    "faster-whisper-LICENSE.txt": {
+      "bytes": 1064,
+      "sha256": "af6798135e729f8aa6c853936d037dfdea449734d26b8ea6a89805fca758c0d5",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/faster_whisper-1.2.1.dist-info/LICENSE"
+    },
+    "faster-whisper-base-README.md": {
+      "bytes": 1991,
+      "sha256": "b922acef3616e27b1d416260b63ba7114c732f0315012006781af2da69cd1ebf",
+      "public_source": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/README.md"
+    },
+    "lessac-MODEL_CARD": {
+      "bytes": 351,
+      "sha256": "ce49eb457742208166d399a40cdec2c7fa9db77960930031564ab56f12882645",
+      "public_source": "https://huggingface.co/rhasspy/piper-voices/resolve/0d907f158acc877ddeebcbf827659ee13bea8bcd/en/en_US/lessac/medium/MODEL_CARD"
+    },
+    "onnxruntime-LICENSE.txt": {
+      "bytes": 1073,
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/onnxruntime/LICENSE"
+    },
+    "onnxruntime-ThirdPartyNotices.txt": {
+      "bytes": 338088,
+      "sha256": "143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/onnxruntime/ThirdPartyNotices.txt"
+    },
+    "piper-1.8.0-COPYING": {
+      "bytes": 35148,
+      "sha256": "0ae0485a5bd37a63e63603596417e4eb0e653334fa6c7f932ca3a0e85d4af227",
+      "public_source": "https://raw.githubusercontent.com/OHF-Voice/piper1-gpl/639388b6317fc4731e91d53da42aea68fd4166ff/COPYING"
+    },
+    "piper-COPYING.txt": {
+      "bytes": 35148,
+      "sha256": "0ae0485a5bd37a63e63603596417e4eb0e653334fa6c7f932ca3a0e85d4af227",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/piper_tts-1.8.0.dist-info/licenses/COPYING"
+    },
+    "piper-g2pW-Apache-2.0.txt": {
+      "bytes": 11625,
+      "sha256": "b5608a38e122734e65c075ff697203bf492b6f2ef51faa5dcf3b169387bde33f",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/piper_tts-1.8.0.dist-info/licenses/licenses/LICENSE.g2pW-Apache-2.0"
+    },
+    "piper-hebrew-LICENSE.txt": {
+      "bytes": 1056,
+      "sha256": "c1003f4bcecf823d0604dc4454119a8235fda0d7560e25cde445862253477985",
+      "installed_source": "/opt/hermes/.venv/lib/python3.14/site-packages/piper/hebrew/LICENSE"
+    }
+  }
+}

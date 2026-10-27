@@ -47,6 +47,7 @@ from tests.conftest import auth_headers
 def _settings(tmp_path: Path | None = None, **overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "app_env": "test",
+        "hermes_context_mode": "legacy_native",
         "database_url": get_settings().database_url,
         "artifact_root": get_settings().artifact_root,
         "field_encryption_key": "hermes-test-field-key",
@@ -375,8 +376,8 @@ def test_profile_provisioning_allocates_unique_ports_and_private_files(tmp_path:
             assert "gateway:\n  standalone: true\n" in config_text
             for toolset in hermes_module.DISABLED_SME_TOOLSETS:
                 assert f"    - {toolset}\n" in config_text
-            assert "    - delegation\n" not in config_text
-            assert "    - cronjob\n" not in config_text
+            assert "    - delegation\n" in config_text
+            assert "    - cronjob\n" in config_text
             assert (
                 "delegation:\n"
                 "  inherit_mcp_toolsets: true\n"

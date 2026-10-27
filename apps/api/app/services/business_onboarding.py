@@ -535,6 +535,7 @@ def propose_update(
         get_settings(),
         action_context_token,
         expected_tenant_id=tenant_id,
+        db=db,
         purpose="business_profile",
     )
     conversation = db.scalar(

@@ -82,7 +82,8 @@ SYNTHETIC_COMPOSE_ENV = {
     "GOOGLE_OAUTH_CLIENT_ID": "",
     "GOOGLE_OAUTH_CLIENT_SECRET": "",
     "GOOGLE_OAUTH_CLIENT_SECRET_FILE": "",
-    "IMAGE_TAG": "local",
+    "IMAGE_TAG": "load-failure-fixture",
+    "INFRA_IMAGE_TAG": "load-failure-fixture",
     "INTERNAL_SERVICE_TOKEN": "load-failure-internal-token-at-least-32-characters",
     "JWT_SECRET": "load-failure-jwt-secret-at-least-32-characters",
     "LOAD_FAILURE_FIXTURE_MODE": "true",
@@ -288,15 +289,19 @@ def payload(event_id: str, sender_suffix: int) -> bytes:
         "object": "whatsapp_business_account",
         "entry": [
             {
-                "id": "synthetic-waba",
+                "id": SYNTHETIC_COMPOSE_ENV["META_TEST_SENDER_WABA_ID"],
                 "changes": [
                     {
                         "field": "messages",
                         "value": {
                             "messaging_product": "whatsapp",
                             "metadata": {
-                                "display_phone_number": "15550000000",
-                                "phone_number_id": "synthetic-phone-id",
+                                "display_phone_number": SYNTHETIC_COMPOSE_ENV[
+                                    "META_TEST_SENDER_DISPLAY_PHONE_E164"
+                                ].lstrip("+"),
+                                "phone_number_id": SYNTHETIC_COMPOSE_ENV[
+                                    "META_TEST_SENDER_PHONE_NUMBER_ID"
+                                ],
                             },
                             "messages": [
                                 {
@@ -509,23 +514,28 @@ def metrics(results: list[HttpResult], wall_time_ms: float) -> LoadMetrics:
 def event_state(project: ComposeProject, event_prefix: str) -> dict[str, Any]:
     return project.sql_json(
         """
+        WITH fixture_events AS (
+          SELECT id, processing_status FROM provider_webhook_events
+          WHERE payload #>> '{entry,0,changes,0,value,messages,0,id}'
+                LIKE :'event_prefix' || '%'
+        ), fixture_jobs AS (
+          SELECT j.* FROM async_jobs j
+          JOIN fixture_events e ON j.payload ->> 'event_id' = e.id
+          WHERE j.kind = 'whatsapp.process_webhook'
+        )
         SELECT json_build_object(
-          'events', (SELECT count(*) FROM provider_webhook_events
-                     WHERE external_event_id LIKE :'event_prefix' || '%'),
-          'processed_events', (SELECT count(*) FROM provider_webhook_events
-                     WHERE external_event_id LIKE :'event_prefix' || '%' AND processing_status = 'processed'),
-          'failed_events', (SELECT count(*) FROM provider_webhook_events
-                     WHERE external_event_id LIKE :'event_prefix' || '%' AND processing_status = 'failed'),
-          'jobs', (SELECT count(*) FROM async_jobs
-                   WHERE idempotency_key LIKE 'meta:' || :'event_prefix' || '%'),
-          'succeeded_jobs', (SELECT count(*) FROM async_jobs
-                   WHERE idempotency_key LIKE 'meta:' || :'event_prefix' || '%' AND status = 'succeeded'),
-          'dead_letter_jobs', (SELECT count(*) FROM async_jobs
-                   WHERE idempotency_key LIKE 'meta:' || :'event_prefix' || '%' AND status = 'dead_letter'),
-          'job_attempts', (SELECT coalesce(sum(attempts), 0) FROM async_jobs
-                   WHERE idempotency_key LIKE 'meta:' || :'event_prefix' || '%'),
+          'events', (SELECT count(*) FROM fixture_events),
+          'processed_events', (SELECT count(*) FROM fixture_events
+                               WHERE processing_status = 'processed'),
+          'failed_events', (SELECT count(*) FROM fixture_events
+                            WHERE processing_status = 'failed'),
+          'jobs', (SELECT count(*) FROM fixture_jobs),
+          'succeeded_jobs', (SELECT count(*) FROM fixture_jobs WHERE status = 'succeeded'),
+          'dead_letter_jobs', (SELECT count(*) FROM fixture_jobs WHERE status = 'dead_letter'),
+          'job_attempts', (SELECT coalesce(sum(attempts), 0) FROM fixture_jobs),
           'pending_outboxes', (SELECT count(*) FROM job_outbox o JOIN async_jobs j ON j.id = o.job_id
-                   WHERE j.idempotency_key LIKE 'meta:' || :'event_prefix' || '%' AND o.status = 'pending')
+                               JOIN fixture_events e ON j.payload ->> 'event_id' = e.id
+                               WHERE j.kind = 'whatsapp.process_webhook' AND o.status = 'pending')
         )::text;
         """,
         event_prefix=event_prefix,
@@ -534,6 +544,45 @@ def event_state(project: ComposeProject, event_prefix: str) -> dict[str, Any]:
 
 def exact_state(expected: dict[str, int]) -> Callable[[dict[str, Any]], bool]:
     return lambda state: all(state.get(key) == value for key, value in expected.items())
+
+
+def failure_state(project: ComposeProject, run_id: str) -> dict[str, Any]:
+    """Capture bounded, synthetic-run-only evidence before the stack is removed.
+
+    Job errors are the runtime's sanitized class/reason, never exception text or
+    request bodies. Follow the durable event/job relation rather than assuming
+    any encoding of the receiver-scoped external identifier.
+    """
+    return project.sql_json(
+        """
+        WITH fixture_events AS (
+          SELECT id, processing_status, arrival_sequence FROM provider_webhook_events
+          WHERE payload #>> '{entry,0,changes,0,value,messages,0,id}'
+                LIKE 'lf-' || :'event_prefix' || '-%'
+        ), fixture_jobs AS (
+          SELECT j.status, j.attempts, j.last_error FROM async_jobs j
+          JOIN fixture_events e ON j.payload ->> 'event_id' = e.id
+          WHERE j.kind = 'whatsapp.process_webhook'
+        )
+        SELECT json_build_object(
+          'events', (SELECT count(*) FROM fixture_events),
+          'unordered_events', (SELECT count(*) FROM fixture_events
+                               WHERE arrival_sequence IS NULL),
+          'event_statuses', (SELECT coalesce(json_object_agg(processing_status, n), '{}')
+                             FROM (SELECT processing_status, count(*) n FROM fixture_events
+                                   GROUP BY processing_status) s),
+          'job_statuses', (SELECT coalesce(json_object_agg(status, n), '{}')
+                           FROM (SELECT status, count(*) n FROM fixture_jobs GROUP BY status) s),
+          'job_errors', (SELECT coalesce(json_agg(s), '[]') FROM (
+                          SELECT status, attempts, left(last_error, 240) AS last_error,
+                                 count(*) AS jobs
+                          FROM fixture_jobs WHERE last_error IS NOT NULL
+                          GROUP BY status, attempts, last_error
+                          ORDER BY status, attempts, last_error LIMIT 10) s)
+        )::text;
+        """,
+        event_prefix=run_id,
+    )
 
 
 def seed_pressure_fixtures(project: ComposeProject, run_id: str) -> dict[str, dict[str, str]]:
@@ -1434,6 +1483,11 @@ def main() -> int:
     finally:
         if not (args.keep and succeeded):
             if not succeeded:
+                try:
+                    evidence = failure_state(project, run_id)
+                except (DrillFailure, subprocess.CalledProcessError):
+                    evidence = {"status": "unavailable"}
+                print("Fixture database failure evidence: " + json.dumps(evidence), file=sys.stderr)
                 diagnostics = project.run(
                     "logs",
                     "--no-color",

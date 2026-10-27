@@ -30,6 +30,7 @@ from app.db.models import (
     HermesProfile,
     ResearchEvent,
     Tenant,
+    TenantMembership,
     User,
 )
 from app.providers.bumpa import (
@@ -324,7 +325,7 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
         order_number="STRUCT-1",
         status="paid",
         payment_status="paid",
-        currency_code=None,
+        currency_code="NGN",
         total_amount=Decimal("44"),
         order_date=datetime(2026, 7, 10, tzinfo=UTC),
         payload={
@@ -463,9 +464,9 @@ def test_sync_persists_canonical_metrics_and_deep_redacted_structured_orders(
 
         assert metric is not None
         assert metric.canonical_payload["groups"][0]["rows"][0]["label"] == "Useful Product"
-        assert stored_order.currency_code is None
+        assert stored_order.currency_code == "NGN"
         assert stored_order.shipping_amount == Decimal("4.5")
-        assert stored_order.tax_amount is None
+        assert stored_order.tax_amount == Decimal("1")
         assert stored_order.raw_payload["customer_details"] == "[REDACTED]"
         assert item is not None
         assert item.product_id == "nested-product-7"
@@ -1415,6 +1416,9 @@ def test_accepted_partial_persists_quality_and_hermes_gets_one_safe_usable_snaps
         user = User(name="Owner", primary_phone_e164="+2348000000999")
         db.add_all((tenant, user))
         db.flush()
+        db.add(
+            TenantMembership(tenant_id=tenant.id, user_id=user.id, role="owner", status="active")
+        )
         connection = BumpaConnection(
             tenant_id=tenant.id,
             encrypted_api_key=FieldCipher(field_key).encrypt(private_bumpa_key),

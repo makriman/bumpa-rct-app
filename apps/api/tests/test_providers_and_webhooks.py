@@ -6,6 +6,7 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.crypto import FieldCipher
 from app.db.models import (
     AgentMessage,
@@ -19,6 +20,7 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.providers.redaction import parse_money, redact_order_payload, redact_text
 from app.services.research_events import research_event_key
+from app.services.whatsapp_webhook_ingress import scoped_event_id
 
 
 def test_money_redaction_and_field_encryption() -> None:
@@ -154,7 +156,8 @@ def test_whatsapp_replay_lookup_is_tenant_scoped(client: TestClient) -> None:
         event_b = db.scalar(
             select(WebhookEvent).where(
                 WebhookEvent.provider == "whatsapp",
-                WebhookEvent.external_event_id == shared_external_id,
+                WebhookEvent.external_event_id
+                == scoped_event_id(json.loads(body), lane=get_settings().app_env),
             )
         )
         assert event_b is not None
@@ -176,15 +179,24 @@ def test_whatsapp_replay_lookup_is_tenant_scoped(client: TestClient) -> None:
         )
         delivered_b = db.scalar(
             select(WhatsappMessage).where(
-                WhatsappMessage.idempotency_key
-                == "whatsapp:" + hashlib.sha256(f"{event_b.id}\0agent-reply".encode()).hexdigest(),
+                WhatsappMessage.tenant_id == tenant_b_id,
+                WhatsappMessage.direction == "outbound",
+                WhatsappMessage.status == "sent",
             )
         )
         assert outbound_b is not None and delivered_b is not None
         assert delivered_b.tenant_id == tenant_b_id
         assert delivered_b.phone_e164 == "+2348012345679"
         assert delivered_b.direction == "outbound"
-        assert delivered_b.text_body == outbound_b.content
+        from app.services.whatsapp import _text_effect_keys
+
+        effect_keys = _text_effect_keys(event_b.id, "agent-reply", outbound_b.content)
+        delivered_parts = [
+            db.scalar(select(WhatsappMessage).where(WhatsappMessage.idempotency_key == key))
+            for key in effect_keys
+        ]
+        assert all(part and part.tenant_id == tenant_b_id for part in delivered_parts)
+        assert "".join(part.text_body for part in delivered_parts) == outbound_b.content
         assert private_response not in delivered_b.text_body
 
 

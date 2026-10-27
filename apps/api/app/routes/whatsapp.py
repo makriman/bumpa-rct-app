@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import Settings, get_settings
 from app.services.whatsapp import acknowledge_inbound_receipts
+from app.services.whatsapp_calls import forward_call_webhook, split_call_changes
 from app.services.whatsapp_webhook_ingress import (
     InlineWebhookProcessingError,
     WebhookClaimConflict,
@@ -61,9 +62,19 @@ async def receive_webhook(
     if not isinstance(decoded, dict):
         raise HTTPException(status_code=400, detail="Invalid webhook payload")
     payload: dict[str, Any] = decoded
+    try:
+        has_calls, message_payload = split_call_changes(payload)
+    except (TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid webhook payload") from None
+    if has_calls:
+        await forward_call_webhook(raw, signature or "", settings)
+        payload = message_payload
+        if not payload["entry"]:
+            return {"status": "accepted", "event_type": "calls"}
+        raw = json.dumps(payload, separators=(",", ":")).encode()
 
     try:
-        claimed = await run_in_threadpool(claim_webhook_events, payload, raw)
+        claimed = await run_in_threadpool(claim_webhook_events, payload, raw, settings)
     except WebhookClaimConflict:
         raise HTTPException(status_code=409, detail="Webhook event could not be claimed") from None
 

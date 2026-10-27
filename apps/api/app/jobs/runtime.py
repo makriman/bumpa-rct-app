@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -22,6 +26,107 @@ JobHandler = Callable[[Session, AsyncJob], JobResult]
 
 class PermanentJobError(RuntimeError):
     """A safe, non-retriable failure that should move a job to the dead letter state."""
+
+
+class JobDeferredError(RuntimeError):
+    """The work is eligible later; waiting must not consume its retry budget."""
+
+    def __init__(
+        self, reason: str = "Job is waiting for earlier work", *, delay_seconds: float = 1
+    ):
+        super().__init__(reason)
+        if not math.isfinite(delay_seconds) or not 0 < delay_seconds <= 3600:
+            raise ValueError("Job deferral must be between zero and one hour")
+        self.delay_seconds = delay_seconds
+
+
+class JobLeaseLostError(RuntimeError):
+    """The current execution no longer owns its exact, unexpired claim."""
+
+
+@dataclass(frozen=True, slots=True)
+class JobFence:
+    job_id: str
+    worker_id: str
+    claim_epoch: int
+    stale_lock_seconds: int
+    _invalid: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
+
+    @property
+    def invalid(self) -> bool:
+        return self._invalid.is_set()
+
+    def invalidate(self) -> None:
+        self._invalid.set()
+
+
+_current_job_fence: ContextVar[JobFence | None] = ContextVar("current_job_fence", default=None)
+
+
+def current_job_fence() -> JobFence | None:
+    return _current_job_fence.get()
+
+
+@contextmanager
+def bind_job_fence(fence: JobFence) -> Iterator[None]:
+    token = _current_job_fence.set(fence)
+    try:
+        yield
+    finally:
+        _current_job_fence.reset(token)
+
+
+def assert_job_lease(
+    session: Session,
+    *,
+    job_id: str,
+    claim_epoch: int,
+    stale_lock_seconds: int,
+    worker_id: str | None = None,
+) -> None:
+    """Lock and verify a persisted claim before an application effect.
+
+    Keep this transaction open through the effect's durable result commit. The
+    row lock prevents concurrent scheduler recovery during that boundary.
+    Persisted run capabilities may supply the epoch without an in-process fence.
+    """
+    job = session.scalar(
+        select(AsyncJob)
+        .where(AsyncJob.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        not job
+        or job.status != "running"
+        or job.claim_epoch != claim_epoch
+        or (worker_id is not None and job.locked_by != worker_id)
+        or not job.locked_by
+        or job.locked_at is None
+        or claim_epoch < 1
+        or stale_lock_seconds <= 0
+        or _as_utc(job.locked_at) <= utcnow() - timedelta(seconds=stale_lock_seconds)
+    ):
+        raise JobLeaseLostError("Job lease is no longer owned by this execution")
+
+
+def assert_current_job_lease(session: Session) -> None:
+    fence = current_job_fence()
+    if fence is None:
+        return
+    if fence.invalid:
+        raise JobLeaseLostError("Job lease renewal was lost")
+    try:
+        assert_job_lease(
+            session,
+            job_id=fence.job_id,
+            worker_id=fence.worker_id,
+            claim_epoch=fence.claim_epoch,
+            stale_lock_seconds=fence.stale_lock_seconds,
+        )
+    except JobLeaseLostError:
+        fence.invalidate()
+        raise
 
 
 @dataclass(frozen=True)
@@ -284,39 +389,75 @@ def dispatch_due_jobs(session: Session, wake_queue: RedisWakeQueue, *, limit: in
 
 
 def claim_job(session: Session, job_id: str, worker_id: str) -> AsyncJob | None:
-    job = session.scalar(
-        select(AsyncJob).where(AsyncJob.id == job_id).with_for_update(skip_locked=True)
+    now = utcnow()
+    candidate = session.scalar(
+        select(AsyncJob.id)
+        .where(
+            AsyncJob.id == job_id,
+            AsyncJob.status.in_(("pending", "queued", "retry")),
+            AsyncJob.available_at <= now,
+        )
+        .with_for_update(skip_locked=True)
     )
-    if not job or job.status not in {"pending", "queued", "retry"}:
+    if candidate is None:
         session.rollback()
         return None
-    if _as_utc(job.available_at) > utcnow():
+    # A single conditional update fences duplicate wake-ups even on SQLite,
+    # where SELECT FOR UPDATE is ignored. Every admission gets a new epoch,
+    # including a restarted worker reusing the same worker identifier.
+    job = session.scalar(
+        update(AsyncJob)
+        .where(
+            AsyncJob.id == job_id,
+            AsyncJob.status.in_(("pending", "queued", "retry")),
+            AsyncJob.available_at <= now,
+        )
+        .values(
+            status="running",
+            attempts=AsyncJob.attempts + 1,
+            claim_epoch=AsyncJob.claim_epoch + 1,
+            locked_at=now,
+            locked_by=worker_id,
+            last_error=None,
+        )
+        .returning(AsyncJob)
+        .execution_options(synchronize_session=False, populate_existing=True)
+    )
+    if not job:
         session.rollback()
         return None
-    job.status = "running"
-    job.attempts += 1
-    job.locked_at = utcnow()
-    job.locked_by = worker_id
-    job.last_error = None
     session.commit()
     return job
 
 
-def renew_job_lease(session: Session, job_id: str, worker_id: str) -> bool:
+def renew_job_lease(
+    session: Session,
+    job_id: str,
+    worker_id: str,
+    *,
+    claim_epoch: int | None = None,
+    stale_lock_seconds: int | None = None,
+) -> bool:
     """Renew a running job only while this exact worker still owns its lease.
 
     The conditional update is the worker's fencing check. If a scheduler has
     already recovered the job, or another worker has claimed it, a late renewal
     cannot extend the replacement worker's lease.
     """
-    renewed_job_id = session.scalar(
-        update(AsyncJob)
-        .where(
-            AsyncJob.id == job_id,
-            AsyncJob.status == "running",
-            AsyncJob.locked_by == worker_id,
+    now = utcnow()
+    statement = update(AsyncJob).where(
+        AsyncJob.id == job_id,
+        AsyncJob.status == "running",
+        AsyncJob.locked_by == worker_id,
+    )
+    if claim_epoch is not None:
+        statement = statement.where(AsyncJob.claim_epoch == claim_epoch)
+    if stale_lock_seconds is not None:
+        statement = statement.where(
+            AsyncJob.locked_at > now - timedelta(seconds=stale_lock_seconds)
         )
-        .values(locked_at=utcnow())
+    renewed_job_id = session.scalar(
+        statement.values(locked_at=now)
         .returning(AsyncJob.id)
         .execution_options(synchronize_session=False)
     )
@@ -324,11 +465,19 @@ def renew_job_lease(session: Session, job_id: str, worker_id: str) -> bool:
     return renewed_job_id == job_id
 
 
-def complete_job(session: Session, job_id: str, result: JobResult, *, worker_id: str) -> None:
-    job = session.scalar(select(AsyncJob).where(AsyncJob.id == job_id).with_for_update())
-    if not job or job.status != "running" or job.locked_by != worker_id:
+def complete_job(
+    session: Session,
+    job_id: str,
+    result: JobResult,
+    *,
+    worker_id: str,
+    claim_epoch: int | None = None,
+) -> None:
+    job = _locked_job(session, job_id)
+    if not _owns_job(job, worker_id=worker_id, claim_epoch=claim_epoch):
         session.rollback()
-        raise RuntimeError("Job lease is no longer owned by this worker")
+        raise JobLeaseLostError("Job lease is no longer owned by this worker")
+    assert job is not None
     job.status = "succeeded"
     job.result = result
     job.finished_at = utcnow()
@@ -344,13 +493,14 @@ def fail_job(
     config: AsyncRuntimeConfig,
     *,
     worker_id: str,
+    claim_epoch: int | None = None,
     permanent: bool = False,
 ) -> str:
-    job = session.scalar(select(AsyncJob).where(AsyncJob.id == job_id).with_for_update())
+    job = _locked_job(session, job_id)
     if not job:
         session.rollback()
         return "missing"
-    if job.status != "running" or job.locked_by != worker_id:
+    if not _owns_job(job, worker_id=worker_id, claim_epoch=claim_epoch):
         session.rollback()
         return "lease_lost"
     job.last_error = _safe_error(error, "job execution failed")
@@ -387,6 +537,60 @@ def fail_job(
     return job.status
 
 
+def defer_job(
+    session: Session,
+    job_id: str,
+    error: JobDeferredError,
+    *,
+    worker_id: str,
+    claim_epoch: int | None = None,
+) -> str:
+    """Return an owned claim to the durable outbox without spending an attempt."""
+    job = _locked_job(session, job_id)
+    if not job:
+        session.rollback()
+        return "missing"
+    if not _owns_job(job, worker_id=worker_id, claim_epoch=claim_epoch):
+        session.rollback()
+        return "lease_lost"
+    due = utcnow() + timedelta(seconds=error.delay_seconds)
+    job.status = "retry"
+    job.attempts = max(0, job.attempts - 1)
+    job.available_at = due
+    job.locked_at = None
+    job.locked_by = None
+    job.finished_at = None
+    job.last_error = "JobDeferredError: execution deferred"
+    outbox = session.scalar(select(JobOutbox).where(JobOutbox.job_id == job.id))
+    if not outbox:
+        outbox = JobOutbox(tenant_id=job.tenant_id, job_id=job.id)
+        session.add(outbox)
+    outbox.status = "pending"
+    outbox.available_at = due
+    outbox.dispatched_at = None
+    outbox.last_error = None
+    session.commit()
+    return "deferred"
+
+
+def _locked_job(session: Session, job_id: str) -> AsyncJob | None:
+    return session.scalar(
+        select(AsyncJob)
+        .where(AsyncJob.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _owns_job(job: AsyncJob | None, *, worker_id: str, claim_epoch: int | None) -> bool:
+    return bool(
+        job
+        and job.status == "running"
+        and job.locked_by == worker_id
+        and (claim_epoch is None or job.claim_epoch == claim_epoch)
+    )
+
+
 def recover_stale_jobs(session: Session, config: AsyncRuntimeConfig) -> int:
     cutoff = utcnow() - timedelta(seconds=config.stale_lock_seconds)
     jobs = list(
@@ -395,6 +599,7 @@ def recover_stale_jobs(session: Session, config: AsyncRuntimeConfig) -> int:
             .where(AsyncJob.status == "running", AsyncJob.locked_at < cutoff)
             .order_by(AsyncJob.locked_at)
             .with_for_update(skip_locked=True)
+            .execution_options(populate_existing=True)
             .limit(config.dispatch_batch_size)
         ).all()
     )

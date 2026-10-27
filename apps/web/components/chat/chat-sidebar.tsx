@@ -13,8 +13,8 @@ import {
 } from "@phosphor-icons/react";
 import Link from "next/link";
 import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
-import { trapTabKey } from "@bumpabestie/web-foundation";
+import { useEffect, useRef, useState, type RefObject } from "react";
+import { focusableElements } from "@bumpabestie/web-foundation";
 import type { ConversationSummary } from "@/lib/chat-state";
 import { groupConversations } from "@/lib/chat-state";
 
@@ -26,6 +26,7 @@ type ChatSidebarProps = {
   hasMore: boolean;
   loading: boolean;
   mobileOpen: boolean;
+  mobileTriggerRef?: RefObject<HTMLButtonElement>;
   onCloseMobile: () => void;
   onLoadMore: () => void;
   onLogout: () => void;
@@ -43,6 +44,7 @@ export function ChatSidebar({
   hasMore,
   loading,
   mobileOpen,
+  mobileTriggerRef,
   onCloseMobile,
   onLoadMore,
   onLogout,
@@ -54,7 +56,12 @@ export function ChatSidebar({
   const groups = groupConversations(conversations);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
+  const closeMobileRef = useRef(onCloseMobile);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
+
+  useEffect(() => {
+    closeMobileRef.current = onCloseMobile;
+  }, [onCloseMobile]);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 820px)");
@@ -68,6 +75,7 @@ export function ChatSidebar({
     if (!mobileOpen || !isMobileViewport) return;
 
     const previouslyFocused = document.activeElement;
+    const trigger = mobileTriggerRef?.current;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     closeButtonRef.current?.focus();
@@ -75,19 +83,34 @@ export function ChatSidebar({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onCloseMobile();
+        closeMobileRef.current();
         return;
       }
-      trapTabKey(event, sidebarRef.current);
+      if (event.key !== "Tab") return;
+      const focusable = focusableElements(sidebarRef.current).filter(
+        (element) => element.getClientRects().length > 0,
+      );
+      if (!focusable.length) return;
+      // Mobile browsers may skip links during native Tab navigation. Cycle the
+      // rendered controls explicitly so neither direction leaves the drawer.
+      const index = focusable.indexOf(document.activeElement as HTMLElement);
+      const next = event.shiftKey
+        ? index <= 0
+          ? focusable.length - 1
+          : index - 1
+        : (index + 1) % focusable.length;
+      event.preventDefault();
+      focusable[next].focus();
     };
 
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.body.style.overflow = previousOverflow;
-      if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
+      const restoreTarget = trigger ?? previouslyFocused;
+      if (restoreTarget instanceof HTMLElement) restoreTarget.focus();
     };
-  }, [isMobileViewport, mobileOpen, onCloseMobile]);
+  }, [isMobileViewport, mobileOpen, mobileTriggerRef]);
 
   return (
     <>

@@ -38,6 +38,7 @@ def generate_and_queue_image(
         settings,
         action_context_token,
         expected_tenant_id=tenant_id,
+        db=db,
     )
     try:
         result = SandboxClient(settings).generate_image(
@@ -64,6 +65,7 @@ def generate_and_queue_image(
         user_id=context.user_id,
         conversation_id=context.conversation_id,
         agent_message_id=context.initiating_message_id,
+        execution_run_id=context.execution_run_id,
         channel=context.channel,
         media_type="image",
         mime_type=mime_type,
@@ -103,7 +105,19 @@ def queue_sandbox_file(
         settings,
         action_context_token,
         expected_tenant_id=tenant_id,
+        db=db,
     )
+    from app.db.models import Conversation
+
+    conversation = db.get(Conversation, context.conversation_id)
+    if (
+        not conversation
+        or not conversation.provider_session_key
+        or workspace != conversation.provider_session_key
+    ):
+        raise GeneratedMediaError(
+            "This file workspace does not belong to the current conversation."
+        )
     safe_filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename.strip())[:200]
     if not safe_filename or safe_filename in {".", ".."}:
         raise GeneratedMediaError("The outbound filename is invalid.")
@@ -138,6 +152,7 @@ def queue_sandbox_file(
         user_id=context.user_id,
         conversation_id=context.conversation_id,
         agent_message_id=context.initiating_message_id,
+        execution_run_id=context.execution_run_id,
         channel=context.channel,
         media_type=media_type,
         mime_type=mime_type,
@@ -215,6 +230,7 @@ def _store_media(
     user_id: str,
     conversation_id: str,
     agent_message_id: str | None,
+    execution_run_id: str | None,
     channel: str,
     media_type: str,
     mime_type: str,
@@ -243,6 +259,7 @@ def _store_media(
             user_id=user_id,
             conversation_id=conversation_id,
             agent_message_id=agent_message_id,
+            execution_run_id=execution_run_id,
             channel=channel,
             media_type=media_type,
             mime_type=mime_type,

@@ -8,12 +8,15 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.models import WebhookEvent
 from app.db.session import SessionLocal, set_security_context
 from app.jobs.runtime import enqueue_job
+from app.services.conversation_scope import receiver_scope
+from app.services.ingress_ordering import allocate_arrival
 from app.services.whatsapp import (
     extract_delivery_status,
+    extract_inbound_sender,
     extract_message,
     process_inbox_event,
     split_inbox_events,
@@ -37,7 +40,9 @@ class ClaimedWebhookEvent:
     terminal_duplicate: bool
 
 
-def claim_webhook_events(payload: dict[str, Any], raw: bytes) -> tuple[ClaimedWebhookEvent, ...]:
+def claim_webhook_events(
+    payload: dict[str, Any], raw: bytes, settings: Settings | None = None
+) -> tuple[ClaimedWebhookEvent, ...]:
     """Atomically persist inbox events and their durable outbox jobs.
 
     This function owns its SQLAlchemy session and must be invoked from a worker
@@ -47,11 +52,12 @@ def claim_webhook_events(payload: dict[str, Any], raw: bytes) -> tuple[ClaimedWe
     rolled back together.
     """
 
+    settings = settings or get_settings()
     with SessionLocal.begin() as session:
         set_security_context(session, privileged=True)
         _ensure_physical_outer_transaction(session)
         return tuple(
-            _claim_event(session, item_payload, raw, fallback_key)
+            _claim_event(session, item_payload, raw, fallback_key, settings.app_env)
             for item_payload, fallback_key in split_inbox_events(payload)
         )
 
@@ -86,16 +92,40 @@ def _claim_event(
     item_payload: dict[str, Any],
     raw: bytes,
     fallback_key: str,
+    lane: str,
 ) -> ClaimedWebhookEvent:
-    message = extract_message(item_payload)
-    delivery = extract_delivery_status(item_payload)
-    external_id = _event_id(raw, message, delivery, fallback_key=fallback_key)
+    external_id = scoped_event_id(item_payload, lane=lane, raw=raw, fallback_key=fallback_key)
     event = session.scalar(
         select(WebhookEvent).where(
             WebhookEvent.provider == "whatsapp",
             WebhookEvent.external_event_id == external_id,
         )
     )
+    if event is None:
+        raw_id = _event_id(
+            raw,
+            extract_message(item_payload),
+            extract_delivery_status(item_payload),
+            fallback_key=fallback_key,
+        )
+        legacy = session.scalar(
+            select(WebhookEvent).where(
+                WebhookEvent.provider == "whatsapp", WebhookEvent.external_event_id == raw_id
+            )
+        )
+        if legacy is not None:
+            old_sender = extract_inbound_sender(legacy.payload)
+            new_sender = extract_inbound_sender(item_payload)
+            old_message = extract_message(legacy.payload) or {}
+            new_message = extract_message(item_payload) or {}
+            if old_sender == new_sender and old_message.get("from") == new_message.get("from"):
+                if legacy.processing_status in {"processed", "ignored"}:
+                    return ClaimedWebhookEvent(
+                        event_id=legacy.id, job_created=False, terminal_duplicate=True
+                    )
+                raise WebhookClaimConflict("Legacy unresolved receipt requires reconciliation")
+            if old_sender is None:
+                raise WebhookClaimConflict("Legacy receiver provenance is unavailable")
     if not event:
         event = WebhookEvent(
             provider="whatsapp",
@@ -105,6 +135,7 @@ def _claim_event(
         )
         try:
             with session.begin_nested():
+                allocate_arrival(session, event, lane=lane, payload=item_payload)
                 session.add(event)
                 session.flush()
         except IntegrityError:
@@ -146,6 +177,16 @@ def _ensure_physical_outer_transaction(session: Session) -> None:
 
     if session.get_bind().dialect.name == "sqlite":
         session.execute(text("BEGIN"))
+
+
+def scoped_event_id(
+    payload: dict[str, Any], *, lane: str, raw: bytes = b"", fallback_key: str = "root"
+) -> str:
+    scope = receiver_scope(lane, extract_inbound_sender(payload))
+    external = _event_id(
+        raw, extract_message(payload), extract_delivery_status(payload), fallback_key=fallback_key
+    )
+    return "wa1_" + hashlib.sha256(f"{scope}\0{external}".encode()).hexdigest()
 
 
 def _event_id(

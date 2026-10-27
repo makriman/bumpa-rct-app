@@ -1377,6 +1377,24 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/v1/settings/proactive-insights": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get Proactive Settings */
+    get: operations["get_proactive_settings_v1_settings_proactive_insights_get"];
+    /** Put Proactive Settings */
+    put: operations["put_proactive_settings_v1_settings_proactive_insights_put"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/v1/settings/profile": {
     parameters: {
       query?: never;
@@ -2477,6 +2495,35 @@ export interface components {
       status: string;
       /** User Id */
       user_id: string;
+    };
+    /** ProactiveSettingsUpdate */
+    ProactiveSettingsUpdate: {
+      /**
+       * Cadence
+       * @enum {string}
+       */
+      cadence: "daily" | "weekly";
+      /** Expected Revision */
+      expected_revision: number;
+      /**
+       * Local Hour
+       * @default 8
+       */
+      local_hour: number;
+      /** Phone Identity Id */
+      phone_identity_id?: string | null;
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: "active" | "paused";
+      /** Timezone */
+      timezone?: string | null;
+      /**
+       * Weekday
+       * @default 0
+       */
+      weekday: number;
     };
     /** ProfileUpdate */
     ProfileUpdate: {
@@ -6014,6 +6061,82 @@ export interface operations {
           [name: string]: unknown;
         };
         content?: never;
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  get_proactive_settings_v1_settings_proactive_insights_get: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HTTPValidationError"];
+        };
+      };
+    };
+  };
+  put_proactive_settings_v1_settings_proactive_insights_put: {
+    parameters: {
+      query?: never;
+      header?: {
+        "X-Tenant-ID"?: string | null;
+        authorization?: string | null;
+      };
+      path?: never;
+      cookie?: {
+        bb_session?: string | null;
+      };
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ProactiveSettingsUpdate"];
+      };
+    };
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": {
+            [key: string]: unknown;
+          };
+        };
       };
       /** @description Validation Error */
       422: {

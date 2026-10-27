@@ -63,6 +63,9 @@ jobs:
           - name: api
             dockerfile: apps/api/Dockerfile
             target: ""
+          - name: voice
+            dockerfile: apps/api/Dockerfile.voice
+            target: ""
           - name: web
             dockerfile: apps/web/Dockerfile
             target: ""

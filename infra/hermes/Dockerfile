@@ -128,6 +128,12 @@ RUN find /opt/hermes -type d -name node_modules -prune -exec rm -rf '{}' + \
 COPY --chmod=0555 infra/hermes/entrypoint.sh /usr/local/bin/bumpabestie-hermes-entrypoint
 COPY --chmod=0555 infra/hermes/import-profiles.sh /usr/local/bin/bumpabestie-hermes-import
 COPY --chmod=0444 infra/hermes/control_server.py /usr/local/bin/bumpabestie-hermes-control.py
+COPY --chmod=0444 infra/hermes/apply_context_overlay.py /tmp/apply_context_overlay.py
+RUN /opt/hermes/.venv/bin/python /tmp/apply_context_overlay.py /opt/hermes/agent/turn_context.py /opt/hermes/gateway/platforms/api_server_runs.py /opt/hermes/agent/system_prompt.py /opt/hermes/agent/agent_init.py /opt/hermes/gateway/run_bootstrap.py \
+    && rm /tmp/apply_context_overlay.py
+COPY --chmod=0444 infra/hermes/patch_speech_compat.py /tmp/patch_speech_compat.py
+RUN /opt/hermes/.venv/bin/python /tmp/patch_speech_compat.py && rm /tmp/patch_speech_compat.py
+LABEL io.bumpabestie.canonical-context-contract="v1"
 COPY --chmod=0555 infra/hermes/control-run /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/run
 COPY --chmod=0444 infra/hermes/control-type /etc/s6-overlay/s6-rc.d/bumpabestie-hermes-control/type
 COPY --chmod=0444 infra/hermes/control-user /etc/s6-overlay/s6-rc.d/user/contents.d/bumpabestie-hermes-control

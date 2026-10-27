@@ -565,6 +565,42 @@ class Conversation(IdMixin, TimestampMixin, Base):
     title: Mapped[str | None] = mapped_column(String(200))
     provider_session_id: Mapped[str | None] = mapped_column(String(160))
     provider_session_key: Mapped[str | None] = mapped_column(String(160))
+    # Existing rows migrate to generation0 and remain quarantined until reviewed.
+    context_generation: Mapped[int] = mapped_column(Integer, default=1, server_default="0")
+    receiver_waba_id: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    receiver_phone_id: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    environment_lane: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    active_run_id: Mapped[str | None] = mapped_column(String(36))
+    pending_utterance: Mapped[JsonDict] = mapped_column(JSON, default=dict, server_default="{}")
+
+
+class AgentExecutionRun(IdMixin, TimestampMixin, Base):
+    __tablename__ = "agent_execution_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','completed','failed','expired','reconciling','unknown')",
+            name="ck_agent_execution_run_status",
+        ),
+        Index("ix_execution_run_tenant_conversation", "tenant_id", "conversation_id"),
+    )
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    initiating_message_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="CASCADE")
+    )
+    actor_identity_id: Mapped[str | None] = mapped_column(String(36))
+    provider_run_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    context_digest: Mapped[str | None] = mapped_column(String(64))
+    request_snapshots_encrypted: Mapped[str | None] = mapped_column(Text)
+    reconcile_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    output_message_id: Mapped[str | None] = mapped_column(String(36))
+    delivery_effect_keys: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
+    job_id: Mapped[str | None] = mapped_column(String(36))
+    job_claim_epoch: Mapped[int | None] = mapped_column(Integer)
+    job_stale_lock_seconds: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="running")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AgentMessage(IdMixin, Base):
@@ -580,7 +616,9 @@ class AgentMessage(IdMixin, Base):
         ),
         UniqueConstraint(
             "tenant_id",
+            "user_id",
             "channel",
+            "event_scope",
             "external_message_id",
             name="uq_agent_messages_tenant_channel_external_message_id",
         ),
@@ -599,9 +637,13 @@ class AgentMessage(IdMixin, Base):
     direction: Mapped[str] = mapped_column(String(24))
     content: Mapped[str] = mapped_column(Text)
     content_parts: Mapped[list[JsonDict]] = mapped_column(JSON, default=list)
+    initiating_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="SET NULL"), index=True
+    )
     reply_to_external_message_id: Mapped[str | None] = mapped_column(String(160))
     media_metadata: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     redacted_content: Mapped[str | None] = mapped_column(Text)
+    event_scope: Mapped[str] = mapped_column(String(64), default="", server_default="")
     external_message_id: Mapped[str | None] = mapped_column(String(160))
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -675,6 +717,8 @@ class PendingAgentAction(IdMixin, TimestampMixin, Base):
     action_result: Mapped[JsonDict | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(24), default="pending")
     idempotency_key: Mapped[str] = mapped_column(String(160))
+    authorization_revision: Mapped[str | None] = mapped_column(String(64))
+    approval_binding: Mapped[JsonDict] = mapped_column(JSON, default=dict, server_default="{}")
     confirmation_token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -726,12 +770,14 @@ class WhatsappMessage(IdMixin, Base):
             "direction IN ('inbound', 'outbound')",
             name="ck_whatsapp_messages_direction",
         ),
+        UniqueConstraint("receiver_scope", "meta_message_id", name="uq_whatsapp_receiver_message"),
     )
 
     tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"))
     user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
-    meta_message_id: Mapped[str | None] = mapped_column(String(160), unique=True, index=True)
+    meta_message_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    receiver_scope: Mapped[str] = mapped_column(String(64), default="", server_default="")
     wa_id: Mapped[str | None] = mapped_column(String(40))
     phone_e164: Mapped[str | None] = mapped_column(String(20))
     direction: Mapped[str] = mapped_column(String(24))
@@ -747,7 +793,16 @@ class WhatsappMessage(IdMixin, Base):
 
 class WhatsappDeliveryEvent(IdMixin, Base):
     __tablename__ = "whatsapp_delivery_events"
-    __table_args__ = (UniqueConstraint("meta_message_id", "status", "event_timestamp"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "receiver_scope",
+            "meta_message_id",
+            "status",
+            "event_timestamp",
+            name="uq_whatsapp_receiver_delivery",
+        ),
+    )
+    receiver_scope: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
     whatsapp_message_id: Mapped[str | None] = mapped_column(
         ForeignKey("whatsapp_messages.id", ondelete="CASCADE")
@@ -761,8 +816,13 @@ class WhatsappDeliveryEvent(IdMixin, Base):
 
 class WebhookEvent(IdMixin, Base):
     __tablename__ = "provider_webhook_events"
-    __table_args__ = (UniqueConstraint("provider", "external_event_id"),)
+    __table_args__ = (
+        UniqueConstraint("provider", "external_event_id"),
+        UniqueConstraint("ordering_scope", "arrival_sequence", name="uq_webhook_arrival_sequence"),
+    )
 
+    ordering_scope: Mapped[str | None] = mapped_column(String(64), index=True)
+    arrival_sequence: Mapped[int | None] = mapped_column(BigInteger)
     provider: Mapped[str] = mapped_column(String(24))
     external_event_id: Mapped[str] = mapped_column(String(160))
     signature_valid: Mapped[bool] = mapped_column(Boolean)
@@ -902,6 +962,9 @@ class GeneratedAgentMedia(IdMixin, TimestampMixin, Base):
     checksum_sha256: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24), default="pending")
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_execution_runs.id", ondelete="SET NULL"), index=True
+    )
 
 
 class McpConnection(IdMixin, TimestampMixin, Base):
@@ -1027,6 +1090,7 @@ class AsyncJob(IdMixin, TimestampMixin, Base):
     payload: Mapped[JsonDict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(24), default="pending")
     idempotency_key: Mapped[str] = mapped_column(String(200))
+    claim_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, default=5)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -1068,3 +1132,73 @@ class UsageEvent(IdMixin, Base):
     units: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     event_metadata: Mapped[JsonDict] = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IngressStream(TimestampMixin, Base):
+    __tablename__ = "ingress_streams"
+    scope_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    next_sequence: Mapped[int] = mapped_column(BigInteger, default=1)
+
+
+class ScopedAgentMemory(IdMixin, TimestampMixin, Base):
+    __tablename__ = "scoped_agent_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "owner_user_id", "scope", "memory_key", name="uq_scoped_memory_owner_key"
+        ),
+        CheckConstraint("scope IN ('private','shared')", name="ck_scoped_memory_scope"),
+        CheckConstraint(
+            "status IN ('active','pending_review','deleted')", name="ck_scoped_memory_status"
+        ),
+        CheckConstraint("revision > 0", name="ck_scoped_memory_revision"),
+    )
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    scope: Mapped[str] = mapped_column(String(24))
+    memory_key: Mapped[str] = mapped_column(String(120))
+    content: Mapped[str] = mapped_column(Text)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    source_kind: Mapped[str] = mapped_column(String(24), default="member_statement")
+    source_message_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="RESTRICT")
+    )
+    source_run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_execution_runs.id", ondelete="RESTRICT")
+    )
+    reviewed_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_messages.id", ondelete="RESTRICT")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposal_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pending_review: Mapped[JsonDict] = mapped_column(JSON, default=dict, server_default="{}")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProactiveSubscription(IdMixin, TimestampMixin, Base):
+    __tablename__ = "proactive_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "cadence", name="uq_proactive_user_cadence"),
+        CheckConstraint("cadence IN ('daily','weekly')", name="ck_proactive_cadence"),
+        CheckConstraint("status IN ('active','paused')", name="ck_proactive_status"),
+        CheckConstraint(
+            "local_hour >= 0 AND local_hour < 24 AND weekday >= 0 AND weekday < 7",
+            name="ck_proactive_schedule",
+        ),
+    )
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    phone_identity_id: Mapped[str] = mapped_column(
+        ForeignKey("phone_identities.id", ondelete="CASCADE")
+    )
+    cadence: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), default="paused")
+    timezone: Mapped[str] = mapped_column(String(64))
+    local_hour: Mapped[int] = mapped_column(Integer, default=8)
+    weekday: Mapped[int] = mapped_column(Integer, default=0)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    subscribed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
