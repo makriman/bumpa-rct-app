@@ -39,6 +39,7 @@ export function ChatWorkspace({
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const mobileSidebarTriggerRef = useRef<HTMLButtonElement>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const emptyChat = state.phase === "empty" && state.messages.length === 0;
   const onboarding = useBusinessOnboarding(emptyChat);
@@ -259,6 +260,7 @@ export function ChatWorkspace({
         hasMore={hasMore}
         loading={historyLoading}
         mobileOpen={mobileSidebarOpen}
+        mobileTriggerRef={mobileSidebarTriggerRef}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         onLoadMore={() => void loadMore()}
         onLogout={() => void logout()}
@@ -270,6 +272,7 @@ export function ChatWorkspace({
       <section className="bestie-chat" aria-label="Bumpa Bestie conversation">
         <header className="bestie-mobile-header">
           <button
+            ref={mobileSidebarTriggerRef}
             type="button"
             aria-label="Open conversation history"
             onClick={() => setMobileSidebarOpen(true)}
