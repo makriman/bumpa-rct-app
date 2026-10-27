@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_urlsafe
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -64,7 +64,7 @@ needs, while being clear that you are an AI and never overstating your authority
 - Treat customer and order information as sensitive.
 - External writes require an exact control-plane confirmation; never bypass it.
 - Use sandbox tools for terminal, code and files. Never claim access to the production host.
-- Use the current Hermes session ID as the sandbox workspace name.
+- Use only the current application workspace identifier supplied for this run.
 - To deliver a sandbox-created PDF/TXT/CSV/JSON document, image or MP4 video back to the user,
   call `queue_sandbox_file_for_delivery`; never paste base64 into the conversation.
 - Prefer practical, action-oriented guidance suitable for an SME and the current channel.
@@ -101,6 +101,11 @@ ziplock bags and paper bags.
 """.strip()
 
 DISABLED_SME_TOOLSETS = (
+    "memory",
+    "session_search",
+    "cronjob",
+    "kanban",
+    "delegation",
     "browser",
     "code_execution",
     "file",
@@ -389,6 +394,202 @@ class HermesClient:
         self._clock = clock
         self._breaker = breaker or _shared_breaker(settings)
 
+    def _respond_canonical(
+        self,
+        endpoint: HermesEndpoint,
+        *,
+        message: str,
+        business_context: str,
+        history: list[dict[str, str]] | None,
+        content_parts: list[dict[str, Any]] | None,
+        session_id: str | None,
+        session_key: str | None,
+        request_id: str | None,
+        on_admitted: Callable[[str], None] | None = None,
+        on_prepared: Callable[[dict[str, object]], None] | None = None,
+        channel: str | None = None,
+    ) -> HermesResult:
+        """App-visible rows are authoritative; native rows are execution/audit state.
+
+        Never send a native selector with an empty override: this pinned gateway
+        treats [] as absent and otherwise reloads its old native transcript.
+        Runtime instructions are typed separately from merchant dialogue.
+        """
+        self._validate_endpoint_identity(endpoint)
+        base_url = self._validated_base_url(endpoint.api_url)
+        started = self._clock()
+        self._breaker.before_request(base_url, started)
+        canonical = [
+            {"role": item["role"], "content": item["content"]}
+            for item in (history or [])[-self._settings.hermes_history_messages :]
+            if item.get("role") in {"user", "assistant"} and item.get("content")
+        ]
+        if len(business_context) > self._settings.hermes_max_context_chars + 12_000:
+            raise HermesInvalidResponse("Application context exceeds its bounded typed budget")
+        deadline = monotonic() + self._settings.hermes_read_timeout_seconds
+        instructions = SME_SYSTEM_POLICY + "\n\nCurrent application context:\n"
+        if channel == "whatsapp":
+            instructions += WHATSAPP_RESPONSE_POLICY + "\n\n"
+        instructions += business_context
+        payload: dict[str, object] = {
+            "model": endpoint.profile_name,
+            "input": [{"role": "user", "content": content_parts or message}],
+            "instructions": instructions,
+            "conversation_history": canonical,
+        }
+        headers = {
+            "Idempotency-Key": "bb_"
+            + hashlib.sha256((request_id or str(uuid4())).encode()).hexdigest()
+        }
+        # Deliberately no native affinity: compression recovery must not rehydrate
+        # another transcript. Stable file workspaces are application-scoped.
+        try:
+            result = self._canonical_run(
+                base_url,
+                endpoint.api_key,
+                payload,
+                headers,
+                on_admitted=on_admitted,
+                on_prepared=on_prepared,
+                deadline=deadline,
+            )
+            answer = str(result["output"]).strip()
+            usage = result.get("usage") or {}
+            required = _required_citation_count(message)
+            if required and _citation_count(answer) < required:
+                # This is internal repair, not a user-authored message in the ledger.
+                repair = {
+                    **payload,
+                    "instructions": instructions
+                    + "\nInternal citation repair; the draft was never shown to the merchant.\n"
+                    + _CITATION_REPAIR_PROMPT.format(required=required)
+                    + "\nUnverified candidate answer to repair:\n"
+                    + answer,
+                }
+                result = self._canonical_run(
+                    base_url,
+                    endpoint.api_key,
+                    repair,
+                    {**headers, "Idempotency-Key": headers["Idempotency-Key"] + "_citation"},
+                    on_admitted=on_admitted,
+                    on_prepared=on_prepared,
+                    deadline=deadline,
+                )
+                answer = str(result["output"]).strip()
+                repair_usage = result.get("usage") or {}
+                usage = {
+                    key: _safe_token_count(usage.get(key))
+                    + _safe_token_count(repair_usage.get(key))
+                    for key in (
+                        "input_tokens",
+                        "output_tokens",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                    )
+                }
+                if _citation_count(answer) < required:
+                    raise HermesInvalidResponse("Hermes omitted required external citations")
+        except HermesError as exc:
+            if exc.retryable:
+                self._breaker.failure(base_url, self._clock())
+            raise
+        self._breaker.success(base_url)
+        input_tokens = _safe_token_count(usage.get("input_tokens") or usage.get("prompt_tokens"))
+        output_tokens = _safe_token_count(
+            usage.get("output_tokens") or usage.get("completion_tokens")
+        )
+        return HermesResult(
+            content=answer,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=_safe_token_count(usage.get("total_tokens"))
+            or input_tokens + output_tokens,
+            latency_ms=max(0, int((self._clock() - started) * 1000)),
+            session_id=result.get("session_id"),
+            session_key=None,
+        )
+
+    def _canonical_run(
+        self,
+        base_url: str,
+        api_key: str,
+        payload: dict[str, object],
+        headers: dict[str, str],
+        *,
+        on_admitted: Callable[[str], None] | None = None,
+        on_prepared: Callable[[dict[str, object]], None] | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        deadline = deadline or monotonic() + self._settings.hermes_read_timeout_seconds
+        if monotonic() >= deadline:
+            raise HermesUnavailable("Hermes run exceeded the application deadline")
+        if on_prepared is not None:
+            on_prepared({"payload": payload, "headers": headers, "endpoint": base_url})
+        try:
+            admission = self._request(
+                "POST",
+                f"{base_url}/runs",
+                api_key,
+                json=payload,
+                extra_headers=headers,
+                budget_seconds=max(0.001, deadline - monotonic()),
+            )
+            admitted = admission.json()
+            run_id = admitted.get("run_id") if isinstance(admitted, dict) else None
+            if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id):
+                raise HermesInvalidResponse("Hermes returned an invalid run admission")
+            if admission.headers.get("X-Bumpa-Context-Contract") != "1":
+                self._stop_canonical_run(base_url, api_key, run_id)
+                raise HermesInvalidResponse("Hermes canonical context contract is unavailable")
+            if on_admitted is not None:
+                on_admitted(run_id)
+            while monotonic() < deadline:
+                status = self._request(
+                    "GET",
+                    f"{base_url}/runs/{run_id}",
+                    api_key,
+                    budget_seconds=max(0.001, deadline - monotonic()),
+                ).json()
+                if monotonic() >= deadline:
+                    self._stop_canonical_run(base_url, api_key, run_id)
+                    raise HermesUnavailable("Hermes run exceeded the application deadline")
+                if not isinstance(status, dict):
+                    raise HermesInvalidResponse("Hermes returned invalid run status")
+                if status.get("run_id") != run_id:
+                    raise HermesInvalidResponse("Hermes returned a different run identity")
+                state = status.get("status")
+                if state == "completed":
+                    if not isinstance(status.get("output"), str) or not status["output"].strip():
+                        raise HermesInvalidResponse("Hermes returned an empty run response")
+                    if not isinstance(status.get("usage", {}), dict):
+                        raise HermesInvalidResponse("Hermes returned invalid run usage")
+                    native = status.get("session_id")
+                    if native is not None and (not isinstance(native, str) or len(native) > 160):
+                        raise HermesInvalidResponse("Hermes returned invalid session identity")
+                    return status
+                if state not in {"queued", "running"}:
+                    if state == "waiting_for_approval":
+                        self._stop_canonical_run(base_url, api_key, run_id)
+                    raise HermesUpstreamFailure(
+                        "Hermes run did not complete; no success was recorded"
+                    )
+                sleep(min(0.2, max(0, deadline - monotonic())))
+            # Do not allow timed-out work to keep its application effect capability.
+            # The caller closes that durable run even if this best-effort stop fails.
+            self._stop_canonical_run(base_url, api_key, run_id)
+            raise HermesUnavailable("Hermes run exceeded the application deadline")
+        except (ValueError, KeyError, TypeError) as exc:
+            raise HermesInvalidResponse("Hermes returned invalid run data") from exc
+
+    def _stop_canonical_run(self, base_url: str, api_key: str, run_id: str) -> None:
+        try:
+            self._request(
+                "POST", f"{base_url}/runs/{run_id}/stop", api_key, json={}, budget_seconds=1.0
+            )
+        except HermesError:
+            pass
+
     def respond(
         self,
         endpoint: HermesEndpoint,
@@ -399,8 +600,25 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         session_key: str | None = None,
+        request_id: str | None = None,
+        on_admitted: Callable[[str], None] | None = None,
+        on_prepared: Callable[[dict[str, object]], None] | None = None,
         channel: str | None = None,
     ) -> HermesResult:
+        if self._settings.hermes_context_mode == "canonical_runs":
+            return self._respond_canonical(
+                endpoint,
+                message=message,
+                business_context=business_context,
+                history=history,
+                content_parts=content_parts,
+                session_id=session_id,
+                session_key=session_key,
+                request_id=request_id,
+                on_admitted=on_admitted,
+                on_prepared=on_prepared,
+                channel=channel,
+            )
         self._validate_endpoint_identity(endpoint)
         base_url = self._validated_base_url(endpoint.api_url)
         self._breaker.before_request(base_url, self._clock())
@@ -538,6 +756,9 @@ class HermesClient:
         content_parts: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         session_key: str | None = None,
+        request_id: str | None = None,
+        on_admitted: Callable[[str], None] | None = None,
+        on_prepared: Callable[[dict[str, object]], None] | None = None,
         channel: str | None = None,
     ) -> HermesResult:
         """Consume Hermes' bounded OpenAI-compatible SSE stream.
@@ -547,6 +768,23 @@ class HermesClient:
         forwarded as progress events.
         """
 
+        if self._settings.hermes_context_mode == "canonical_runs":
+            result = self._respond_canonical(
+                endpoint,
+                message=message,
+                business_context=business_context,
+                history=history,
+                content_parts=content_parts,
+                session_id=session_id,
+                session_key=session_key,
+                request_id=request_id,
+                on_admitted=on_admitted,
+                on_prepared=on_prepared,
+                channel=channel,
+            )
+            for delta in _message_deltas(result.content):
+                on_event("message.delta", {"delta": delta})
+            return result
         self._validate_endpoint_identity(endpoint)
         base_url = self._validated_base_url(endpoint.api_url)
         self._breaker.before_request(base_url, self._clock())
@@ -696,6 +934,17 @@ class HermesClient:
             session_key=response_session_key,
         )
 
+    def poll_run(self, endpoint: HermesEndpoint, run_id: str) -> dict[str, Any]:
+        self._validate_endpoint_identity(endpoint)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,160}", run_id):
+            raise HermesInvalidResponse("Invalid retained run identity")
+        data = self._request(
+            "GET", f"{self._validated_base_url(endpoint.api_url)}/runs/{run_id}", endpoint.api_key
+        ).json()
+        if not isinstance(data, dict):
+            raise HermesInvalidResponse("Invalid retained run status")
+        return data
+
     def readiness(self, endpoint: HermesEndpoint) -> HermesReadiness:
         self._validate_endpoint_identity(endpoint)
         base_url = self._validated_base_url(endpoint.api_url)
@@ -728,12 +977,14 @@ class HermesClient:
         *,
         json: dict[str, object] | None = None,
         extra_headers: dict[str, str] | None = None,
+        budget_seconds: float | None = None,
     ) -> httpx.Response:
+        budget = budget_seconds or self._settings.hermes_read_timeout_seconds
         timeout = httpx.Timeout(
-            connect=self._settings.hermes_connect_timeout_seconds,
-            read=self._settings.hermes_read_timeout_seconds,
-            write=self._settings.hermes_connect_timeout_seconds,
-            pool=self._settings.hermes_connect_timeout_seconds,
+            connect=min(self._settings.hermes_connect_timeout_seconds, budget),
+            read=min(self._settings.hermes_read_timeout_seconds, budget),
+            write=min(self._settings.hermes_connect_timeout_seconds, budget),
+            pool=min(self._settings.hermes_connect_timeout_seconds, budget),
         )
         try:
             with httpx.Client(
@@ -1131,6 +1382,17 @@ agent:
   pass_session_id: true
   disabled_toolsets:
 {disabled}
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  provider: none
+  nudge_interval: 0
+auxiliary:
+  background_review:
+    enabled: false
+skills:
+  creation_nudge_interval: 0
+  write_approval: true
 mcp_servers:
   bumpa_bestie:
     url: {settings.mcp_internal_base_url}

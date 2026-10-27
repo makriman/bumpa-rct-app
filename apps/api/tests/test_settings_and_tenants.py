@@ -200,8 +200,15 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
         assert connection is not None and other_connection is not None
         original_connection_freshness = connection.last_successful_sync_at
         original_boundary_revision = connection.boundary_revision
+        original_generations = (connection.sync_generation, connection.published_sync_generation)
+        other_original_generations = (
+            other_connection.sync_generation,
+            other_connection.published_sync_generation,
+        )
         connection.boundary_revision += 1
         current_boundary_revision = connection.boundary_revision
+        connection.sync_generation = connection.published_sync_generation = 2
+        other_connection.sync_generation = other_connection.published_sync_generation = 1
         connection.last_successful_sync_at = datetime(2029, 1, 1, tzinfo=UTC)
         db.add_all(
             [
@@ -210,6 +217,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
                     boundary_revision=current_boundary_revision,
+                    sync_generation=1,
                     status="success",
                     completion_quality="complete",
                     requested_from=date(2028, 1, 1),
@@ -217,13 +225,17 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     started_at=datetime(2028, 1, 1, tzinfo=UTC),
                     finished_at=datetime(2028, 1, 1, 0, 0, 5, tzinfo=UTC),
                     orders_availability="available",
-                    orders_count=1,
+                    orders_count=0,
+                    dataset_results={
+                        "_bumpa_order_publication": {"version": 1, "state": "complete"}
+                    },
                 ),
                 BumpaSyncRun(
                     id="settings-accepted-partial",
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
                     boundary_revision=current_boundary_revision,
+                    sync_generation=2,
                     status="partial",
                     completion_quality="accepted_partial",
                     partial_reason="profit_not_calculable",
@@ -232,7 +244,10 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     started_at=datetime(2028, 6, 1, tzinfo=UTC),
                     finished_at=datetime(2028, 6, 1, 0, 0, 5, tzinfo=UTC),
                     orders_availability="available",
-                    orders_count=1,
+                    orders_count=0,
+                    dataset_results={
+                        "_bumpa_order_publication": {"version": 1, "state": "complete"}
+                    },
                 ),
                 BumpaSyncRun(
                     id="settings-legacy",
@@ -251,6 +266,7 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     tenant_id=tenant_id,
                     bumpa_connection_id=connection.id,
                     boundary_revision=original_boundary_revision,
+                    sync_generation=1,
                     status="success",
                     completion_quality="complete",
                     requested_from=date(2031, 1, 1),
@@ -258,12 +274,17 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     started_at=datetime(2031, 1, 1, tzinfo=UTC),
                     finished_at=datetime(2031, 1, 1, 0, 0, 5, tzinfo=UTC),
                     orders_availability="available",
-                    orders_count=1,
+                    orders_count=0,
+                    dataset_results={
+                        "_bumpa_order_publication": {"version": 1, "state": "complete"}
+                    },
                 ),
                 BumpaSyncRun(
                     id="settings-other",
                     tenant_id=other_tenant_id,
                     bumpa_connection_id=other_connection.id,
+                    boundary_revision=other_connection.boundary_revision,
+                    sync_generation=1,
                     status="success",
                     completion_quality="complete",
                     requested_from=date(2030, 1, 1),
@@ -271,7 +292,10 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
                     started_at=datetime(2030, 1, 1, tzinfo=UTC),
                     finished_at=datetime(2030, 1, 1, 0, 0, 5, tzinfo=UTC),
                     orders_availability="available",
-                    orders_count=1,
+                    orders_count=0,
+                    dataset_results={
+                        "_bumpa_order_publication": {"version": 1, "state": "complete"}
+                    },
                 ),
             ]
         )
@@ -299,6 +323,15 @@ def test_bumpa_settings_freshness_is_latest_tenant_scoped_typed_usable_run(
             assert connection is not None
             connection.last_successful_sync_at = original_connection_freshness
             connection.boundary_revision = original_boundary_revision
+            connection.sync_generation, connection.published_sync_generation = original_generations
+            other_connection = db.scalar(
+                select(BumpaConnection).where(BumpaConnection.tenant_id == other_tenant_id)
+            )
+            assert other_connection is not None
+            (
+                other_connection.sync_generation,
+                other_connection.published_sync_generation,
+            ) = other_original_generations
             db.commit()
 
 

@@ -1,0 +1,4 @@
+
+# Preserve downloaded license and model-card bytes for their recorded hashes.
+docs/third-party-speech/** -whitespace
+tests/fixtures/HERMES-LICENSE -whitespace

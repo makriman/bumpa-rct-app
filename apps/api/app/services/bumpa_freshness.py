@@ -36,6 +36,10 @@ def usable_bumpa_sync_run_predicate() -> ColumnElement[bool]:
                 BumpaSyncRun.partial_reason == "profit_not_calculable",
                 BumpaSyncRun.orders_availability == "available",
                 BumpaSyncRun.orders_count.is_not(None),
+                BumpaSyncRun.dataset_results["_bumpa_order_publication"]["version"].as_integer()
+                == 1,
+                BumpaSyncRun.dataset_results["_bumpa_order_publication"]["state"].as_string()
+                == "complete",
             ),
         ),
     )
@@ -101,7 +105,7 @@ def latest_available_metrics(
     ).all()
     return {
         snapshot.metric_key: FreshMetric(snapshot=snapshot, refreshed_at=refreshed_at)
-        for snapshot, refreshed_at in rows
+        for snapshot, refreshed_at in (row._tuple() for row in rows)
         if refreshed_at is not None
     }
 

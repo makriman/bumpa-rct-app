@@ -28,6 +28,7 @@ from app.routes import (
     onboarding,
     research,
     settings,
+    settings_proactive,
     tenants,
     whatsapp,
 )
@@ -207,6 +208,7 @@ def create_app(*, settings_config: Settings | None = None) -> FastAPI:
         }
 
     for module in (
+        settings_proactive,
         auth,
         tenants,
         settings,

@@ -21,9 +21,11 @@ from app.db.models import (
     AsyncJob,
     BumpaConnection,
     BumpaMetricSnapshot,
+    BumpaOrder,
     BumpaSyncRun,
     HermesProfile,
     PhoneIdentity,
+    ProactiveSubscription,
     SystemError,
     Tenant,
     TenantMembership,
@@ -39,7 +41,7 @@ from app.services.operational_alerts import (
     deliver_operational_alert,
     discover_operational_alerts,
 )
-from app.services.proactive_insights import deliver_proactive_insight
+from app.services.proactive_insights import deliver_proactive_insight, update_subscription
 
 SessionLocal = sessionmaker()
 
@@ -66,6 +68,8 @@ def _settings(**overrides: object) -> Settings:
         "daily_insights_enabled": True,
         "weekly_insights_enabled": True,
         "meta_phone_number_id": "1234567890",
+        "meta_waba_id": "1234567891",
+        "meta_primary_sender_enabled": True,
         "meta_system_user_access_token": "x" * 40,
         "ops_alerts_enabled": False,
     }
@@ -114,11 +118,17 @@ def _fresh_sync(db, tenant: Tenant, *, finished_at: datetime) -> BumpaSyncRun:  
         scope_id="scope",
         provider="bumpa",
         status="active",
+        store_timezone=tenant.timezone,
+        store_currency="NGN",
+        sync_generation=1,
+        published_sync_generation=1,
     )
     run = BumpaSyncRun(
         id=new_id(),
         tenant_id=tenant.id,
         bumpa_connection_id=connection.id,
+        boundary_revision=1,
+        sync_generation=1,
         status="success",
         completion_quality="complete",
         partial_reason=None,
@@ -129,7 +139,7 @@ def _fresh_sync(db, tenant: Tenant, *, finished_at: datetime) -> BumpaSyncRun:  
         error=None,
         orders_availability="available",
         orders_count=7,
-        dataset_results={},
+        dataset_results={"_bumpa_order_publication": {"version": 1, "state": "complete"}},
     )
     snapshot = BumpaMetricSnapshot(
         id=new_id(),
@@ -146,8 +156,42 @@ def _fresh_sync(db, tenant: Tenant, *, finished_at: datetime) -> BumpaSyncRun:  
         availability="available",
     )
     db.add_all((connection, run, snapshot))
+    for index in range(7):
+        db.add(
+            BumpaOrder(
+                tenant_id=tenant.id,
+                bumpa_order_id=f"{tenant.id}-published-{index}",
+                order_date=datetime(2026, 7, 12, 12, tzinfo=UTC),
+                total_amount=Decimal("125000.50") if index == 0 else Decimal("0"),
+                currency_code="NGN",
+                raw_payload={"_bumpa_publication": {"sync_run_id": run.id, "state": "active"}},
+            )
+        )
     db.flush()
     return run
+
+
+def _subscribe(db, tenant, user, identity, cadence, settings):  # type: ignore[no-untyped-def]
+    update_subscription(
+        db,
+        tenant_id=tenant.id,
+        user_id=user.id,
+        cadence=cadence,
+        status="active",
+        expected_revision=0,
+        phone_identity_id=identity.id,
+        timezone=tenant.timezone,
+        local_hour=8,
+        weekday=0,
+        settings=settings,
+    )
+    return db.scalar(
+        select(ProactiveSubscription).where(
+            ProactiveSubscription.tenant_id == tenant.id,
+            ProactiveSubscription.user_id == user.id,
+            ProactiveSubscription.cadence == cadence,
+        )
+    )
 
 
 def test_scheduler_uses_tenant_timezone_and_idempotent_calendar_slots() -> None:
@@ -157,10 +201,13 @@ def test_scheduler_uses_tenant_timezone_and_idempotent_calendar_slots() -> None:
         weekly_insight_local_hour=8,
     )
     with SessionLocal() as db:
-        tenant, _, _ = _tenant_owner(
+        tenant, user, identity = _tenant_owner(
             db, slug=f"insight-schedule-{new_id()[:8]}", timezone="Asia/Kolkata"
         )
         now = datetime(2026, 7, 13, 3, 0, tzinfo=UTC)  # Monday 08:30 in India.
+        assert scheduler._ensure_proactive_insight_jobs(db, settings=settings, now=now) == 0
+        for cadence in ("daily", "weekly"):
+            _subscribe(db, tenant, user, identity, cadence, settings)
         assert scheduler._ensure_proactive_insight_jobs(db, settings=settings, now=now) == 2
         assert scheduler._ensure_proactive_insight_jobs(db, settings=settings, now=now) == 0
         jobs = db.scalars(
@@ -219,7 +266,7 @@ def test_scheduler_enqueues_one_store_local_bumpa_refresh_per_day() -> None:
         db.rollback()
 
 
-def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
+def test_insight_delivery_rechecks_subscription_opt_out_freshness_and_send_fence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     delivered: list[dict[str, object]] = []
@@ -236,7 +283,9 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
     settings = _settings(insight_max_freshness_hours=48)
     now = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
     with SessionLocal() as db:
-        tenant, _, identity = _tenant_owner(db, slug=f"insight-send-{new_id()[:8]}")
+        tenant, user, identity = _tenant_owner(db, slug=f"insight-send-{new_id()[:8]}")
+        daily = _subscribe(db, tenant, user, identity, "daily", settings)
+        weekly = _subscribe(db, tenant, user, identity, "weekly", settings)
         _fresh_sync(db, tenant, finished_at=now - timedelta(minutes=5))
 
         first = deliver_proactive_insight(
@@ -245,6 +294,8 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
             cadence="daily",
             slot="2026-07-13",
             settings=settings,
+            subscription_id=daily.id,
+            subscription_revision=daily.revision,
             now=now,
         )
         duplicate = deliver_proactive_insight(
@@ -253,6 +304,8 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
             cadence="daily",
             slot="2026-07-13",
             settings=settings,
+            subscription_id=daily.id,
+            subscription_revision=daily.revision,
             now=now,
         )
         assert first["sent"] == 1 and duplicate["already_sent"] == 1
@@ -260,7 +313,8 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
         serialized = json.dumps(delivered[0])
         assert tenant.name not in serialized
         assert identity.phone_e164 in str(delivered[0]["phone"])
-        assert "NGN 125,000.5" in serialized and "orders: 7" in serialized
+        assert "NGN 125,000.50" in serialized and "Orders: 7" in serialized
+        assert "2026-07-12 to 2026-07-12" in serialized
 
         identity.opt_out = True
         db.commit()
@@ -270,9 +324,11 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
             cadence="daily",
             slot="2026-07-14",
             settings=settings,
-            now=now,
+            subscription_id=daily.id,
+            subscription_revision=daily.revision,
+            now=now + timedelta(days=1),
         )
-        assert opted_out["status"] == "no_recipients" and len(delivered) == 1
+        assert opted_out["status"] == "ineligible" and len(delivered) == 1
 
         identity.opt_out = False
         tenant.research_consent_status = "withdrawn"
@@ -283,9 +339,12 @@ def test_insight_delivery_rechecks_consent_opt_out_freshness_and_send_fence(
             cadence="weekly",
             slot="2026-W29",
             settings=settings,
+            subscription_id=weekly.id,
+            subscription_revision=weekly.revision,
             now=now,
         )
-        assert withdrawn["status"] == "ineligible" and len(delivered) == 1
+        assert withdrawn["status"] == "sent" and len(delivered) == 2
+        assert "2026-07-06 to 2026-07-12" in json.dumps(delivered[1])
         db.rollback()
 
 
@@ -296,14 +355,18 @@ def test_stale_bumpa_evidence_never_reaches_meta(monkeypatch: pytest.MonkeyPatch
     )
     now = datetime(2026, 7, 13, 9, 0, tzinfo=UTC)
     with SessionLocal() as db:
-        tenant, _, _ = _tenant_owner(db, slug=f"insight-stale-{new_id()[:8]}")
+        settings = _settings(insight_max_freshness_hours=48)
+        tenant, user, identity = _tenant_owner(db, slug=f"insight-stale-{new_id()[:8]}")
+        daily = _subscribe(db, tenant, user, identity, "daily", settings)
         _fresh_sync(db, tenant, finished_at=now - timedelta(hours=49))
         result = deliver_proactive_insight(
             db,
             tenant_id=tenant.id,
             cadence="daily",
             slot="2026-07-13",
-            settings=_settings(insight_max_freshness_hours=48),
+            settings=settings,
+            subscription_id=daily.id,
+            subscription_revision=daily.revision,
             now=now,
         )
         assert result == {"status": "no_fresh_data", "cadence": "daily", "sent": 0}

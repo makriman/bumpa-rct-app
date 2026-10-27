@@ -35,7 +35,7 @@ from app.services.agent_actions import (
     confirmation_token,
     decide_pending_action,
 )
-from app.services.chat import data_freshness_at_message, handle_chat
+from app.services.chat import data_freshness_at_message, handle_chat, reply_for_input
 from app.services.generated_media import GeneratedMediaError, generated_media_path
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -96,21 +96,27 @@ def web_chat(
     assert principal.tenant is not None
     if payload.client_message_id:
         existing = db.scalar(
-            select(AgentMessage).where(
+            select(AgentMessage)
+            .join(Conversation, Conversation.id == AgentMessage.conversation_id)
+            .where(
                 AgentMessage.tenant_id == principal.tenant.id,
+                AgentMessage.user_id == principal.user.id,
+                Conversation.context_generation == 1,
+                Conversation.environment_lane == settings.app_env,
                 AgentMessage.channel == "web",
                 AgentMessage.external_message_id == payload.client_message_id,
             )
         )
+        if existing and (
+            (payload.conversation_id and existing.conversation_id != payload.conversation_id)
+            or existing.content != payload.message
+        ):
+            raise HTTPException(
+                status_code=409, detail="Client message ID was reused for a different request"
+            )
         if existing:
-            outbound = db.scalar(
-                select(AgentMessage)
-                .where(
-                    AgentMessage.conversation_id == existing.conversation_id,
-                    AgentMessage.direction == "outbound",
-                    AgentMessage.created_at >= existing.created_at,
-                )
-                .order_by(AgentMessage.created_at)
+            outbound = reply_for_input(
+                db, tenant_id=existing.tenant_id, user_id=principal.user.id, inbound_id=existing.id
             )
             if outbound:
                 return ChatResponse(
@@ -182,21 +188,27 @@ def web_chat_stream(
     cached: tuple[AgentMessage, AgentMessage] | None = None
     if payload.client_message_id:
         existing = db.scalar(
-            select(AgentMessage).where(
+            select(AgentMessage)
+            .join(Conversation, Conversation.id == AgentMessage.conversation_id)
+            .where(
                 AgentMessage.tenant_id == tenant.id,
+                AgentMessage.user_id == principal.user.id,
+                Conversation.context_generation == 1,
+                Conversation.environment_lane == settings.app_env,
                 AgentMessage.channel == "web",
                 AgentMessage.external_message_id == payload.client_message_id,
             )
         )
+        if existing and (
+            (payload.conversation_id and existing.conversation_id != payload.conversation_id)
+            or existing.content != payload.message
+        ):
+            raise HTTPException(
+                status_code=409, detail="Client message ID was reused for a different request"
+            )
         if existing:
-            outbound = db.scalar(
-                select(AgentMessage)
-                .where(
-                    AgentMessage.conversation_id == existing.conversation_id,
-                    AgentMessage.direction == "outbound",
-                    AgentMessage.created_at >= existing.created_at,
-                )
-                .order_by(AgentMessage.created_at)
+            outbound = reply_for_input(
+                db, tenant_id=existing.tenant_id, user_id=principal.user.id, inbound_id=existing.id
             )
             if outbound:
                 cached = (existing, outbound)
@@ -565,7 +577,7 @@ def conversation_page(
             updated_at=conversation.updated_at,
             last_message_preview=_message_preview(last_message),
         )
-        for conversation, last_message in page_rows
+        for conversation, last_message in (row._tuple() for row in page_rows)
     ]
     next_cursor = None
     if has_more and page_rows:

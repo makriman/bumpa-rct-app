@@ -70,7 +70,7 @@ for (const simulateFailure of [false, true]) {
     ).toBeVisible();
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-welcome-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-welcome.png"),
         fullPage: true,
       });
     await page.getByRole("button", { name: "Let’s start →" }).click();
@@ -104,7 +104,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-channels-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-channels.png"),
         fullPage: true,
       });
     await page.getByRole("button", { name: "Continue →", exact: true }).click();
@@ -147,7 +147,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-review-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-review.png"),
         fullPage: true,
       });
     await page
@@ -171,7 +171,7 @@ for (const simulateFailure of [false, true]) {
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     if (!simulateFailure)
       await page.screenshot({
-        path: `../../artifacts/onboarding-saved-${testInfo.project.name}.png`,
+        path: testInfo.outputPath("onboarding-saved.png"),
         fullPage: true,
       });
     expect(

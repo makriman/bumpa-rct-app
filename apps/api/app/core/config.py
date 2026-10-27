@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     whatsapp_progress_after_seconds: float = Field(default=8.0, ge=2.0, le=30.0)
     whatsapp_fifo_lock_seconds: int = Field(default=120, ge=30, le=900)
     whatsapp_fifo_wait_seconds: int = Field(default=10, ge=1, le=60)
+    whatsapp_calling_enabled: bool = False
+    whatsapp_call_max_seconds: int = Field(default=600, ge=30, le=1800)
+    whatsapp_call_max_concurrent: int = Field(default=1, ge=1, le=32)
+    whatsapp_call_silence_ms: int = Field(default=700, ge=300, le=2000)
+    whatsapp_call_turn_max_seconds: int = Field(default=20, ge=2, le=30)
+    whatsapp_call_ice_urls: str = ""
+    whatsapp_call_turn_username: str = ""
+    whatsapp_call_turn_credential: str = ""
     whatsapp_backend: Literal["mock", "disabled", "meta"] = "mock"
     bumpa_backend: Literal["mock", "disabled", "bumpa"] = "mock"
     agent_backend: Literal["mock", "disabled", "hermes"] = "mock"
@@ -186,6 +194,7 @@ class Settings(BaseSettings):
     hermes_max_response_bytes: int = Field(default=262_144, ge=4096, le=1_048_576)
     hermes_max_context_chars: int = Field(default=12_000, ge=1000, le=100_000)
     hermes_history_messages: int = Field(default=16, ge=2, le=40)
+    hermes_context_mode: Literal["canonical_runs", "legacy_native"] = "canonical_runs"
     hermes_temperature: float | None = Field(default=0.0, ge=0.0, le=1.0)
     hermes_circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
     hermes_circuit_recovery_seconds: float = Field(default=30.0, ge=1.0, le=600.0)
@@ -395,6 +404,33 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_insecure_production_defaults(self) -> Settings:
+        if self.whatsapp_calling_enabled and (
+            self.whatsapp_backend != "meta"
+            or self.agent_backend != "hermes"
+            or not self.whatsapp_speech_enabled
+            or not self.meta_primary_sender_enabled
+            or not self.meta_waba_id
+            or not self.meta_phone_number_id
+        ):
+            raise ValueError("Calling requires the primary Meta sender, Hermes, and speech")
+        if self.whatsapp_calling_enabled:
+            ice_urls = [
+                value.strip() for value in self.whatsapp_call_ice_urls.split(",") if value.strip()
+            ]
+            if any(
+                not re.fullmatch(
+                    r"(?:stun|turn|turns):[A-Za-z0-9.-]+:[0-9]{1,5}(?:\?transport=(?:udp|tcp))?",
+                    url,
+                )
+                for url in ice_urls
+            ):
+                raise ValueError("Calling ICE URLs must use stun/turn/turns with a host and port")
+            if self.app_env == "production" and (
+                not any(url.startswith(("turn:", "turns:")) for url in ice_urls)
+                or not self.whatsapp_call_turn_username
+                or not self.whatsapp_call_turn_credential
+            ):
+                raise ValueError("Production calling requires an authenticated TURN relay")
         self._validate_meta_test_sender_verification()
         self._validate_auth_login_mode()
         if self.app_env != "production":
@@ -402,6 +438,8 @@ class Settings(BaseSettings):
         if self.system_error_retention_days * 24 < self.ops_alert_scan_lookback_hours:
             raise ValueError("SYSTEM_ERROR_RETENTION_DAYS must cover OPS_ALERT_SCAN_LOOKBACK_HOURS")
         if self.app_env == "production":
+            if self.hermes_context_mode != "canonical_runs":
+                raise ValueError("Production requires canonical Hermes conversation history")
             if self.cookie_domain is not None:
                 raise ValueError(
                     "Production session cookies must remain host-only; "

@@ -4,16 +4,18 @@ import base64
 import json
 import re
 import time
+from collections.abc import Callable
 from email.message import EmailMessage
 from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.crypto import FieldCipher
-from app.db.models import McpConnection
+from app.db.models import McpConnection, McpToolPermission
 from app.providers.redaction import redact_text
 from app.schemas import McpProvider
 from app.services.home_assistant import (
@@ -43,12 +45,14 @@ def execute_connector_read(
     tool_name: str,
     tool_input: dict[str, Any],
     transport: httpx.BaseTransport | None = None,
+    before_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    connection = authorize_mcp_tool(
+    connection = _authorize_locked(
         db,
         tenant_id=tenant_id,
         connection_id=connection_id,
         tool_name=tool_name,
+        write=False,
     )
     return _execute(
         db,
@@ -58,6 +62,7 @@ def execute_connector_read(
         tool_input=tool_input,
         write=False,
         transport=transport,
+        before_dispatch=before_dispatch,
     )
 
 
@@ -71,13 +76,14 @@ def execute_connector_write(
     tool_input: dict[str, Any],
     idempotency_key: str,
     transport: httpx.BaseTransport | None = None,
+    before_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    connection = authorize_mcp_tool(
+    connection = _authorize_locked(
         db,
         tenant_id=tenant_id,
         connection_id=connection_id,
         tool_name=tool_name,
-        write_confirmed=True,
+        write=True,
     )
     return _execute(
         db,
@@ -88,6 +94,7 @@ def execute_connector_write(
         write=True,
         idempotency_key=idempotency_key,
         transport=transport,
+        before_dispatch=before_dispatch,
     )
 
 
@@ -101,8 +108,9 @@ def _execute(
     write: bool,
     idempotency_key: str | None = None,
     transport: httpx.BaseTransport | None = None,
+    before_dispatch: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    resources = set(connection.allowed_resources)
+    connection_id, tenant_id, provider = connection.id, connection.tenant_id, connection.provider
     timeout = httpx.Timeout(settings.mcp_oauth_request_timeout_seconds)
     with httpx.Client(
         timeout=timeout,
@@ -118,6 +126,24 @@ def _execute(
                 )
             except HomeAssistantConnectionError as exc:
                 raise ConnectorExecutionError(str(exc)) from exc
+            acquired_credentials = connection.encrypted_credentials
+            if before_dispatch is not None:
+                before_dispatch()
+            connection = _authorize_locked(
+                db,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                tool_name=tool_name,
+                write=write,
+            )
+            if (
+                connection.provider != provider
+                or connection.encrypted_credentials != acquired_credentials
+            ):
+                raise ConnectorExecutionError(
+                    "Connector authorization changed; review a fresh preview."
+                )
+            resources = set(connection.allowed_resources)
             return _home_assistant(
                 client,
                 credentials.access_token,
@@ -126,7 +152,23 @@ def _execute(
                 tool_name,
                 tool_input,
             )
-        token = _access_token(db, connection, settings, transport=transport)
+        token = _access_token(
+            db, connection, settings, transport=transport, allow_refresh=not write
+        )
+        acquired_credentials = connection.encrypted_credentials
+        if before_dispatch is not None:
+            before_dispatch()
+        connection = _authorize_locked(
+            db, tenant_id=tenant_id, connection_id=connection_id, tool_name=tool_name, write=write
+        )
+        if (
+            connection.provider != provider
+            or connection.encrypted_credentials != acquired_credentials
+        ):
+            raise ConnectorExecutionError(
+                "Connector authorization changed; review a fresh preview."
+            )
+        resources = set(connection.allowed_resources)
         if connection.provider == "google_drive":
             return _drive(client, token, resources, tool_name, tool_input, idempotency_key)
         if connection.provider == "google_sheets":
@@ -146,6 +188,41 @@ def _execute(
             )
     kind = "write" if write else "read"
     raise ConnectorExecutionError(f"The configured connector does not support this {kind}.")
+
+
+def _authorize_locked(
+    db: Session,
+    *,
+    tenant_id: str,
+    connection_id: str,
+    tool_name: str,
+    write: bool,
+) -> McpConnection:
+    # Refresh objects already held by a Principal or an earlier authorization
+    # query; SELECT alone may otherwise return their stale identity-map values.
+    db.scalar(
+        select(McpConnection)
+        .where(McpConnection.id == connection_id, McpConnection.tenant_id == tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    db.scalar(
+        select(McpToolPermission)
+        .where(
+            McpToolPermission.tenant_id == tenant_id,
+            McpToolPermission.mcp_connection_id == connection_id,
+            McpToolPermission.tool_name == tool_name,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return authorize_mcp_tool(
+        db,
+        tenant_id=tenant_id,
+        connection_id=connection_id,
+        tool_name=tool_name,
+        write_confirmed=write,
+    )
 
 
 def _home_assistant(
@@ -694,6 +771,7 @@ def _access_token(
     settings: Settings,
     *,
     transport: httpx.BaseTransport | None,
+    allow_refresh: bool = True,
 ) -> str:
     try:
         bundle = json.loads(
@@ -711,6 +789,10 @@ def _access_token(
         and isinstance(obtained_at, int)
         and obtained_at + expires_in <= int(time.time()) + 60
     ):
+        if not allow_refresh:
+            raise ConnectorExecutionError(
+                "Connector authorization needs renewal; reconnect and review a fresh preview."
+            )
         try:
             bundle = refresh_access_token(
                 settings=settings,

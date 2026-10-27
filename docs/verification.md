@@ -8,8 +8,12 @@ For requirement coverage and the distinct statuses `implemented-tested`,
 `production-baseline-disabled`, `deferred-provider` and `external-blocked`, see
 `docs/build-plan-compliance.md`.
 
-The canonical redacted production transcript for the current application release
-is [`docs/release-evidence-e383877.md`](release-evidence-e383877.md).
+The latest security deployment and remaining-risk inventory are recorded in
+[the October 23 security verification](security-verification-2026-10-23.md),
+following [the October 22 security update](security-update-2026-10-22.md). They supersede
+the historical image inventory below without claiming a new signed CI release.
+The historical application release transcript is
+[`docs/release-evidence-e383877.md`](release-evidence-e383877.md).
 
 ## Evidence rules
 
@@ -28,6 +32,29 @@ is [`docs/release-evidence-e383877.md`](release-evidence-e383877.md).
   The current readiness route queries Postgres and, when the async runtime is
   enabled, requires Redis plus fresh worker/scheduler heartbeats. It reports
   provider selectors but does not call Meta, Bumpa or Hermes.
+
+## WhatsApp inbound calling — 2026-09-16
+
+- **Local:** optional signed Meta call routing, primary-sender allowlist, approved
+  caller authorization/revocation, tenant-scoped Hermes/Whisper/Piper adapter,
+  isolated call conversations and saved transcripts, Opus WebRTC audio,
+  interruption, hangup, duration/concurrency bounds, Redis replay tombstones,
+  and opt-in Compose/CI image wiring are implemented.
+- **Evidence:** 30 calling tests pass, including real two-way loopback WebRTC
+  transport with synthetic speech/provider fixtures. Full backend: 627 passed,
+  1 skipped, 85.16% branch-aware coverage. Strict mypy, Ruff, 101 host operational
+  tests, shell syntax, and rendered production voice Compose assertions pass.
+  PostgreSQL voice authorization was added to the existing non-bypass-role CI
+  RLS script; it has not been executed locally against PostgreSQL.
+- **Quality gate:** `make quality` passed through backend/frontend checks,
+  builds, Lighthouse budgets and bundle isolation, then stopped in the production
+  contract because the Docker daemon was unavailable. Container build/runtime,
+  production contract completion and live Meta/TURN/Hermes speech remain pending.
+- **Not live:** calling is off by default. No Meta settings, production account,
+  deployment, or real phone call was changed/tested. Activation requires an
+  eligible primary Meta number, calls webhook subscription, authenticated TURN,
+  matching deployed images, and a real approved-caller test. Follow
+  [the rollout guide](whatsapp-calling.md).
 
 ## Current ledger
 

@@ -33,6 +33,8 @@ from app.providers.contracts import BumpaSnapshot, ProviderDataset, ProviderOrde
 from app.routes.auth import request_otp, verify_code
 from app.schemas import OtpRequest, OtpVerify
 from app.services import bumpa as bumpa_service
+from app.voice.backend import Caller, CallerDenied
+from app.voice.backend import _check as check_voice_caller
 
 FixtureRow = TypeVar("FixtureRow")
 SYNC_COMPAT_TENANT_ID = "sync-compat-tenant"
@@ -1319,6 +1321,54 @@ def _fixture_pair(
                 created_at=now,
             )
         )
+        execution = add(
+            models.AgentExecutionRun(
+                id=f"execution-{suffix}",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation.id,
+                initiating_message_id=message.id,
+                status="completed",
+                expires_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
+            models.ScopedAgentMemory(
+                id=f"scoped-memory-{suffix}",
+                tenant_id=tenant_id,
+                owner_user_id=user_id,
+                scope="private",
+                memory_key="synthetic-preference",
+                content="Synthetic tenant-scoped memory",
+                revision=1,
+                status="active",
+                source_kind="member_statement",
+                source_message_id=message.id,
+                source_run_id=execution.id,
+                pending_review={},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        add(
+            models.ProactiveSubscription(
+                id=f"proactive-sub-{suffix}",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                phone_identity_id=f"phone-{suffix}",
+                cadence="weekly",
+                status="paused",
+                timezone="UTC",
+                local_hour=8,
+                weekday=0,
+                revision=1,
+                paused_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
         add(
             models.AgentToolCall(
                 id=f"tool-call-{suffix}",
@@ -1709,6 +1759,27 @@ def _exercise_role(
             raise AssertionError(
                 "No-context application session resolved a tenant-mapped login identity"
             )
+
+    # Exercise the actual voice authorization queries with a role that cannot
+    # bypass RLS, including a forged caller binding to the other tenant.
+    with session_factory() as session:
+        connection = session.connection()
+        _set_context(connection, tenant_a)
+        connection.execute(
+            text(
+                "UPDATE hermes_profiles SET provider = 'hermes', api_port = 64991, "
+                "profile_path = '/rls/voice' WHERE tenant_id = :tenant"
+            ),
+            {"tenant": tenant_a},
+        )
+        check_voice_caller(session, Caller(tenant_a, user_ids[0], mapped_phone))
+        try:
+            check_voice_caller(session, Caller(tenant_b, user_ids[1], mapped_phone))
+        except CallerDenied:
+            pass
+        else:
+            raise AssertionError("Voice authorization crossed a tenant RLS boundary")
+        session.rollback()
 
     auth_settings = Settings(
         app_env="test",

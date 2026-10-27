@@ -26,7 +26,6 @@ from app.db.models import (
 from app.services import chat as chat_service
 from app.services.agent_actions import (
     AgentActionError,
-    create_action_context_token,
     decode_action_context_token,
 )
 from app.services.business_onboarding import (
@@ -40,6 +39,7 @@ from app.services.business_onboarding import (
     view,
 )
 from app.services.chat import build_business_context
+from tests.run_fixture import active_context
 
 ANSWERS: dict[str, Any] = {
     "offering": "Women’s shoes and repairs",
@@ -361,7 +361,8 @@ def test_profile_update_exact_confirmation_scope_expiry_and_visibility(
     )
     db.add(inbound)
     db.flush()
-    token = create_action_context_token(
+    token = active_context(
+        db,
         get_settings(),
         tenant_id=tenant.id,
         user_id=user.id,

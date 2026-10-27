@@ -74,6 +74,14 @@ x-app-environment: &app-environment
   WHATSAPP_PRIMARY_PILOT_ENABLED: ${WHATSAPP_PRIMARY_PILOT_ENABLED:-false}
   WHATSAPP_MULTIMODAL_ENABLED: ${WHATSAPP_MULTIMODAL_ENABLED:-false}
   WHATSAPP_SPEECH_ENABLED: ${WHATSAPP_SPEECH_ENABLED:-false}
+  WHATSAPP_CALLING_ENABLED: ${WHATSAPP_CALLING_ENABLED:-false}
+  WHATSAPP_CALL_MAX_SECONDS: ${WHATSAPP_CALL_MAX_SECONDS:-600}
+  WHATSAPP_CALL_MAX_CONCURRENT: ${WHATSAPP_CALL_MAX_CONCURRENT:-4}
+  WHATSAPP_CALL_SILENCE_MS: ${WHATSAPP_CALL_SILENCE_MS:-700}
+  WHATSAPP_CALL_TURN_MAX_SECONDS: ${WHATSAPP_CALL_TURN_MAX_SECONDS:-20}
+  WHATSAPP_CALL_ICE_URLS: ${WHATSAPP_CALL_ICE_URLS:-}
+  WHATSAPP_CALL_TURN_USERNAME: ${WHATSAPP_CALL_TURN_USERNAME:-}
+  WHATSAPP_CALL_TURN_CREDENTIAL: ${WHATSAPP_CALL_TURN_CREDENTIAL:-}
   WHATSAPP_PROGRESS_ENABLED: ${WHATSAPP_PROGRESS_ENABLED:-false}
   WHATSAPP_MEDIA_MAX_BYTES: ${WHATSAPP_MEDIA_MAX_BYTES:-16777216}
   WHATSAPP_VIDEO_MAX_SECONDS: ${WHATSAPP_VIDEO_MAX_SECONDS:-180}
@@ -358,6 +366,21 @@ services:
       - exports_data:/app/.data/exports
       - hermes_staging_data:/data/hermes
 
+  voice:
+    <<: *api-service
+    profiles: ["voice"]
+    image: ${VOICE_IMAGE:-bumpabestie-voice:local}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.voice
+    command: ["uvicorn", "app.voice.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1", "--no-access-log"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    stop_grace_period: 6m
+
   worker:
     <<: *api-service
     command: ["python", "-m", "app.jobs.worker"]
@@ -426,6 +449,7 @@ services:
       MANAGED_IMAGE_GENERATION_ENABLED: "false"
       WHATSAPP_PRIMARY_PILOT_ENABLED: "false"
       WHATSAPP_MULTIMODAL_ENABLED: "false"
+      WHATSAPP_CALLING_ENABLED: "false"
       WHATSAPP_SPEECH_ENABLED: "false"
       WHATSAPP_PROGRESS_ENABLED: "false"
       PROACTIVE_INSIGHTS_ENABLED: "false"

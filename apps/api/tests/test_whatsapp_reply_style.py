@@ -40,7 +40,7 @@ def test_reply_style_is_channel_specific_on_new_and_resumed_requests(
         )
 
     client = HermesClient(
-        Settings(app_env="test", hermes_profile_root=tmp_path),
+        Settings(app_env="test", hermes_profile_root=tmp_path, hermes_context_mode="legacy_native"),
         transport=httpx.MockTransport(handler),
     )
     options = {
@@ -61,4 +61,45 @@ def test_reply_style_is_channel_specific_on_new_and_resumed_requests(
         channel == "whatsapp"
     )
     assert ("Earlier answer" in str(messages)) == (session_id is None)
+    assert result.content == answer.strip()
+
+
+@pytest.mark.parametrize("channel", [None, "web", "whatsapp"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_canonical_runs_keep_channel_style_typed_and_never_reuse_native_history(channel, stream):
+    payloads = []
+    answer = "A complete requested answer. " * 100
+
+    def handler(request):
+        if request.method == "POST":
+            payloads.append(json.loads(request.content))
+            return httpx.Response(
+                202, headers={"X-Bumpa-Context-Contract": "1"}, json={"run_id": "style_run"}
+            )
+        return httpx.Response(
+            200, json={"run_id": "style_run", "status": "completed", "output": answer}
+        )
+
+    client = HermesClient(
+        Settings(_env_file=None, app_env="test"), transport=httpx.MockTransport(handler)
+    )
+    endpoint = HermesEndpoint("synthetic-profile", "http://hermes:8700/v1", "synthetic-profile-key")
+    options = dict(
+        message="Write a full answer",
+        business_context="Bounded current facts",
+        channel=channel,
+        history=[{"role": "assistant", "content": "Earlier accepted answer"}],
+        session_id="old-native",
+        session_key="old-affinity",
+    )
+    result = (
+        client.respond_stream(endpoint, **options, on_event=lambda *_: None)
+        if stream
+        else client.respond(endpoint, **options)
+    )
+    payload = payloads[0]
+    assert (WHATSAPP_RESPONSE_POLICY in payload["instructions"]) == (channel == "whatsapp")
+    assert payload["conversation_history"] == options["history"]
+    assert payload["input"] == [{"role": "user", "content": "Write a full answer"}]
+    assert "session_id" not in payload and "previous_response_id" not in payload
     assert result.content == answer.strip()

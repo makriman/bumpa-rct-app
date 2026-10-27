@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+set +x
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -31,6 +32,8 @@ previous_boundary_valid=0
 previous_release_file_sha256=""
 validated_preserved_digest=""
 automatic_rollback_available=0
+previous_canonical_contract_compatible=0
+existing_app_role_verified=0
 previous_revision=""
 previous_image_tag=""
 previous_infra_image_tag=""
@@ -167,6 +170,19 @@ value_for() {
   local key="$1"
   awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' .env.production
 }
+
+verify_app_role_compatibility() {
+  existing_app_role_verified=0
+  if APP_POSTGRES_PASSWORD="$(value_for APP_POSTGRES_PASSWORD)" \
+    DATABASE_URL="$(value_for DATABASE_URL)" \
+    MIGRATION_DATABASE_URL="$(value_for MIGRATION_DATABASE_URL)" \
+    ./scripts/verify_existing_app_role.sh "$1" "$postgres_container" \
+      "$(value_for POSTGRES_USER)" "$(value_for POSTGRES_DB)"; then
+    existing_app_role_verified=1
+    return 0
+  fi
+  return 2
+}
 for key in \
   DEPLOY_REF IMAGE_TAG INFRA_IMAGE_TAG \
   API_IMAGE WEB_IMAGE ADMIN_WEB_IMAGE RESEARCH_WEB_IMAGE CADDY_IMAGE POSTGRES_IMAGE BACKUP_IMAGE HERMES_IMAGE SECRETS_DIR \
@@ -293,10 +309,19 @@ done
 
 compose=(docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml)
 application_writer_services=(api worker scheduler)
+# Voice has an opt-in, separately pinned rollout. Do not allow an old gateway
+# to keep writing across migrations or bypass the recorded rollback inventory.
+if [[ -n "$("${compose[@]}" --profile voice ps --status running -q voice)" ]]; then
+  echo "Drain and stop the optional voice service before promoting the application; see docs/whatsapp-calling.md" >&2
+  exit 2
+fi
+application_writer_services+=(voice)
+application_writer_services+=(hermes)
 
 assert_application_writers_stopped() {
-  local service container_id state
+  local service container_id container_ids state
   for service in "${application_writer_services[@]}"; do
+    container_ids="$("${compose[@]}" --profile voice ps --all -q "$service")" || return 1
     while IFS= read -r container_id; do
       [[ -n "$container_id" ]] || continue
       state="$(docker inspect --format '{{.State.Status}}' "$container_id")"
@@ -304,7 +329,7 @@ assert_application_writers_stopped() {
         echo "Refusing to cross the migration boundary while $service is $state" >&2
         return 1
       fi
-    done < <("${compose[@]}" ps --all -q "$service")
+    done <<<"$container_ids"
   done
 }
 
@@ -375,6 +400,74 @@ running_image() {
       return 1
     fi
     printf '%s\n' "$immutable_ref"
+  fi
+}
+
+# A revision label alone does not prove that an image observes the generation,
+# receiver and lane fences added by migrations 0020/0021. This immutable-image
+# contract is deliberately required for both the API (also worker/scheduler)
+# and Hermes; an absent, unknown or unreadable label must fail closed.
+canonical_image_supports_contract() {
+  local image="$1" service="$2" contract
+  if [[ ! "$image" =~ @sha256:[a-f0-9]{64}$ ]]; then
+    echo "$service canonical contract requires an immutable image digest" >&2
+    return 1
+  fi
+  contract="$(docker image inspect \
+    --format '{{index .Config.Labels "io.bumpabestie.canonical-context-contract"}}' \
+    "$image")" || return 1
+  if [[ "$contract" != "v1" ]]; then
+    echo "$service image does not declare canonical context contract v1" >&2
+    return 1
+  fi
+}
+
+previous_images_support_canonical_contract() {
+  canonical_image_supports_contract "$previous_api_image" previous-api \
+    && canonical_image_supports_contract "$previous_worker_image" previous-worker \
+    && canonical_image_supports_contract "$previous_scheduler_image" previous-scheduler \
+    && canonical_image_supports_contract "$previous_hermes_image" previous-hermes
+}
+
+# Contain every application writer and provider egress process on a failed
+# forward promotion. Container removal does not remove PostgreSQL/Redis,
+# durable inbox rows, artifact volumes or evidence. The independent Docker
+# label lookup is authoritative even if Compose cannot parse the environment.
+canonical_execution_services=(caddy api worker scheduler voice hermes web admin-web research-web)
+canonical_execution_container_ids() {
+  local output service
+  for service in "${canonical_execution_services[@]}"; do
+    output="$(docker ps --all --quiet \
+      --filter label=com.docker.compose.project=bumpabestie \
+      --filter "label=com.docker.compose.service=$service")" || return 1
+    validated_rollback_container_ids "$output" || return 1
+  done
+}
+
+contain_canonical_execution_surface() {
+  local before="" after="" final="" container_id
+  local -a container_ids=()
+  before="$(canonical_execution_container_ids 2>/dev/null)" || before=""
+  "${compose[@]}" --profile async --profile voice stop --timeout 60 \
+    "${canonical_execution_services[@]}" >/dev/null 2>&1 || true
+  "${compose[@]}" --profile async --profile voice rm --force \
+    "${canonical_execution_services[@]}" >/dev/null 2>&1 || true
+  after="$(canonical_execution_container_ids 2>/dev/null)" || after=""
+  while IFS= read -r container_id; do
+    [[ -z "$container_id" ]] && continue
+    container_ids+=("$container_id")
+  done <<<"${before}${before:+$'\n'}${after}"
+  if ((${#container_ids[@]} > 0)); then
+    docker rm --force "${container_ids[@]}" >/dev/null 2>&1 || true
+  fi
+  final="$(canonical_execution_container_ids)" || return 1
+  [[ -z "$final" ]] || return 1
+  if ((${#container_ids[@]} > 0)); then
+    for container_id in "${container_ids[@]}"; do
+      if docker inspect "$container_id" >/dev/null 2>&1; then
+        return 1
+      fi
+    done
   fi
 }
 
@@ -667,6 +760,27 @@ rollback() {
   "${compose[@]}" ps >&2 || true
   "${compose[@]}" logs --no-color --tail=200 caddy api web admin-web research-web worker scheduler hermes postgres redis >&2 || true
 
+  # Crossing FORWARD_BOUNDARY is the conservative contract cutover floor: a
+  # migration may have committed before reporting a failure. Never downgrade
+  # that schema or resume an unverified pre-contract application afterward.
+  if ((deployment_started)); then
+    if ! contain_canonical_execution_surface; then
+      mark_maintenance_required "canonical_execution_containment_failed" || true
+      echo "Unable to prove application writer and egress containment; operator intervention is required." >&2
+      exit "$result"
+    fi
+    if ((!existing_app_role_verified)); then
+      mark_maintenance_required "existing_app_role_compatibility_failed" || true
+      echo "Existing database access is incompatible; application writers remain contained and security changes require separate approval." >&2
+      exit "$result"
+    fi
+    if ((!previous_canonical_contract_compatible)); then
+      mark_maintenance_required "canonical_contract_rollback_unverified" || true
+      echo "Prior images are not verified for canonical context contract v1; application writers and ingress were removed, additive schema and durable evidence retained." >&2
+      exit "$result"
+    fi
+  fi
+
   if ((!deployment_started)); then
     if ((previous_boundary_valid)); then
       if restore_previous_release_boundary; then
@@ -730,6 +844,9 @@ rollback() {
     # ShellCheck cannot resolve the validated indirect callback dispatch.
     # shellcheck disable=SC2317,SC2329
     attempt_application_rollback() {
+      # Recheck the digest contract at the last possible point, before any old
+      # application pointer or process can be restored.
+      previous_images_support_canonical_contract || return 1
       # The containment wrapper removes Caddy and API before invoking this
       # callback. Select the complete hybrid rollback boundary before recreating
       # anything, then restore the runtime auth secret before the prior API.
@@ -845,10 +962,17 @@ rollback() {
         fi
       else
         mark_maintenance_required "hybrid_rollback_or_persistence_failed" || true
+        contain_canonical_execution_surface || \
+          mark_maintenance_required "canonical_execution_containment_failed" || true
         echo "Application rollback passed smoke but its release boundary could not be persisted; operator intervention is required." >&2
       fi
     else
-      echo "Application rollback failed; public ingress and API were removed and operator intervention is required." >&2
+      if contain_canonical_execution_surface; then
+        echo "Application rollback failed; application writers and ingress were removed and operator intervention is required." >&2
+      else
+        mark_maintenance_required "canonical_execution_containment_failed" || true
+        echo "Application rollback failed and writer/egress containment could not be proven; operator intervention is required." >&2
+      fi
     fi
   else
     if ((deployment_started)); then
@@ -883,6 +1007,15 @@ verify_image_revision "$CADDY_IMAGE" "$infra_commit" caddy
 verify_image_revision "$POSTGRES_IMAGE" "$infra_commit" postgres
 verify_image_revision "$BACKUP_IMAGE" "$infra_commit" backup
 verify_image_revision "$HERMES_IMAGE" "$deploy_commit" hermes
+canonical_image_supports_contract "$API_IMAGE" api
+canonical_image_supports_contract "$HERMES_IMAGE" hermes
+if ((automatic_rollback_available)); then
+  if previous_images_support_canonical_contract; then
+    previous_canonical_contract_compatible=1
+  else
+    echo "Prior release has no verified canonical contract; any failure after the forward boundary will remain in maintenance containment." >&2
+  fi
+fi
 auth_validator=/usr/local/sbin/bumpabestie-validate-temporary-auth-secret
 if [[ ! -f "$auth_validator" || -L "$auth_validator" ]] \
   || [[ "$(stat -c '%u:%g:%a' "$auth_validator")" != "0:0:755" ]] \
@@ -910,6 +1043,11 @@ if [[ "$target_pg_major" != "16" ]]; then
 fi
 
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
+if [[ -z "$postgres_container" ]]; then
+  echo "Ordinary release requires the existing PostgreSQL database and application role; bootstrap or security changes require separate approval" >&2
+  exit 2
+fi
+verify_app_role_compatibility pre-migration
 writer_stop_attempted=1
 "${compose[@]}" stop --timeout 60 caddy web admin-web research-web api worker scheduler hermes
 assert_application_writers_stopped
@@ -971,12 +1109,9 @@ write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY
 deployment_started=1
 "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis
 postgres_container="$("${compose[@]}" ps --status running -q postgres)"
-docker exec \
-  --env "POSTGRES_USER=$(value_for POSTGRES_USER)" \
-  --env "POSTGRES_DB=$(value_for POSTGRES_DB)" \
-  --env "APP_POSTGRES_PASSWORD=$(value_for APP_POSTGRES_PASSWORD)" \
-  "$postgres_container" /docker-entrypoint-initdb.d/10-app-role.sh
+verify_app_role_compatibility pre-migration
 "${compose[@]}" --profile tools run --rm migrate
+verify_app_role_compatibility post-migration
 if [[ -n "$pilot_snapshot_sha256" ]]; then
   if [[ ! -f "$pilot_snapshot" || -L "$pilot_snapshot" \
     || "$(stat -c '%a' "$pilot_snapshot")" != 600 \

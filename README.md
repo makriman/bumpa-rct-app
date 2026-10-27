@@ -121,3 +121,5 @@ redacted release record is
 [`docs/verification.md`](docs/verification.md) for the evidence ledger and
 [`docs/temporary-web-login.md`](docs/temporary-web-login.md) for the contained
 login boundary.
+
+Optional inbound WhatsApp voice calls: see [setup and verification](docs/whatsapp-calling.md).

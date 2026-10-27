@@ -10,6 +10,9 @@ host mount, shell execution, arbitrary command, or caller-supplied filesystem pa
 from __future__ import annotations
 
 import hmac
+import functools
+import io
+import math
 import http.client
 import importlib.util
 import json
@@ -749,6 +752,24 @@ def _synthesize_local(text: str) -> bytes:
     return content
 
 
+@functools.lru_cache(maxsize=1)
+def _speech_decoder_compatible() -> bool:
+    """Probe actual decoder ABI without loading a model or using customer audio."""
+    try:
+        from faster_whisper.audio import decode_audio
+        source=io.BytesIO()
+        with wave.open(source,"wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"\0\0" * 1600)
+        source.seek(0)
+        samples=decode_audio(source,sampling_rate=16000)
+        return len(samples)>0 and all(math.isfinite(float(value)) for value in samples)
+    except Exception:
+        return False
+
+
 def _local_media_ready() -> bool:
     whisper_path = Path(
         os.environ.get(
@@ -762,7 +783,7 @@ def _local_media_ready() -> bool:
             "/opt/hermes/models/piper/en_GB-alba-medium.onnx",
         )
     )
-    return bool(
+    return _speech_decoder_compatible() and bool(
         whisper_path.is_dir()
         and piper_path.is_file()
         and Path(f"{piper_path}.json").is_file()

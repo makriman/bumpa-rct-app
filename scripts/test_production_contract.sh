@@ -93,6 +93,7 @@ trap cleanup EXIT
 ./scripts/test_promotion_state.sh
 ./scripts/test_promotion_coordinator.sh
 ./scripts/test_rollback_containment.sh
+python3 -m unittest scripts.tests.test_existing_app_role
 ./scripts/test_docker_build_context.sh
 ./scripts/test_temporary_login_pin_rotation.sh
 
@@ -1176,7 +1177,10 @@ writer_guard_lines="$(grep -n -E '^assert_application_writers_stopped$' scripts/
 first_writer_guard_line="$(sed -n '1p' <<<"$writer_guard_lines")"
 boundary_writer_guard_line="$(sed -n '2p' <<<"$writer_guard_lines")"
 forward_boundary_line="$(grep -n -F 'write_promotion_state "$promotion_state_file" FORWARD_BOUNDARY' scripts/deploy.sh | cut -d: -f1)"
-role_init_line="$(grep -n -F '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh | cut -d: -f1)"
+role_preflight_lines="$(grep -n -Fx 'verify_app_role_compatibility pre-migration' scripts/deploy.sh | cut -d: -f1)"
+role_preflight_line="$(sed -n '1p' <<<"$role_preflight_lines")"
+role_recheck_line="$(sed -n '2p' <<<"$role_preflight_lines")"
+role_postmigration_line="$(grep -n -Fx 'verify_app_role_compatibility post-migration' scripts/deploy.sh | cut -d: -f1)"
 migrate_line="$(grep -n -F "\"\${compose[@]}\" --profile tools run --rm migrate" scripts/deploy.sh | cut -d: -f1)"
 profile_materialize_line="$(grep -n -F '  hermes-profile-reconcile' scripts/deploy.sh | cut -d: -f1)"
 reconcile_line="$(grep -n -F 'ENV_FILE=.env.production ./scripts/reconcile_hermes_profiles.sh' scripts/deploy.sh | cut -d: -f1)"
@@ -1199,7 +1203,9 @@ require_single_line_number writer_stop_attempted_line "$writer_stop_attempted_li
 require_single_line_number first_writer_guard_line "$first_writer_guard_line"
 require_single_line_number boundary_writer_guard_line "$boundary_writer_guard_line"
 require_single_line_number forward_boundary_line "$forward_boundary_line"
-require_single_line_number role_init_line "$role_init_line"
+require_single_line_number role_preflight_line "$role_preflight_line"
+require_single_line_number role_recheck_line "$role_recheck_line"
+require_single_line_number role_postmigration_line "$role_postmigration_line"
 require_single_line_number migrate_line "$migrate_line"
 require_single_line_number profile_materialize_line "$profile_materialize_line"
 require_single_line_number reconcile_line "$reconcile_line"
@@ -1390,10 +1396,20 @@ if [[ -z "$hybrid_pointer_line" || -z "$hybrid_metadata_line" \
   echo "Hybrid rollback does not persist actual-safe environment pointers before metadata" >&2
   exit 1
 fi
-if [[ -z "$role_init_line" || -z "$migrate_line" || "$role_init_line" -ge "$migrate_line" ]]; then
-  echo "Deployment does not reconcile the application role before migrations" >&2
+if [[ "$(wc -l <<<"$role_preflight_lines" | tr -d ' ')" != 2 \
+  || "$role_preflight_line" -ge "$stop_line" \
+  || "$role_recheck_line" -le "$forward_boundary_line" \
+  || "$role_recheck_line" -ge "$migrate_line" \
+  || "$role_postmigration_line" -le "$migrate_line" \
+  || "$role_postmigration_line" -ge "$profile_materialize_line" ]]; then
+  echo "Deployment does not verify the existing app role before stopping writers and around migrations" >&2
   exit 1
 fi
+if grep -Fq '/docker-entrypoint-initdb.d/10-app-role.sh' scripts/deploy.sh; then
+  echo "Ordinary application release can mutate database credentials or grants" >&2
+  exit 1
+fi
+grep -Fq 'BEGIN READ ONLY;' scripts/verify_existing_app_role.sh
 if [[ -z "$profile_materialize_line" || -z "$application_start_line" \
   || -z "$mcp_requirement_line" || -z "$reconcile_line" || -z "$caddy_start_line" \
   || "$migrate_line" -ge "$profile_materialize_line" \

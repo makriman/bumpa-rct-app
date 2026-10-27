@@ -14,12 +14,14 @@ from app.core.crypto import FieldCipher
 from app.db.base import Base
 from app.db.models import (
     AgentMessage,
+    Conversation,
     GeneratedAgentMedia,
     HermesProfile,
     ResearchEvent,
     ResearchReport,
     SystemError,
     Tenant,
+    TenantMembership,
     User,
 )
 from app.db.session import SessionLocal
@@ -287,6 +289,8 @@ def test_failed_hermes_call_persists_only_sanitized_diagnostics_and_events(
         status="active",
     )
     db.add_all((user, profile))
+    db.flush()
+    db.add(TenantMembership(tenant_id=tenant.id, user_id=user.id, role="owner", status="active"))
     db.commit()
 
     private_cause = "upstream-body owner.private@example.com sk-ant-never-persist"
@@ -405,6 +409,8 @@ def test_chat_persists_the_initiating_message_for_cross_transaction_mcp_media(
         status="active",
     )
     db.add_all((user, profile))
+    db.flush()
+    db.add(TenantMembership(tenant_id=tenant.id, user_id=user.id, role="owner", status="active"))
     db.commit()
     secondary_factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
 
@@ -434,6 +440,9 @@ def test_chat_persists_the_initiating_message_for_cross_transaction_mcp_media(
                         user_id=user.id,
                         conversation_id=initiating.conversation_id,
                         agent_message_id=initiating.id,
+                        execution_run_id=tool_db.get(
+                            Conversation, initiating.conversation_id
+                        ).active_run_id,
                         channel="web",
                         media_type="document",
                         mime_type="text/csv",

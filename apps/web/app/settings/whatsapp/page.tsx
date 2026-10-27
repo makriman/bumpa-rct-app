@@ -5,6 +5,7 @@ import { useReducer } from "react";
 import { AppIcon } from "@/components/app-icon";
 import { AppShell } from "@/components/app-shell";
 import { LiveDataBanner } from "@/components/live-data-banner";
+import { ProactiveSettings } from "@/components/proactive-settings";
 import { Badge, PageHeader, StatePanel, Toast } from "@/components/ui";
 import { WhatsAppDialogs } from "@/components/whatsapp-dialogs";
 import { apiRequest } from "@/lib/api";
@@ -229,6 +230,7 @@ export default function WhatsAppPage() {
           ))}
         </div>
       )}
+      <ProactiveSettings />
       <WhatsAppDialogs
         availableMembers={availableMembers}
         busy={state.busy}

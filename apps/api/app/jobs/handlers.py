@@ -14,7 +14,14 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.crypto import FieldCipher
 from app.db.models import AsyncJob, BumpaConnection, ResearchReport
-from app.jobs.runtime import JobResult, PermanentJobError, enqueue_job, register_handler
+from app.db.session import set_security_context
+from app.jobs.runtime import (
+    JobResult,
+    PermanentJobError,
+    assert_current_job_lease,
+    enqueue_job,
+    register_handler,
+)
 from app.providers.bumpa import BumpaProviderError
 from app.providers.local import LocalArtifactStore
 from app.services.bumpa import run_sync
@@ -29,12 +36,42 @@ from app.services.reports import (
     generate_report,
     report_is_expired,
 )
+from app.services.run_reconciliation import ReconciliationAction
+from app.services.run_recovery import reconcile_expired_runs
 from app.services.whatsapp import process_inbox_event
 
 
 @register_handler("system.noop")
 def noop_handler(_session: Session, job: AsyncJob) -> JobResult:
     return {"accepted": True, "payload_keys": sorted(job.payload)}
+
+
+@register_handler("system.reconcile_expired_runs")
+def run_recovery_handler(session: Session, job: AsyncJob) -> JobResult:
+    """Reconcile bounded expired work; leave delivery to its original job path."""
+    raw_limit = job.payload.get("limit")
+    settings = get_settings()
+    if (
+        job.tenant_id is not None
+        or set(job.payload) != {"limit", "environment_lane"}
+        or job.payload.get("environment_lane") != settings.app_env
+        or type(raw_limit) is not int
+        or not 1 <= raw_limit <= 100
+    ):
+        raise PermanentJobError("Run recovery sweep payload is invalid")
+    set_security_context(session, privileged=True)
+    assert_current_job_lease(session)
+    decisions = reconcile_expired_runs(session, settings, limit=raw_limit)
+    # Never return provider IDs, merchant text, retained payloads, or reason
+    # details. RESUME_DELIVERY is a count, not authorization to enqueue a send.
+    return {
+        "status": "reconciled",
+        "processed": len(decisions),
+        "actions": {
+            action.value: sum(decision.action == action for decision in decisions)
+            for action in ReconciliationAction
+        },
+    }
 
 
 @register_handler("whatsapp.process_webhook")
@@ -58,6 +95,8 @@ def proactive_insight_handler(session: Session, job: AsyncJob) -> JobResult:
         cadence=cadence,  # type: ignore[arg-type]
         slot=slot,
         settings=get_settings(),
+        subscription_id=job.payload.get("subscription_id"),
+        subscription_revision=job.payload.get("subscription_revision"),
     )
 
 

@@ -4,7 +4,7 @@ import hashlib
 from collections.abc import Callable
 from datetime import date
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -16,13 +16,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models import (
+    Conversation,
     HermesProfile,
     McpConnection,
     McpToolPermission,
     OperationalAgentEvent,
 )
 from app.db.session import SessionLocal, set_security_context
-from app.services.agent_actions import prepare_pending_action
+from app.services import scoped_memory
+from app.services.agent_actions import decode_action_context_token, prepare_pending_action
 from app.services.business_onboarding import propose_update
 from app.services.business_tools import (
     business_overview,
@@ -107,12 +109,18 @@ def _tenant_id() -> str:
 def _run_tool(
     tool_name: str,
     operation: Callable[[Session, str], dict[str, Any]],
+    *,
+    action_context_token: str | None = None,
 ) -> dict[str, Any]:
     tenant_id = _tenant_id()
     started = monotonic()
     with SessionLocal() as db:
         set_security_context(db, tenant_id=tenant_id)
         try:
+            if action_context_token is not None:
+                decode_action_context_token(
+                    settings, action_context_token, expected_tenant_id=tenant_id, db=db
+                )
             result = operation(db, tenant_id)
         except Exception:
             db.add(
@@ -144,10 +152,11 @@ def _run_tool(
 
 
 @business_mcp.tool()
-def get_business_profile() -> dict[str, Any]:
+def get_business_profile(action_context_token: str) -> dict[str, Any]:
     """Get the current tenant's business identity, store timezone and currency."""
-
-    return _run_tool("get_business_profile", business_profile)
+    return _run_tool(
+        "get_business_profile", business_profile, action_context_token=action_context_token
+    )
 
 
 @business_mcp.tool()
@@ -175,21 +184,20 @@ def propose_business_profile_update(
 
 
 @business_mcp.tool()
-def get_data_coverage() -> dict[str, Any]:
+def get_data_coverage(action_context_token: str) -> dict[str, Any]:
     """Get exact canonical-order coverage and latest Bumpa sync freshness."""
-
-    return _run_tool("get_data_coverage", data_coverage)
+    return _run_tool("get_data_coverage", data_coverage, action_context_token=action_context_token)
 
 
 @business_mcp.tool()
 def get_business_overview(
-    period: str = "this_month",
+    action_context_token: str,
+    period: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     compare_to: str = "previous_period",
 ) -> dict[str, Any]:
     """Calculate sales and order totals for an exact store-local period."""
-
     return _run_tool(
         "get_business_overview",
         lambda db, tenant_id: business_overview(
@@ -200,18 +208,19 @@ def get_business_overview(
             date_to=date_to,
             compare_to="none" if compare_to == "none" else "previous_period",
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def get_sales_trend(
-    period: str = "this_month",
-    granularity: str = "day",
+    action_context_token: str,
+    period: str | None = None,
+    granularity: Literal["day", "week", "month"] = "day",
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> dict[str, Any]:
     """Calculate a daily, weekly or monthly sales trend for an exact period."""
-
     safe_granularity = granularity if granularity in {"day", "week", "month"} else "day"
     return _run_tool(
         "get_sales_trend",
@@ -219,97 +228,107 @@ def get_sales_trend(
             db,
             tenant_id,
             period=period,
-            granularity=safe_granularity,  # type: ignore[arg-type]
+            granularity=safe_granularity,
             date_from=date_from,
             date_to=date_to,
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def get_order_breakdown(
-    period: str = "this_month",
+    action_context_token: str,
+    period: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> dict[str, Any]:
     """Break down orders by status, payment status, channel and origin."""
-
     return _run_tool(
         "get_order_breakdown",
         lambda db, tenant_id: order_breakdown(
-            db,
-            tenant_id,
-            period=period,
-            date_from=date_from,
-            date_to=date_to,
+            db, tenant_id, period=period, date_from=date_from, date_to=date_to
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def get_product_performance(
-    period: str = "this_month",
+    action_context_token: str,
+    period: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
     """Rank products using canonical order-item quantity and sales totals."""
-
     return _run_tool(
         "get_product_performance",
         lambda db, tenant_id: product_performance(
-            db,
-            tenant_id,
-            period=period,
-            date_from=date_from,
-            date_to=date_to,
-            limit=limit,
+            db, tenant_id, period=period, date_from=date_from, date_to=date_to, limit=limit
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def get_customer_summary(
-    period: str = "this_month",
+    action_context_token: str,
+    period: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> dict[str, Any]:
     """Return privacy-safe customer analysis or a precise availability warning."""
-
     return _run_tool(
         "get_customer_summary",
         lambda db, tenant_id: customer_summary(
-            db,
-            tenant_id,
-            period=period,
-            date_from=date_from,
-            date_to=date_to,
+            db, tenant_id, period=period, date_from=date_from, date_to=date_to
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
-def get_inventory_overview() -> dict[str, Any]:
+def get_inventory_overview(action_context_token: str) -> dict[str, Any]:
     """Return normalized inventory evidence or a precise availability warning."""
-
-    return _run_tool("get_inventory_overview", inventory_overview)
+    return _run_tool(
+        "get_inventory_overview", inventory_overview, action_context_token=action_context_token
+    )
 
 
 @business_mcp.tool()
-def calculate_exactly(expression: str) -> dict[str, str]:
+def calculate_exactly(expression: str, action_context_token: str) -> dict[str, str]:
     """Evaluate arithmetic with decimal precision; no binary floating-point math."""
-
     return _run_tool(
         "calculate_exactly",
         lambda _db, _tenant_id: exact_calculation(expression),
+        action_context_token=action_context_token,
     )
 
 
+def require_connector_actor(db: Session, tenant_id: str, token: str) -> None:
+    from app.services.agent_actions import require_write_actor
+
+    context = decode_action_context_token(settings, token, expected_tenant_id=tenant_id, db=db)
+    # Existing connector grants are business-owner/admin grants. Do not silently
+    # extend Gmail/Drive/Calendar access to a new member role.
+    require_write_actor(db, tenant_id, context.user_id)
+
+
+def scoped_connector_read(
+    db: Session, scoped_tenant: str, token: str, *args: Any, **kwargs: Any
+) -> dict[str, Any]:
+    require_connector_actor(db, scoped_tenant, token)
+    kwargs["before_dispatch"] = lambda: require_connector_actor(db, scoped_tenant, token)
+    return execute_connector_read(*args, **kwargs)
+
+
 @business_mcp.tool()
-def list_connected_services() -> dict[str, Any]:
+def list_connected_services(action_context_token: str) -> dict[str, Any]:
     """List this tenant's active connector IDs, allowlisted resources and permitted tools."""
 
     def operation(db: Session, tenant_id: str) -> dict[str, Any]:
+        require_connector_actor(db, tenant_id, action_context_token)
         connections = db.scalars(
             select(McpConnection).where(
                 McpConnection.tenant_id == tenant_id,
@@ -324,10 +343,7 @@ def list_connected_services() -> dict[str, Any]:
         for permission in permissions:
             if permission.permission != "deny":
                 by_connection.setdefault(permission.mcp_connection_id, []).append(
-                    {
-                        "tool_name": permission.tool_name,
-                        "permission": permission.permission,
-                    }
+                    {"tool_name": permission.tool_name, "permission": permission.permission}
                 )
         return {
             "connections": [
@@ -337,25 +353,23 @@ def list_connected_services() -> dict[str, Any]:
                     "read_only": connection.read_only,
                     "allowed_resources": list(connection.allowed_resources),
                     "tools": sorted(
-                        by_connection.get(connection.id, []),
-                        key=lambda item: item["tool_name"],
+                        by_connection.get(connection.id, []), key=lambda item: item["tool_name"]
                     ),
                 }
                 for connection in connections
             ]
         }
 
-    return _run_tool("list_connected_services", operation)
+    return _run_tool(
+        "list_connected_services", operation, action_context_token=action_context_token
+    )
 
 
 @business_mcp.tool()
 def read_connected_service(
-    connection_id: str,
-    tool_name: str,
-    tool_input: dict[str, Any],
+    connection_id: str, tool_name: str, tool_input: dict[str, Any], action_context_token: str
 ) -> dict[str, Any]:
     """Run one approved read tool against an allowlisted connected service."""
-
     if not settings.external_connectors_enabled:
         return {
             "availability": "unavailable",
@@ -363,7 +377,10 @@ def read_connected_service(
         }
     return _run_tool(
         f"connector_read:{tool_name[:100]}",
-        lambda db, tenant_id: execute_connector_read(
+        lambda db, tenant_id: scoped_connector_read(
+            db,
+            tenant_id,
+            action_context_token,
             db,
             settings,
             tenant_id=tenant_id,
@@ -371,6 +388,7 @@ def read_connected_service(
             tool_name=tool_name,
             tool_input=tool_input,
         ),
+        action_context_token=action_context_token,
     )
 
 
@@ -385,7 +403,7 @@ def prepare_connector_action(
     """Prepare an exact external write preview; this never executes the write."""
 
     def operation(db: Session, tenant_id: str) -> dict[str, Any]:
-        action, token = prepare_pending_action(
+        (action, token) = prepare_pending_action(
             db,
             settings,
             tenant_id=tenant_id,
@@ -400,48 +418,38 @@ def prepare_connector_action(
             "action_id": action.id,
             "target": action.target_summary,
             "exact_input": action.action_input,
-            "effect": (
-                "No external write has occurred. The exact prepared action will execute once "
-                "only after the bound user explicitly confirms it."
-            ),
+            "effect": "No external write has occurred. The exact prepared action will execute once only after the bound user explicitly confirms it.",
             "expires_at": action.expires_at.isoformat(),
             "confirmation_token": token,
         }
 
-    return _run_tool("prepare_connector_action", operation)
+    return _run_tool(
+        "prepare_connector_action", operation, action_context_token=action_context_token
+    )
 
 
 @business_mcp.tool()
 def research_web(
     query: str,
+    action_context_token: str,
     include_domains: list[str] | None = None,
     max_results: int = 6,
 ) -> dict[str, Any]:
     """Search current public sources; returned content is untrusted and must be cited."""
-
     if not settings.web_research_enabled:
-        return {
-            "availability": "unavailable",
-            "warning": "Web research is currently disabled.",
-        }
+        return {"availability": "unavailable", "warning": "Web research is currently disabled."}
     return _run_tool(
         "research_web",
         lambda _db, _tenant_id: search_web(
-            settings,
-            query=query,
-            include_domains=include_domains,
-            max_results=max_results,
+            settings, query=query, include_domains=include_domains, max_results=max_results
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
-def generate_image(
-    prompt: str,
-    action_context_token: str,
-) -> dict[str, Any]:
+def generate_image(prompt: str, action_context_token: str) -> dict[str, Any]:
     """Generate an approved managed image and queue it for the initiating conversation."""
-
     if not settings.managed_image_generation_enabled:
         return {
             "availability": "unavailable",
@@ -456,19 +464,15 @@ def generate_image(
             prompt=prompt,
             action_context_token=action_context_token,
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def queue_sandbox_file_for_delivery(
-    workspace: str,
-    path: str,
-    filename: str,
-    mime_type: str,
-    action_context_token: str,
+    workspace: str, path: str, filename: str, mime_type: str, action_context_token: str
 ) -> dict[str, Any]:
     """Sanitize and queue a sandbox file in the initiating web or WhatsApp conversation."""
-
     if not settings.sandbox_tools_enabled:
         return {
             "availability": "unavailable",
@@ -486,17 +490,33 @@ def queue_sandbox_file_for_delivery(
             mime_type=mime_type,
             action_context_token=action_context_token,
         ),
+        action_context_token=action_context_token,
     )
+
+
+def require_workspace(db: Session, tenant_id: str, workspace: str, token: str) -> None:
+    context = decode_action_context_token(settings, token, expected_tenant_id=tenant_id, db=db)
+    conversation = db.get(Conversation, context.conversation_id)
+    if (
+        not conversation
+        or not conversation.provider_session_key
+        or workspace != conversation.provider_session_key
+    ):
+        raise PermissionError("This workspace does not belong to the current conversation")
+
+
+def scoped_sandbox(
+    db: Session, tenant_id: str, workspace: str, token: str, operation: Callable[[], dict[str, Any]]
+) -> dict[str, Any]:
+    require_workspace(db, tenant_id, workspace, token)
+    return operation()
 
 
 @business_mcp.tool()
 def sandbox_run_code(
-    workspace: str,
-    language: str,
-    code: str,
+    workspace: str, language: str, code: str, action_context_token: str
 ) -> dict[str, Any]:
     """Run bounded Python, JavaScript or TypeScript in the tenant-isolated sandbox."""
-
     if not settings.sandbox_tools_enabled:
         return {
             "availability": "unavailable",
@@ -504,23 +524,24 @@ def sandbox_run_code(
         }
     return _run_tool(
         "sandbox_run_code",
-        lambda _db, tenant_id: SandboxClient(settings).run_code(
-            tenant_id=tenant_id,
-            workspace=workspace,
-            language=language,
-            code=code,
+        lambda _db, tenant_id: scoped_sandbox(
+            _db,
+            tenant_id,
+            workspace,
+            action_context_token,
+            lambda: SandboxClient(settings).run_code(
+                tenant_id=tenant_id, workspace=workspace, language=language, code=code
+            ),
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def sandbox_exec(
-    workspace: str,
-    command: str,
-    cwd: str = "/workspace",
+    workspace: str, command: str, action_context_token: str, cwd: str = "/workspace"
 ) -> dict[str, Any]:
     """Run a bounded shell command inside the tenant-isolated sandbox."""
-
     if not settings.sandbox_tools_enabled:
         return {
             "availability": "unavailable",
@@ -528,45 +549,44 @@ def sandbox_exec(
         }
     return _run_tool(
         "sandbox_exec",
-        lambda _db, tenant_id: SandboxClient(settings).exec(
-            tenant_id=tenant_id,
-            workspace=workspace,
-            command=command,
-            cwd=cwd,
+        lambda _db, tenant_id: scoped_sandbox(
+            _db,
+            tenant_id,
+            workspace,
+            action_context_token,
+            lambda: SandboxClient(settings).exec(
+                tenant_id=tenant_id, workspace=workspace, command=command, cwd=cwd
+            ),
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
 def sandbox_file(
-    workspace: str,
-    action: str,
-    path: str,
-    content: str | None = None,
+    workspace: str, action: str, path: str, action_context_token: str, content: str | None = None
 ) -> dict[str, Any]:
     """Read, write, list or delete a file under the isolated /workspace directory."""
-
     if not settings.sandbox_tools_enabled:
-        return {
-            "availability": "unavailable",
-            "warning": "Isolated files are currently disabled.",
-        }
+        return {"availability": "unavailable", "warning": "Isolated files are currently disabled."}
     return _run_tool(
         "sandbox_file",
-        lambda _db, tenant_id: SandboxClient(settings).file_operation(
-            tenant_id=tenant_id,
-            workspace=workspace,
-            action=action,
-            path=path,
-            content=content,
+        lambda _db, tenant_id: scoped_sandbox(
+            _db,
+            tenant_id,
+            workspace,
+            action_context_token,
+            lambda: SandboxClient(settings).file_operation(
+                tenant_id=tenant_id, workspace=workspace, action=action, path=path, content=content
+            ),
         ),
+        action_context_token=action_context_token,
     )
 
 
 @business_mcp.tool()
-def sandbox_destroy(workspace: str) -> dict[str, Any]:
+def sandbox_destroy(workspace: str, action_context_token: str) -> dict[str, Any]:
     """Destroy the current tenant-isolated sandbox workspace and all ephemeral files."""
-
     if not settings.sandbox_tools_enabled:
         return {
             "availability": "unavailable",
@@ -574,8 +594,87 @@ def sandbox_destroy(workspace: str) -> dict[str, Any]:
         }
     return _run_tool(
         "sandbox_destroy",
-        lambda _db, tenant_id: SandboxClient(settings).destroy(
-            tenant_id=tenant_id,
-            workspace=workspace,
+        lambda _db, tenant_id: scoped_sandbox(
+            _db,
+            tenant_id,
+            workspace,
+            action_context_token,
+            lambda: SandboxClient(settings).destroy(tenant_id=tenant_id, workspace=workspace),
+        ),
+        action_context_token=action_context_token,
+    )
+
+
+@business_mcp.tool()
+def list_scoped_memories(
+    scope: Literal["private", "shared"], action_context_token: str
+) -> dict[str, Any]:
+    """List only current account-private or explicitly reviewed shared facts; scope must be private/shared."""
+    return _run_tool(
+        "list_scoped_memories",
+        lambda db, tenant: scoped_memory.list_memories(
+            db, settings, tenant_id=tenant, action_context_token=action_context_token, scope=scope
+        ),
+    )
+
+
+@business_mcp.tool()
+def remember_private_note(
+    memory_key: str, content: str, expected_revision: int, action_context_token: str
+) -> dict[str, Any]:
+    """Save a private note only when requested; content must quote the complete note BODY after REMEMBER PRIVATE key revision newline, preserving negations; never an inferred summary."""
+    return _run_tool(
+        "remember_private_note",
+        lambda db, tenant: scoped_memory.save_private_memory(
+            db,
+            settings,
+            tenant_id=tenant,
+            action_context_token=action_context_token,
+            scope="private",
+            memory_key=memory_key,
+            content=content,
+            expected_revision=expected_revision,
+        ),
+    )
+
+
+@business_mcp.tool()
+def propose_shared_note(
+    memory_key: str, content: str, expected_revision: int, action_context_token: str
+) -> dict[str, Any]:
+    """Prepare shared business-fact review; proposal alone never publishes the fact."""
+    return _run_tool(
+        "propose_shared_note",
+        lambda db, tenant: scoped_memory.propose_shared_memory(
+            db,
+            settings,
+            tenant_id=tenant,
+            action_context_token=action_context_token,
+            scope="shared",
+            memory_key=memory_key,
+            content=content,
+            expected_revision=expected_revision,
+        ),
+    )
+
+
+@business_mcp.tool()
+def forget_scoped_note(
+    scope: Literal["private", "shared"],
+    memory_key: str,
+    expected_revision: int,
+    action_context_token: str,
+) -> dict[str, Any]:
+    """Forget an explicitly requested account-owned note, retaining a revision tombstone."""
+    return _run_tool(
+        "forget_scoped_note",
+        lambda db, tenant: scoped_memory.forget_memory(
+            db,
+            settings,
+            tenant_id=tenant,
+            action_context_token=action_context_token,
+            scope=scope,
+            memory_key=memory_key,
+            expected_revision=expected_revision,
         ),
     )

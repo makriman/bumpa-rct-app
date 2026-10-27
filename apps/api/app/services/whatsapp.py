@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from contextvars import copy_context
+from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
@@ -23,6 +26,7 @@ from app.core.rate_limit import (
 )
 from app.core.time import utcnow
 from app.db.models import (
+    AgentExecutionRun,
     AgentMessage,
     Conversation,
     GeneratedAgentMedia,
@@ -39,7 +43,12 @@ from app.db.models import (
     WhatsappMessage,
 )
 from app.db.session import SessionLocal, set_security_context
-from app.jobs.runtime import PermanentJobError
+from app.jobs.runtime import (
+    JobDeferredError,
+    JobLeaseLostError,
+    PermanentJobError,
+    assert_current_job_lease,
+)
 from app.providers.contracts import MessagingProvider
 from app.providers.hermes import HermesProfileError, endpoint_for
 from app.providers.local import LocalMessagingProvider
@@ -49,9 +58,14 @@ from app.services.agent_actions import (
     action_preview,
     confirmation_token,
     decide_pending_action,
+    validate_approval_scope,
 )
-from app.services.chat import handle_chat
+from app.services.agent_execution import cancel_conversation
+from app.services.chat import handle_chat, reply_for_input
+from app.services.control_transcript import record_control_reply
+from app.services.conversation_scope import receiver_scope
 from app.services.generated_media import GeneratedMediaError, generated_media_path
+from app.services.ingress_ordering import require_head
 from app.services.media import (
     MediaProcessingError,
     process_whatsapp_content,
@@ -77,10 +91,12 @@ def process_inbox_event(db: Session, event_id: str, settings: Settings) -> dict[
         return {"status": "duplicate"}
     message = extract_message(event.payload)
     delivery = extract_delivery_status(event.payload)
-    if message and not settings.is_local:
-        phone = "+" + str(message.get("from", "")).lstrip("+")
-        with _whatsapp_fifo_lock(settings, phone):
-            return _process_claimed_event(db, event, message, delivery, settings)
+    if message:
+        if event.arrival_sequence is not None:
+            require_head(db, event)
+            db.commit()  # sequence reservation is durable before slow preprocessing
+        elif not settings.is_local:
+            raise PermanentJobError("Legacy unordered receipt requires explicit reconciliation")
     return _process_claimed_event(db, event, message, delivery, settings)
 
 
@@ -94,7 +110,7 @@ def _process_claimed_event(
     event.attempts += 1
     try:
         if delivery:
-            return _process_delivery(db, event, delivery)
+            return _process_delivery(db, event, delivery, settings)
         if message:
             return _process_message(db, event, message, settings)
         event.processing_status = "ignored"
@@ -256,16 +272,25 @@ def split_inbox_events(payload: dict[str, Any]) -> list[tuple[dict[str, Any], st
     return items or [(payload, "root")]
 
 
-def _process_delivery(db: Session, event: WebhookEvent, delivery: dict[str, Any]) -> dict[str, Any]:
+def _process_delivery(
+    db: Session, event: WebhookEvent, delivery: dict[str, Any], settings: Settings
+) -> dict[str, Any]:
+    scope = receiver_scope(
+        settings.app_env,
+        extract_inbound_sender(event.payload) if settings.whatsapp_backend == "meta" else None,
+    )
     message_id = str(delivery.get("id", ""))
     status = str(delivery.get("status", "unknown"))
     timestamp = str(delivery.get("timestamp", "unknown"))
     message = db.scalar(
-        select(WhatsappMessage).where(WhatsappMessage.meta_message_id == message_id)
+        select(WhatsappMessage).where(
+            WhatsappMessage.meta_message_id == message_id, WhatsappMessage.receiver_scope == scope
+        )
     )
     existing = db.scalar(
         select(WhatsappDeliveryEvent).where(
             WhatsappDeliveryEvent.meta_message_id == message_id,
+            WhatsappDeliveryEvent.receiver_scope == scope,
             WhatsappDeliveryEvent.status == status,
             WhatsappDeliveryEvent.event_timestamp == timestamp,
         )
@@ -274,6 +299,7 @@ def _process_delivery(db: Session, event: WebhookEvent, delivery: dict[str, Any]
         db.add(
             WhatsappDeliveryEvent(
                 whatsapp_message_id=message.id if message else None,
+                receiver_scope=scope,
                 meta_message_id=message_id,
                 status=status,
                 event_timestamp=timestamp,
@@ -315,6 +341,7 @@ def _process_message(
             db.commit()
             return {"status": "rejected_unconfigured_sender"}
         reply_sender = inbound_sender
+    scope = receiver_scope(settings.app_env, reply_sender)
     phone = "+" + str(message.get("from", "")).lstrip("+")
     text = _message_text(message)
     reply_to_meta_message_id = (
@@ -348,7 +375,9 @@ def _process_message(
         else None
     )
     inbound = db.scalar(
-        select(WhatsappMessage).where(WhatsappMessage.meta_message_id == external_id)
+        select(WhatsappMessage).where(
+            WhatsappMessage.meta_message_id == external_id, WhatsappMessage.receiver_scope == scope
+        )
     )
     if not inbound:
         inbound = WhatsappMessage(
@@ -356,6 +385,7 @@ def _process_message(
             user_id=identity.user_id if identity else None,
             idempotency_key=_idempotency_key(event.id, "inbound"),
             meta_message_id=external_id,
+            receiver_scope=scope,
             wa_id=str(message.get("from", "")),
             phone_e164=phone,
             direction="inbound",
@@ -455,12 +485,16 @@ def _process_message(
             Conversation.user_id == user.id,
             Conversation.channel == "whatsapp",
             Conversation.status == "open",
+            Conversation.context_generation == 1,
+            Conversation.receiver_waba_id == (reply_sender[0] if reply_sender else "mock"),
+            Conversation.receiver_phone_id == (reply_sender[1] if reply_sender else "mock"),
+            Conversation.environment_lane == settings.app_env,
         )
         .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
     )
     if text.lower() in {"/new", "/reset"}:
         if active_conversation:
-            active_conversation.status = "closed"
+            cancel_conversation(db, active_conversation)
         inbound.status = "processed"
         event.processing_status = "processed"
         db.commit()
@@ -517,6 +551,13 @@ def _process_message(
             action_status = "action_not_found"
         else:
             try:
+                validate_approval_scope(
+                    db,
+                    action,
+                    conversation_id=active_conversation.id if active_conversation else "",
+                    channel="whatsapp",
+                    actor_identity_id=identity.id,
+                )
                 decided = decide_pending_action(
                     db,
                     settings,
@@ -600,25 +641,50 @@ def _process_message(
             except HermesProfileError:
                 speech_endpoint = None
     existing_agent_message = db.scalar(
-        select(AgentMessage).where(
+        select(AgentMessage)
+        .join(Conversation, Conversation.id == AgentMessage.conversation_id)
+        .where(
             AgentMessage.tenant_id == tenant.id,
+            AgentMessage.user_id == user.id,
+            Conversation.context_generation == 1,
+            Conversation.receiver_waba_id == (reply_sender[0] if reply_sender else "mock"),
+            Conversation.receiver_phone_id == (reply_sender[1] if reply_sender else "mock"),
+            Conversation.environment_lane == settings.app_env,
             AgentMessage.channel == "whatsapp",
             AgentMessage.external_message_id == external_id,
         )
     )
     if existing_agent_message:
-        outgoing = db.scalar(
-            select(AgentMessage)
-            .where(
-                AgentMessage.tenant_id == tenant.id,
-                AgentMessage.conversation_id == existing_agent_message.conversation_id,
-                AgentMessage.direction == "outbound",
-                AgentMessage.created_at >= existing_agent_message.created_at,
-            )
-            .order_by(AgentMessage.created_at)
+        outgoing = reply_for_input(
+            db, tenant_id=tenant.id, user_id=user.id, inbound_id=existing_agent_message.id
         )
         if not outgoing:
-            raise RuntimeError("Inbound agent message exists without its response")
+            from app.services.run_reconciliation import ReconciliationAction
+            from app.services.run_recovery import reconcile_application_run
+
+            interrupted = db.scalar(
+                select(AgentExecutionRun).where(
+                    AgentExecutionRun.tenant_id == tenant.id,
+                    AgentExecutionRun.user_id == user.id,
+                    AgentExecutionRun.initiating_message_id == existing_agent_message.id,
+                )
+            )
+            if interrupted is None:
+                raise PermanentJobError("Interrupted input has no verified execution record")
+            recovery_decision = reconcile_application_run(db, interrupted.id, settings)
+            if recovery_decision.action in {
+                ReconciliationAction.WAIT,
+                ReconciliationAction.POLL_LATER,
+            }:
+                raise JobDeferredError("Earlier model outcome is still pending", delay_seconds=5)
+            outgoing = reply_for_input(
+                db, tenant_id=tenant.id, user_id=user.id, inbound_id=existing_agent_message.id
+            )
+            if outgoing is None or recovery_decision.action in {
+                ReconciliationAction.REVIEW,
+                ReconciliationAction.FAIL,
+            }:
+                raise PermanentJobError("Interrupted run requires explicit outcome review")
     else:
         try:
             if settings.whatsapp_backend == "meta":
@@ -632,7 +698,7 @@ def _process_message(
                         phone_number_id=reply_sender[1],
                     ),
                     tenant_id=tenant.id,
-                    workspace=f"media-{hashlib.sha256(external_id.encode()).hexdigest()[:24]}",
+                    workspace=f"media-{hashlib.sha256(f'{scope}\0{external_id}'.encode()).hexdigest()[:24]}",
                     speech_endpoint=speech_endpoint,
                 )
             elif text:
@@ -680,6 +746,9 @@ def _process_message(
             replied = db.scalar(
                 select(AgentMessage).where(
                     AgentMessage.tenant_id == tenant.id,
+                    AgentMessage.user_id == user.id,
+                    AgentMessage.conversation_id
+                    == (active_conversation.id if active_conversation else ""),
                     AgentMessage.channel == "whatsapp",
                     AgentMessage.external_message_id == reply_to_meta_message_id,
                 )
@@ -694,6 +763,7 @@ def _process_message(
                     stored_content_parts=processed.stored_content_parts,
                     metadata=processed.metadata,
                 )
+        processed.metadata["phone_identity_id"] = identity.id
         inbound.media_metadata = processed.metadata
         voice_reply_requested = _voice_reply_requested(processed.prompt)
         voice_reply_language = _voice_reply_language(processed)
@@ -708,6 +778,9 @@ def _process_message(
                 message=processed.prompt,
                 channel="whatsapp",
                 conversation_id=active_conversation.id if active_conversation else None,
+                receiver_waba_id=reply_sender[0] if reply_sender else "mock",
+                receiver_phone_id=reply_sender[1] if reply_sender else "mock",
+                environment_lane=settings.app_env,
                 external_message_id=external_id,
                 provider_content_parts=processed.provider_content_parts,
                 stored_content_parts=processed.stored_content_parts,
@@ -735,6 +808,9 @@ def _process_message(
                     message=processed.prompt,
                     channel="whatsapp",
                     conversation_id=active_conversation.id if active_conversation else None,
+                    receiver_waba_id=reply_sender[0] if reply_sender else "mock",
+                    receiver_phone_id=reply_sender[1] if reply_sender else "mock",
+                    environment_lane=settings.app_env,
                     external_message_id=external_id,
                     provider_content_parts=processed.provider_content_parts,
                     stored_content_parts=processed.stored_content_parts,
@@ -751,6 +827,26 @@ def _process_message(
                 )
             finally:
                 progress.finish()
+    prior_plan = (outgoing.media_metadata or {}).get("delivery_plan")
+    if isinstance(prior_plan, dict):
+        voice_reply_requested = prior_plan.get("voice_requested") is True
+        stored_language = prior_plan.get("voice_language")
+        voice_reply_language = stored_language if isinstance(stored_language, str) else "en"
+    else:
+        outgoing.media_metadata = {
+            **(outgoing.media_metadata or {}),
+            "voice_reply_language": voice_reply_language,
+        }
+    _freeze_reply_manifest(
+        db,
+        event=event,
+        outgoing=outgoing,
+        include_voice=bool(
+            voice_reply_requested
+            and settings.whatsapp_speech_enabled
+            and settings.whatsapp_backend == "meta"
+        ),
+    )
     _deliver_text_chunks(
         db,
         event=event,
@@ -763,17 +859,36 @@ def _process_message(
         meta_sender=reply_sender,
         reply_to_message_id=external_id,
     )
+    outgoing.media_metadata = {**outgoing.media_metadata, "delivery_status": "sent"}
+    db.commit()
+    voice_receipt = db.scalar(
+        select(WhatsappMessage).where(
+            WhatsappMessage.idempotency_key == _idempotency_key(event.id, "agent-voice-reply")
+        )
+    )
+    voice_already_sent = bool(
+        voice_receipt and voice_receipt.status_rank >= 3 and voice_receipt.meta_message_id
+    )
+    if voice_already_sent and outgoing.media_metadata.get("voice_artifact"):
+        _clear_voice_cache(outgoing, settings)
+        db.commit()
     if (
         voice_reply_requested
+        and not voice_already_sent
         and settings.whatsapp_speech_enabled
         and settings.whatsapp_backend == "meta"
     ):
         try:
-            voice_note = synthesize_voice_note(
-                settings,
-                text=outgoing.content,
-                endpoint=speech_endpoint,
-                language=voice_reply_language,
+            voice_note = _cached_voice_reply(
+                db,
+                outgoing=outgoing,
+                settings=settings,
+                synthesize=lambda: synthesize_voice_note(
+                    settings,
+                    text=outgoing.content,
+                    endpoint=speech_endpoint,
+                    language=voice_reply_language,
+                ),
             )
             voice_content = voice_note["content"]
             if not isinstance(voice_content, bytes):
@@ -794,7 +909,58 @@ def _process_message(
                 meta_sender=reply_sender,
                 reply_to_message_id=external_id,
             )
-        except (MediaProcessingError, MetaProviderError, PermanentJobError, ValueError):
+            _clear_voice_cache(outgoing, settings)
+            db.commit()
+        except MetaProviderError as exc:
+            db.commit()
+            if (
+                exc.retryable
+                and exc.category not in {"timeout", "transport"}
+                and (exc.http_status is None or exc.http_status < 500)
+            ):
+                raise JobDeferredError(
+                    "Voice delivery is temporarily unavailable", delay_seconds=5
+                ) from exc
+            raise PermanentJobError("Voice delivery outcome requires reconciliation") from exc
+        except PermanentJobError:
+            raise
+        except (MediaProcessingError, ValueError):
+            failed_voice = db.scalar(
+                select(WhatsappMessage).where(
+                    WhatsappMessage.idempotency_key
+                    == _idempotency_key(event.id, "agent-voice-reply")
+                )
+            )
+            if failed_voice is not None and failed_voice.status not in {
+                "prepared",
+                "failed",
+                "rejected",
+            }:
+                raise PermanentJobError("Voice delivery outcome requires reconciliation") from None
+            if failed_voice is None:
+                failed_voice = WhatsappMessage(
+                    tenant_id=tenant.id,
+                    user_id=user.id,
+                    direction="outbound",
+                    phone_e164=phone,
+                    message_type="audio",
+                    receiver_scope=receiver_scope(settings.app_env, reply_sender),
+                    idempotency_key=_idempotency_key(event.id, "agent-voice-reply"),
+                    payload={
+                        "purpose": "agent-voice-reply",
+                        "error_code": "local_speech_unavailable",
+                    },
+                    status="rejected",
+                    status_rank=0,
+                )
+                db.add(failed_voice)
+            else:
+                failed_voice.status = "rejected"
+            outgoing.media_metadata = {
+                **outgoing.media_metadata,
+                "voice_delivery_outcome": "failed",
+            }
+            _clear_voice_cache(outgoing, settings)
             db.add(
                 OperationalAgentEvent(
                     tenant_id=tenant.id,
@@ -816,6 +982,12 @@ def _process_message(
             PendingAgentAction.status == "pending",
         )
     ).all()
+    pending_actions = [
+        action
+        for action in pending_actions
+        if (action.approval_binding or {}).get("initiating_message_id")
+        == outgoing.initiating_message_id
+    ]
     generated_media = db.scalars(
         select(GeneratedAgentMedia).where(
             GeneratedAgentMedia.tenant_id == tenant.id,
@@ -854,9 +1026,26 @@ def _process_message(
             media.status = "delivered"
             media.delivered_at = utcnow()
             path.unlink(missing_ok=True)
+        except MetaProviderError as exc:
+            db.commit()
+            if (
+                exc.retryable
+                and exc.category not in {"timeout", "transport"}
+                and (exc.http_status is None or exc.http_status < 500)
+            ):
+                raise JobDeferredError(
+                    "Generated media delivery is temporarily unavailable", delay_seconds=5
+                ) from exc
+            media.status = "failed"
+            db.commit()
+            if exc.category in {"timeout", "transport"} or (
+                exc.http_status is not None and exc.http_status >= 500
+            ):
+                raise PermanentJobError(
+                    "Generated media delivery outcome requires reconciliation"
+                ) from exc
         except (
             GeneratedMediaError,
-            MetaProviderError,
             OSError,
             PermanentJobError,
             ValueError,
@@ -956,6 +1145,151 @@ def _process_message(
     return {"status": "accepted"}
 
 
+def _voice_cache_path(outgoing: AgentMessage, settings: Settings) -> Path:
+    tenant_key = hashlib.sha256(outgoing.tenant_id.encode()).hexdigest()[:24]
+    return settings.artifact_root.resolve() / "voice-replies" / tenant_key / f"{outgoing.id}.ogg"
+
+
+def _cached_voice_reply(
+    db: Session,
+    *,
+    outgoing: AgentMessage,
+    settings: Settings,
+    synthesize: Callable[[], dict[str, object]],
+) -> dict[str, object]:
+    """Retain exact private audio across known-unsent retries; never resynthesize it."""
+    path = _voice_cache_path(outgoing, settings)
+    cache = outgoing.media_metadata.get("voice_artifact")
+    if isinstance(cache, dict):
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise PermanentJobError("Prepared voice artifact requires reconciliation") from exc
+        if len(content) != cache.get("size") or hashlib.sha256(content).hexdigest() != cache.get(
+            "sha256"
+        ):
+            raise PermanentJobError("Prepared voice artifact integrity check failed")
+        return {"content": content, "mime_type": cache["mime_type"], "filename": cache["filename"]}
+    note = synthesize()
+    raw_content = note.get("content")
+    if not isinstance(raw_content, bytes) or not 0 < len(raw_content) <= 16_777_216:
+        raise MediaProcessingError("The voice provider returned invalid media")
+    content = raw_content
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+        outgoing.media_metadata = {
+            **outgoing.media_metadata,
+            "voice_artifact": {
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "mime_type": str(note["mime_type"]),
+                "filename": str(note["filename"]),
+            },
+        }
+        db.commit()
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return note
+
+
+def _clear_voice_cache(outgoing: AgentMessage, settings: Settings) -> None:
+    _voice_cache_path(outgoing, settings).unlink(missing_ok=True)
+    outgoing.media_metadata = {
+        key: value for key, value in outgoing.media_metadata.items() if key != "voice_artifact"
+    }
+
+
+def _text_effect_keys(event_id: str, purpose: str, body: str) -> list[str]:
+    chunks = _split_text(body)
+    return [
+        _idempotency_key(event_id, f"{purpose}:chunk:{index:04d}" if len(chunks) > 1 else purpose)
+        for index in range(1, len(chunks) + 1)
+    ]
+
+
+def _freeze_reply_manifest(
+    db: Session, *, event: WebhookEvent, outgoing: AgentMessage, include_voice: bool
+) -> None:
+    """Freeze the entire logical reply before the first transport submission."""
+    run = db.scalar(
+        select(AgentExecutionRun)
+        .where(
+            AgentExecutionRun.tenant_id == outgoing.tenant_id,
+            AgentExecutionRun.user_id == outgoing.user_id,
+            AgentExecutionRun.output_message_id == outgoing.id,
+            AgentExecutionRun.initiating_message_id == outgoing.initiating_message_id,
+        )
+        .with_for_update()
+    )
+    if run is None:
+        raise PermanentJobError("Reply has no verified execution binding")
+    body_digest = hashlib.sha256(outgoing.content.encode()).hexdigest()
+    prior_plan = (outgoing.media_metadata or {}).get("delivery_plan")
+    if run.delivery_effect_keys:
+        if not isinstance(prior_plan, dict) or prior_plan != {
+            "version": 1,
+            "event_id": event.id,
+            "body_sha256": body_digest,
+            "voice_requested": include_voice,
+            "voice_language": outgoing.media_metadata.get("voice_reply_language"),
+        }:
+            raise PermanentJobError("Reply effects changed after delivery was planned")
+        db.commit()
+        return
+    keys = _text_effect_keys(event.id, "agent-reply", outgoing.content)
+    if include_voice:
+        keys.append(_idempotency_key(event.id, "agent-voice-reply"))
+    for media in db.scalars(
+        select(GeneratedAgentMedia)
+        .where(
+            GeneratedAgentMedia.execution_run_id == run.id,
+            GeneratedAgentMedia.agent_message_id == outgoing.id,
+            GeneratedAgentMedia.channel == "whatsapp",
+            GeneratedAgentMedia.status == "pending",
+        )
+        .order_by(GeneratedAgentMedia.id)
+    ):
+        keys.append(_idempotency_key(event.id, f"generated-media:{media.id}"))
+    for action in db.scalars(
+        select(PendingAgentAction)
+        .where(
+            PendingAgentAction.tenant_id == outgoing.tenant_id,
+            PendingAgentAction.user_id == outgoing.user_id,
+            PendingAgentAction.conversation_id == outgoing.conversation_id,
+            PendingAgentAction.status == "pending",
+        )
+        .order_by(PendingAgentAction.id)
+    ):
+        if (action.approval_binding or {}).get(
+            "initiating_message_id"
+        ) != outgoing.initiating_message_id:
+            continue
+        keys.extend(
+            _text_effect_keys(event.id, f"action-preview:{action.id}", action_preview(action))
+        )
+        keys.append(_idempotency_key(event.id, f"action-confirmation:{action.id}"))
+    if len(keys) > 100 or len(set(keys)) != len(keys):
+        raise PermanentJobError("Reply exceeds its bounded effect manifest")
+    if run.delivery_effect_keys and run.delivery_effect_keys != keys:
+        raise PermanentJobError("Reply effects changed after delivery was planned")
+    run.delivery_effect_keys = keys
+    outgoing.media_metadata = {
+        **outgoing.media_metadata,
+        "delivery_plan": {
+            "version": 1,
+            "event_id": event.id,
+            "body_sha256": body_digest,
+            "voice_requested": include_voice,
+            "voice_language": outgoing.media_metadata.get("voice_reply_language"),
+        },
+    }
+    db.commit()
+
+
 def _deliver_text_chunks(
     db: Session,
     *,
@@ -1015,6 +1349,45 @@ def _split_text(body: str, max_length: int = MAX_TEXT_LENGTH) -> list[str]:
     return chunks
 
 
+def assert_delivery_actor(
+    db: Session, *, tenant_id: str | None, user_id: str | None, phone: str
+) -> None:
+    if not tenant_id or not user_id:
+        return  # generic unknown-sender denial contains no business/private data
+    identity = db.scalar(
+        select(PhoneIdentity)
+        .where(
+            PhoneIdentity.tenant_id == tenant_id,
+            PhoneIdentity.user_id == user_id,
+            PhoneIdentity.phone_e164 == phone,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    user = db.get(User, user_id, populate_existing=True)
+    tenant = db.get(Tenant, tenant_id, populate_existing=True)
+    member = db.scalar(
+        select(TenantMembership)
+        .where(
+            TenantMembership.tenant_id == tenant_id,
+            TenantMembership.user_id == user_id,
+            TenantMembership.status == "active",
+        )
+        .with_for_update()
+    )
+    if (
+        not identity
+        or identity.status != "approved"
+        or identity.opt_out
+        or not user
+        or user.status != "active"
+        or not tenant
+        or tenant.status != "active"
+        or not member
+    ):
+        raise PermanentJobError("The receiving account is no longer authorized")
+
+
 def _deliver_once(
     db: Session,
     *,
@@ -1031,6 +1404,15 @@ def _deliver_once(
 ) -> str:
     key = _idempotency_key(event.id, purpose)
     outbound = db.scalar(select(WhatsappMessage).where(WhatsappMessage.idempotency_key == key))
+    if outbound and (
+        (outbound.text_body is not None and outbound.text_body != body)
+        or (outbound.phone_e164 is not None and outbound.phone_e164 != phone)
+        or (
+            outbound.receiver_scope
+            and outbound.receiver_scope != receiver_scope(settings.app_env, meta_sender)
+        )
+    ):
+        raise PermanentJobError("WhatsApp replay differs from its prepared effect")
     if (
         outbound
         and outbound.status_rank >= DELIVERY_STATUS_RANK["sent"]
@@ -1039,11 +1421,25 @@ def _deliver_once(
         return outbound.meta_message_id
     if outbound and outbound.status in {"sending", "ambiguous", "rejected"}:
         raise PermanentJobError("WhatsApp delivery outcome requires reconciliation")
+    source = extract_message(event.payload) or {}
+    control_reply = record_control_reply(
+        db,
+        settings=settings,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        source_id=str(source.get("id") or event.id),
+        source_text=_message_text(source),
+        body=body,
+        purpose=purpose,
+        transport_key=key,
+        sender=meta_sender,
+    )
     if not outbound:
         outbound = WhatsappMessage(
             tenant_id=tenant_id,
             user_id=user_id,
             idempotency_key=key,
+            receiver_scope=receiver_scope(settings.app_env, meta_sender),
             phone_e164=phone,
             direction="outbound",
             message_type="interactive" if interactive_buttons else "text",
@@ -1065,10 +1461,13 @@ def _deliver_once(
         )
         db.add(outbound)
         db.commit()
+    assert_current_job_lease(db)
     outbound.status = "sending"
     outbound.status_rank = DELIVERY_STATUS_RANK["sending"]
     db.commit()
     try:
+        assert_current_job_lease(db)
+        assert_delivery_actor(db, tenant_id=tenant_id, user_id=user_id, phone=phone)
         provider = _messaging_provider(
             settings,
             meta_sender=meta_sender,
@@ -1116,6 +1515,8 @@ def _deliver_once(
         outbound.meta_message_id = f"{message_id}:{key.rsplit(':', 1)[-1][:16]}"
     else:
         outbound.meta_message_id = message_id
+    if control_reply is not None:
+        control_reply.media_metadata = {**control_reply.media_metadata, "delivery_status": "sent"}
     outbound.status = "sent"
     outbound.status_rank = DELIVERY_STATUS_RANK["sent"]
     db.commit()
@@ -1141,6 +1542,18 @@ def _deliver_media_once(
 ) -> str:
     key = _idempotency_key(event.id, purpose)
     outbound = db.scalar(select(WhatsappMessage).where(WhatsappMessage.idempotency_key == key))
+    if outbound and (
+        (
+            outbound.payload.get("sha256")
+            and outbound.payload["sha256"] != hashlib.sha256(content).hexdigest()
+        )
+        or (outbound.phone_e164 is not None and outbound.phone_e164 != phone)
+        or (
+            outbound.receiver_scope
+            and outbound.receiver_scope != receiver_scope(settings.app_env, meta_sender)
+        )
+    ):
+        raise PermanentJobError("WhatsApp media replay differs from its prepared effect")
     if (
         outbound
         and outbound.status_rank >= DELIVERY_STATUS_RANK["sent"]
@@ -1154,6 +1567,7 @@ def _deliver_media_once(
             tenant_id=tenant_id,
             user_id=user_id,
             idempotency_key=key,
+            receiver_scope=receiver_scope(settings.app_env, meta_sender),
             phone_e164=phone,
             direction="outbound",
             message_type=media_type,
@@ -1172,9 +1586,12 @@ def _deliver_media_once(
         db.commit()
     if settings.whatsapp_backend != "meta" or meta_sender is None:
         raise PermanentJobError("WhatsApp media delivery requires the configured Meta sender")
+    assert_current_job_lease(db)
     outbound.status = "sending"
     outbound.status_rank = DELIVERY_STATUS_RANK["sending"]
     db.commit()
+    assert_current_job_lease(db)
+    assert_delivery_actor(db, tenant_id=tenant_id, user_id=user_id, phone=phone)
     client = MetaWhatsAppClient.for_inbound_reply(
         settings,
         waba_id=meta_sender[0],
@@ -1190,6 +1607,8 @@ def _deliver_media_once(
             )
             outbound.payload = {**outbound.payload, "uploaded_media_id": uploaded_id}
             db.commit()
+        assert_current_job_lease(db)
+        assert_delivery_actor(db, tenant_id=tenant_id, user_id=user_id, phone=phone)
         message_id = client.send_media(
             phone,
             media_type=media_type,
@@ -1419,8 +1838,9 @@ class _WhatsAppProgress:
             or self._meta_sender is None
         ):
             return
+        context = copy_context()
         self._thread = Thread(
-            target=self._run,
+            target=lambda: context.run(self._run),
             name="whatsapp-progress",
             daemon=True,
         )
@@ -1477,12 +1897,19 @@ class _WhatsAppProgress:
     def _refresh_typing(self) -> None:
         assert self._meta_sender is not None
         try:
-            MetaWhatsAppClient.for_inbound_reply(
-                self._settings,
-                waba_id=self._meta_sender[0],
-                phone_number_id=self._meta_sender[1],
-            ).mark_read(self._inbound_message_id, typing=True)
-        except (MetaProviderError, ValueError):
+            with SessionLocal() as progress_db:
+                set_security_context(progress_db, tenant_id=self._tenant_id)
+                assert_current_job_lease(progress_db)
+                assert_delivery_actor(
+                    progress_db, tenant_id=self._tenant_id, user_id=self._user_id, phone=self._phone
+                )
+                MetaWhatsAppClient.for_inbound_reply(
+                    self._settings,
+                    waba_id=self._meta_sender[0],
+                    phone_number_id=self._meta_sender[1],
+                ).mark_read(self._inbound_message_id, typing=True)
+        except (MetaProviderError, PermanentJobError, JobLeaseLostError, ValueError):
+            self._done.set()
             return
 
     def _send(self, body: str) -> None:
@@ -1490,18 +1917,22 @@ class _WhatsAppProgress:
             return
         assert self._meta_sender is not None
         try:
-            client = MetaWhatsAppClient.for_inbound_reply(
-                self._settings,
-                waba_id=self._meta_sender[0],
-                phone_number_id=self._meta_sender[1],
-            )
-            client.mark_read(self._inbound_message_id, typing=True)
-            # A slow provider read request may finish after the final answer.
-            # Avoid sending an obsolete progress bubble after that answer.
-            if self._done.is_set():
-                return
             with SessionLocal() as progress_db:
                 set_security_context(progress_db, tenant_id=self._tenant_id)
+                assert_current_job_lease(progress_db)
+                assert_delivery_actor(
+                    progress_db, tenant_id=self._tenant_id, user_id=self._user_id, phone=self._phone
+                )
+                if self._done.is_set():
+                    return
+                MetaWhatsAppClient.for_inbound_reply(
+                    self._settings,
+                    waba_id=self._meta_sender[0],
+                    phone_number_id=self._meta_sender[1],
+                ).mark_read(self._inbound_message_id, typing=True)
+                # A slow provider read request can finish after the final answer.
+                if self._done.is_set():
+                    return
                 progress_event = progress_db.get(WebhookEvent, self._event_id)
                 if progress_event is None:
                     return
@@ -1519,7 +1950,8 @@ class _WhatsAppProgress:
                     meta_sender=self._meta_sender,
                     reply_to_message_id=self._inbound_message_id,
                 )
-        except (MetaProviderError, PermanentJobError, ValueError):
+        except (MetaProviderError, PermanentJobError, JobLeaseLostError, ValueError):
+            self._done.set()
             return
 
 

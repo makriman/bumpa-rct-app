@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
+import proactiveSettings from "./fixtures/proactive-settings.json";
 import {
   apiPath,
   fulfillBusinessProfile,
@@ -37,6 +38,7 @@ async function mockConsumerRouteData(page: Page) {
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
     if (await fulfillBusinessProfile(route)) return;
+    if (await fulfillProactiveSettings(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, { items: [], next_cursor: null });
       return;
@@ -93,6 +95,16 @@ type ChatVisualFixture = {
   onSend?: (route: Route) => Promise<void>;
 };
 
+async function fulfillProactiveSettings(route: Route): Promise<boolean> {
+  if (route.request().method() !== "GET") return false;
+  const path = apiPath(route);
+  if (path === "/api/backend/settings/proactive-insights") {
+    await json(route, proactiveSettings);
+    return true;
+  }
+  return false;
+}
+
 async function mockChatVisualData(
   page: Page,
   { populated = false, onSend }: ChatVisualFixture = {},
@@ -101,6 +113,7 @@ async function mockChatVisualData(
     const path = apiPath(route);
     if (await fulfillSession(route)) return;
     if (await fulfillBusinessProfile(route)) return;
+    if (await fulfillProactiveSettings(route)) return;
     if (path === "/api/backend/chat/conversations/page?limit=30") {
       await json(route, {
         items: populated

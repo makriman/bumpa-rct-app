@@ -32,6 +32,9 @@ class CachedRollbackTests(unittest.TestCase):
 set -u
 docker() { printf '%s\n' "$IMAGE_OUTPUT"; return "$DOCKER_STATUS"; }
 rewrite_release_boundary() { return 0; }
+# This fixture isolates cache availability. Canonical contract rejection is
+# exercised separately by test_canonical_rollback with real deploy functions.
+previous_images_support_canonical_contract() { return 0; }
 run_production_smoke() { return 0; }
 compose_stub() {
   printf '%s\n' "$*" >>"$CALL_LOG"

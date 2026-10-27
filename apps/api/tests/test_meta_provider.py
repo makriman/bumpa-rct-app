@@ -97,6 +97,85 @@ def test_meta_text_and_otp_template_requests_are_bounded_and_typed() -> None:
         provider.send_otp("+2348000000000", "not-code")
 
 
+@pytest.mark.parametrize(
+    "message_id",
+    [
+        "wamid.c3ludGhldGljLWRvdWJsZS1wYWRkaW5nAA==",
+        "wamid.c3ludGhldGljLXNpbmdsZS1wYWRkaW5nAAA=",
+        "wamid.c3ludGhldGljLXVucGFkZGVk",
+        "wamid.base64+slash/value=",
+        "wamid.inbound-1",
+        "w" * 256,
+    ],
+    ids=[
+        "double-padding",
+        "single-padding",
+        "unpadded",
+        "base64-alphabet",
+        "legacy",
+        "max-length",
+    ],
+)
+def test_meta_reply_and_read_paths_preserve_opaque_message_ids(message_id: str) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if payload.get("status") == "read":
+            return httpx.Response(200, json={"success": True})
+        return _success_response(request)
+
+    provider = _client(handler)
+    provider.send_text("+2348000000000", "Hello", reply_to_message_id=message_id)
+    provider.send_interactive_buttons(
+        "+2348000000000",
+        body="Confirm?",
+        buttons=[("confirm:1", "Confirm")],
+        reply_to_message_id=message_id,
+    )
+    provider.send_media(
+        "+2348000000000",
+        media_type="image",
+        media_id="media-12345",
+        reply_to_message_id=message_id,
+    )
+    provider.mark_read(message_id, typing=True)
+
+    assert len(requests) == 4
+    assert all(payload["context"]["message_id"] == message_id for payload in requests[:3])
+    assert requests[3]["message_id"] == message_id
+    assert requests[3]["typing_indicator"] == {"type": "text"}
+
+
+@pytest.mark.parametrize(
+    "message_id", ["", "abcd", "w" * 257, "wamid.bad\n", "wamid. bad", 'wamid."bad']
+)
+def test_meta_reply_and_read_paths_reject_invalid_ids_before_http(message_id: str) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Invalid message IDs must never reach Meta")
+
+    provider = _client(handler)
+    with pytest.raises(ValueError, match="identifier"):
+        provider.send_text("+2348000000000", "Hello", reply_to_message_id=message_id)
+    with pytest.raises(ValueError, match="identifier"):
+        provider.send_interactive_buttons(
+            "+2348000000000",
+            body="Confirm?",
+            buttons=[("confirm:1", "Confirm")],
+            reply_to_message_id=message_id,
+        )
+    with pytest.raises(ValueError, match="identifier"):
+        provider.send_media(
+            "+2348000000000",
+            media_type="image",
+            media_id="media-12345",
+            reply_to_message_id=message_id,
+        )
+    with pytest.raises(ValueError, match="identifier"):
+        provider.mark_read(message_id)
+
+
 def test_meta_interactive_media_read_typing_and_download_paths() -> None:
     requests: list[httpx.Request] = []
     media_content = b"verified-media"
