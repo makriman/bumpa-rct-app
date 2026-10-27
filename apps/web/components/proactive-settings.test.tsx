@@ -321,6 +321,54 @@ describe("optional business summary settings", () => {
     ).toBeVisible();
   });
 
+  it("uses the saved server revision and schedule after normalizing an edited draft", async () => {
+    const saved = subscription("weekly", {
+      id: "weekly-saved",
+      status: "active",
+      revision: 1,
+      phone_identity_id: "phone-backup",
+      timezone: "Europe/London",
+      local_hour: 9,
+      weekday: 2,
+      effective: true,
+    });
+    const fetchMock = mockFetch(settings(), async () =>
+      jsonResponse(settings([saved])),
+    );
+    render(<ProactiveSettings />);
+    const weekly = await form("weekly");
+    fireEvent.change(weekly.getByLabelText("Send only to my selected number"), {
+      target: { value: "phone-primary" },
+    });
+    fireEvent.change(weekly.getByLabelText("Delivery timezone"), {
+      target: { value: "America/New_York" },
+    });
+    fireEvent.click(weekly.getByRole("button", { name: "Subscribe weekly" }));
+
+    await screen.findByRole("button", { name: "Save schedule" });
+    const fresh = await form("weekly");
+    expect(fresh.getByLabelText("Delivery timezone")).toHaveValue(
+      "Europe/London",
+    );
+    expect(fresh.getByLabelText("Send only to my selected number")).toHaveValue(
+      "phone-backup",
+    );
+    expect(fresh.getByLabelText("Send at or after local hour")).toHaveValue(
+      "9",
+    );
+    expect(fresh.getByLabelText("Delivery day")).toHaveValue("2");
+    fireEvent.click(fresh.getByRole("button", { name: "Pause weekly" }));
+    await waitFor(() => expect(puts(fetchMock)).toHaveLength(2));
+    expect(JSON.parse(String(puts(fetchMock)[1][1]?.body))).toMatchObject({
+      expected_revision: 1,
+      status: "paused",
+      phone_identity_id: "phone-backup",
+      timezone: "Europe/London",
+      local_hour: 9,
+      weekday: 2,
+    });
+  });
+
   it("pauses an active subscription with its revision and applies the server's paused state", async () => {
     const active = subscription("daily", {
       id: "daily-existing",

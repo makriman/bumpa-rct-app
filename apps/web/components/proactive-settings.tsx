@@ -25,6 +25,10 @@ type Settings = {
   store_timezone: string;
   notice: string;
 };
+type SubscriptionDraft = Pick<
+  Subscription,
+  "phone_identity_id" | "timezone" | "local_hour" | "weekday"
+>;
 const weekdays = [
   "Monday",
   "Tuesday",
@@ -44,14 +48,16 @@ function SubscriptionForm({
   recipients: Settings["recipients"];
   onSaved: (settings: Settings) => void;
 }) {
-  const [identity, setIdentity] = useState(
-    subscription.phone_identity_id ?? "",
-  );
-  const [timezone, setTimezone] = useState(subscription.timezone);
-  const [hour, setHour] = useState(subscription.local_hour);
-  const [weekday, setWeekday] = useState(subscription.weekday);
+  const [draft, setDraft] = useState<Partial<SubscriptionDraft>>({});
+  const identity =
+    draft.phone_identity_id ?? subscription.phone_identity_id ?? "";
+  const timezone = draft.timezone ?? subscription.timezone;
+  const hour = draft.local_hour ?? subscription.local_hour;
+  const weekday = draft.weekday ?? subscription.weekday;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const updateDraft = (change: Partial<SubscriptionDraft>) =>
+    setDraft((current) => ({ ...current, ...change }));
   const selected = recipients.find((recipient) => recipient.id === identity);
   const cadence = subscription.cadence;
   const save = async (status: "active" | "paused") => {
@@ -116,7 +122,9 @@ function SubscriptionForm({
           className="select"
           value={identity}
           disabled={busy}
-          onChange={(event) => setIdentity(event.target.value)}
+          onChange={(event) =>
+            updateDraft({ phone_identity_id: event.target.value })
+          }
         >
           <option value="">Choose your approved number</option>
           {recipients.map((recipient) => (
@@ -142,7 +150,7 @@ function SubscriptionForm({
           disabled={busy}
           maxLength={64}
           placeholder="Africa/Lagos"
-          onChange={(event) => setTimezone(event.target.value)}
+          onChange={(event) => updateDraft({ timezone: event.target.value })}
         />
       </div>
       <div className="field">
@@ -152,7 +160,9 @@ function SubscriptionForm({
           className="select"
           value={hour}
           disabled={busy}
-          onChange={(event) => setHour(Number(event.target.value))}
+          onChange={(event) =>
+            updateDraft({ local_hour: Number(event.target.value) })
+          }
         >
           {Array.from({ length: 24 }, (_, value) => (
             <option key={value} value={value}>
@@ -169,7 +179,9 @@ function SubscriptionForm({
             className="select"
             value={weekday}
             disabled={busy}
-            onChange={(event) => setWeekday(Number(event.target.value))}
+            onChange={(event) =>
+              updateDraft({ weekday: Number(event.target.value) })
+            }
           >
             {weekdays.map((day, index) => (
               <option key={day} value={index}>
