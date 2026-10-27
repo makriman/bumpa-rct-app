@@ -32,8 +32,11 @@ Meta calling has been enabled or that a production phone call works.
    accuracy; names, amounts, Nigerian English and Pidgin still need evaluation. Hermes retains
    its business context, connector permissions, and action confirmation flow.
 6. Speech interrupts pending playback. Obsolete responses are discarded; an
-   already-running Hermes/tool request is allowed to finish and can still appear
-   in the transcript. Interruption does not undo an action. Approvals must be
+   already-running Hermes request may drain, but its execution capability is
+   fenced on cancellation. Generated, playing, played and interrupted states are
+   tracked separately; unheard output is excluded from subsequent model history.
+   Track consumption is not proof that the human heard it. Interruption does not
+   undo an already accepted external effect. Approvals must be
    reviewed in the app; saying “yes” on a call does not bypass that flow.
 7. Hangup, media failure, shutdown, or the duration limit closes the peer. Redis
    tombstones prevent duplicate/reordered webhooks and restart replays from
@@ -43,7 +46,7 @@ Meta calling has been enabled or that a production phone call works.
 This version is **utterance-based**, not streaming speech-to-speech. It waits for
 700ms of silence by default, and transcription, reasoning, and synthesis add
 latency. English speech only; the service speaks a short AI/transcript disclosure
-when answering. There is one active call per caller and four globally by default.
+when answering. There is one active call per caller and one globally by default until measured capacity supports more.
 The turn buffer is at most 20 seconds, audio playback at most 60 seconds per
 answer, and a call at most 10 minutes. An interrupted worker keeps its capacity
 slot until its synchronous provider request drains. There are no outbound calls,
@@ -141,15 +144,29 @@ and [aiortc API](https://aiortc.readthedocs.io/en/latest/api.html).
 
 The review candidate adds language/failure clarification and gates outgoing media
 until successful acceptance. No live audio quality or latency is established by
-these local tests. A declared four-call capacity is not a measured operating
-capacity: start a future controlled pilot at one call and increase only after
+these local tests. The conservative one-call default is not a measured operating
+capacity. Increase it only after
 measuring STT queue wait, transcription real-time factor, Claude first-result
 latency, Piper first audio and CPU/RAM/swap. Whisper is CPU int8 with two threads
 and one worker; STT and TTS each have process-wide locks in the current control
 service. Keep voice notes and live calls as separate acceptance paths.
 
 A returning call gets its own private call conversation. Generated transcript
-text is not proof that every word was played or heard; track interrupted playback
-separately before using spoken-output history as authoritative user-visible
-context. Caller identity authorization is rechecked after transcription and before
+text is not proof that every word was played or heard. The candidate binds
+playback callbacks to the exact call, message and generation, marks interruptions,
+and excludes generated-but-unplayed output from model history. Caller identity authorization is rechecked after transcription and before
 speech. An utterance cannot bypass the app's exact action confirmation flow.
+
+
+## Matching release and speech notices
+
+Use the same source revision for API, Hermes overlays and the optional voice
+worker. Local actual-image checks cover native Opus/VAD, resampling,
+muted-before-accept playback and controlled pre-accept/accept ordering; they do
+not establish live Meta/TURN readiness or droplet latency. Keep the voice profile
+off until the separate account, network and designated-caller gates are approved.
+
+The pinned speech engine, model cards and preserved notices are recorded in
+[third-party speech notices](third-party-speech-notices.md). The model-card
+lineage and applicable reuse/source-delivery questions need review before a
+commercial or public voice offering; this guide does not grant or change licenses.
