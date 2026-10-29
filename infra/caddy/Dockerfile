@@ -9,7 +9,7 @@ ADD --checksum=sha256:b430516910839fbaf35c0a9e9df80d1e2e30aa792530293c39f4a97a1b
     /tmp/caddy.tar.gz
 RUN mkdir -p /out \
     && tar -xzf /tmp/caddy.tar.gz -C /src/caddy \
-    && go get google.golang.org/grpc@v1.84.0 golang.org/x/net@v0.61.0 golang.org/x/crypto@v0.58.0 \
+    && go get google.golang.org/grpc@v1.84.0 golang.org/x/net@v0.61.0 golang.org/x/crypto@v0.58.0 github.com/go-jose/go-jose/v4@v4.1.6 \
     && go mod vendor \
     && go build -mod=vendor -trimpath -buildvcs=false \
       -tags=nobadger,nomysql,nopgx \
@@ -18,6 +18,7 @@ RUN mkdir -p /out \
     && go version -m /out/caddy \
       | grep -F 'google.golang.org/grpc' \
       | grep -F 'v1.84.0' \
+    && go version -m /out/caddy | grep -F 'github.com/go-jose/go-jose/v4' | grep -F 'v4.1.6' \
     && /out/caddy version
 
 FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35 AS runtime
