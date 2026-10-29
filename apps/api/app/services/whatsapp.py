@@ -28,6 +28,7 @@ from app.core.time import utcnow
 from app.db.models import (
     AgentExecutionRun,
     AgentMessage,
+    AsyncJob,
     Conversation,
     GeneratedAgentMedia,
     HermesProfile,
@@ -48,6 +49,7 @@ from app.jobs.runtime import (
     JobLeaseLostError,
     PermanentJobError,
     assert_current_job_lease,
+    current_job_fence,
 )
 from app.providers.contracts import MessagingProvider
 from app.providers.hermes import HermesProfileError, endpoint_for
@@ -446,6 +448,7 @@ def _process_message(
     assert identity is not None
     assert tenant is not None
     assert user is not None
+    _bind_inbound_job_tenant(db, event=event, tenant_id=tenant.id)
     if text.upper() == "START":
         identity.opt_out = False
         record_research_event(
@@ -1347,6 +1350,32 @@ def _split_text(body: str, max_length: int = MAX_TEXT_LENGTH) -> list[str]:
         remaining = remaining[split_at:]
     chunks.append(remaining)
     return chunks
+
+
+def _bind_inbound_job_tenant(db: Session, *, event: WebhookEvent, tenant_id: str) -> None:
+    """Bind only the current verified ingress claim before tenant-scoped effects.
+
+    Ingress cannot assign a tenant before identifying and authorizing its sender.
+    Progress and MCP use tenant-only sessions, so the worker must durably bind the
+    job after that verification. Never broaden their RLS context or detach the
+    shared revocation fence to hide a missing job.
+    """
+    fence = current_job_fence()
+    if fence is None:
+        return  # Inline local processing has no durable worker claim.
+    assert_current_job_lease(db)
+    job = db.get(AsyncJob, fence.job_id, populate_existing=True)
+    if (
+        job is None
+        or job.kind != "whatsapp.process_webhook"
+        or job.payload.get("event_id") != event.id
+        or job.tenant_id not in {None, tenant_id}
+    ):
+        raise PermanentJobError("Verified ingress job scope does not match its claim")
+    job.tenant_id = tenant_id
+    # Release the claim-row lock before preprocessing/progress can renew or
+    # validate it. Repeated admission preserves the same tenant and claim epoch.
+    db.commit()
 
 
 def assert_delivery_actor(

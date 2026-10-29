@@ -20,7 +20,7 @@ from typing import Any, TypeVar, cast
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi import HTTPException, Request, Response
-from sqlalchemy import Engine, Table, create_engine, inspect, text, update
+from sqlalchemy import Engine, Table, create_engine, inspect, select, text, update
 from sqlalchemy.engine import URL, Connection, RowMapping, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
@@ -1831,6 +1831,204 @@ def _exercise_role(
         if not authenticated.access_token or authenticated.user.get("id") != user_ids[0]:
             raise AssertionError(
                 "The auth verify route did not resolve the active tenant-mapped login identity"
+            )
+
+    _exercise_whatsapp_job_scope(app_engine, admin_engine, tenant_ids, user_ids)
+
+
+def _exercise_whatsapp_job_scope(
+    app_engine: Engine,
+    admin_engine: Engine,
+    tenant_ids: tuple[str, str],
+    user_ids: tuple[str, str],
+) -> None:
+    """A real non-bypass progress/MCP reader must see its verified worker job."""
+    from contextvars import copy_context
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from app.core.time import utcnow
+    from app.db.session import set_security_context
+    from app.jobs.runtime import (
+        JobFence,
+        JobLeaseLostError,
+        bind_job_fence,
+        claim_job,
+        enqueue_job,
+    )
+    from app.providers.meta import MetaWhatsAppClient
+    from app.services import whatsapp
+    from app.services.agent_execution import require_active_run
+
+    tenant_a, tenant_b = tenant_ids
+    factory = sessionmaker(bind=app_engine, expire_on_commit=False, autoflush=False)
+    event_id = "job-scope-" + secrets.token_hex(8)
+    settings = Settings(
+        app_env="test",
+        whatsapp_backend="meta",
+        meta_waba_id="123456",
+        meta_phone_number_id="654321",
+        meta_system_user_access_token=secrets.token_urlsafe(32),
+        whatsapp_progress_enabled=True,
+    )
+    job_id: str | None = None
+
+    class CheckpointReached(Exception):
+        pass
+
+    try:
+        with factory() as db:
+            set_security_context(db, privileged=True)
+            identity = db.scalar(
+                select(models.PhoneIdentity).where(models.PhoneIdentity.tenant_id == tenant_a)
+            )
+            assert identity is not None
+            phone = identity.phone_e164
+            job, _ = enqueue_job(
+                db,
+                kind="whatsapp.process_webhook",
+                payload={"event_id": event_id},
+                idempotency_key=event_id,
+            )
+            db.commit()
+            job_id = job.id
+            assert claim_job(db, job_id, "synthetic-worker") is not None
+            fence = JobFence(job_id, "synthetic-worker", job.claim_epoch, 300)
+            receipt = models.WebhookEvent(
+                id=event_id,
+                provider="whatsapp",
+                external_event_id=event_id,
+                signature_valid=True,
+                payload={
+                    "entry": [
+                        {
+                            "id": "123456",
+                            "changes": [
+                                {
+                                    "value": {
+                                        "metadata": {"phone_number_id": "654321"},
+                                        "messages": [
+                                            {
+                                                "id": event_id,
+                                                "from": phone.lstrip("+"),
+                                                "type": "text",
+                                                "text": {"body": "Synthetic greeting"},
+                                            }
+                                        ],
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            message = whatsapp.extract_message(receipt.payload)
+            assert message is not None
+            progress = whatsapp._WhatsAppProgress(
+                settings=settings,
+                event_id=event_id,
+                inbound_message_id=event_id,
+                phone=phone,
+                tenant_id=tenant_a,
+                user_id=user_ids[0],
+                meta_sender=("123456", "654321"),
+            )
+            with (
+                patch.object(whatsapp, "SessionLocal", factory),
+                patch.object(MetaWhatsAppClient, "mark_read") as read,
+            ):
+
+                def checkpoint(*_args: Any, **_kwargs: Any) -> None:
+                    before = read.call_count
+                    copy_context().run(progress._refresh_typing)
+                    if fence.invalid or read.call_count != before + 1:
+                        raise AssertionError(
+                            "Tenant progress falsely revoked its unscoped originating job"
+                        )
+                    raise CheckpointReached
+
+                with (
+                    bind_job_fence(fence),
+                    patch.object(whatsapp, "consume_operation_rate_limit", checkpoint),
+                ):
+                    try:
+                        whatsapp._process_message(db, receipt, message, settings)
+                    except CheckpointReached:
+                        pass
+                    else:
+                        raise AssertionError("Verified job-scope checkpoint was not exercised")
+            db.rollback()
+            bound = db.get(models.AsyncJob, job_id, populate_existing=True)
+            assert bound is not None and bound.tenant_id == tenant_a
+            execution = db.scalar(
+                select(models.AgentExecutionRun).where(
+                    models.AgentExecutionRun.tenant_id == tenant_a
+                )
+            )
+            assert execution is not None
+            conversation = db.get(models.Conversation, execution.conversation_id)
+            assert conversation is not None
+            conversation.active_run_id = execution.id
+            execution.status = "running"
+            execution.expires_at = utcnow() + timedelta(minutes=1)
+            execution.job_id = job_id
+            execution.job_claim_epoch = fence.claim_epoch
+            execution.job_stale_lock_seconds = 300
+            db.commit()
+            run_id, conversation_id, message_id = (
+                execution.id,
+                execution.conversation_id,
+                execution.initiating_message_id,
+            )
+        with factory() as reader:
+            set_security_context(reader, tenant_id=tenant_a)
+            checked = require_active_run(
+                reader,
+                run_id=run_id,
+                tenant_id=tenant_a,
+                user_id=user_ids[0],
+                conversation_id=conversation_id,
+                initiating_message_id=message_id,
+                channel="web",
+            )
+            assert checked.id == run_id
+            reader.rollback()
+        with factory() as foreign:
+            set_security_context(foreign, tenant_id=tenant_b)
+            assert foreign.get(models.AsyncJob, job_id) is None
+        with factory() as revoked:
+            set_security_context(revoked, privileged=True)
+            current = revoked.get(models.AsyncJob, job_id)
+            assert current is not None
+            current.claim_epoch += 1
+            revoked.commit()
+        with factory() as stale:
+            set_security_context(stale, tenant_id=tenant_a)
+            try:
+                require_active_run(
+                    stale,
+                    run_id=run_id,
+                    tenant_id=tenant_a,
+                    user_id=user_ids[0],
+                    conversation_id=conversation_id,
+                    initiating_message_id=message_id,
+                    channel="web",
+                )
+            except JobLeaseLostError:
+                pass
+            else:
+                raise AssertionError("Tenant binding revived a revoked job claim")
+        print("PostgreSQL WhatsApp worker/progress/MCP tenant scope and revocation passed.")
+    finally:
+        with admin_engine.begin() as connection:
+            if job_id is not None:
+                connection.execute(
+                    text("DELETE FROM job_outbox WHERE job_id=:job"), {"job": job_id}
+                )
+                connection.execute(text("DELETE FROM async_jobs WHERE id=:job"), {"job": job_id})
+            connection.execute(
+                text("DELETE FROM whatsapp_messages WHERE idempotency_key=:key"),
+                {"key": whatsapp._idempotency_key(event_id, "inbound")},
             )
 
 
