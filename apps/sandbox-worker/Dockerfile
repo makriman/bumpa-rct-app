@@ -6,11 +6,12 @@ WORKDIR /src/cloudflared
 ADD --checksum=sha256:68d298c522aef45fe8412e0ccf8f21ff12a6ad768aa69cbc23e10eac688ac8c8 \
     https://github.com/cloudflare/cloudflared/archive/refs/tags/2026.10.3.tar.gz /tmp/cloudflared.tar.gz
 RUN tar -xzf /tmp/cloudflared.tar.gz --strip-components=1 \
-    && go get github.com/klauspost/compress@v1.18.7 \
+    && go get github.com/klauspost/compress@v1.18.7 github.com/go-jose/go-jose/v4@v4.1.6 \
     && go build -mod=mod -trimpath -buildvcs=false \
         -ldflags='-s -w -X main.Version=2026.10.3 -X main.BuildTime=2026-10-22' \
         -o /out/cloudflared ./cmd/cloudflared \
-    && go version -m /out/cloudflared | grep -F 'github.com/klauspost/compress' | grep -F 'v1.18.7'
+    && go version -m /out/cloudflared | grep -F 'github.com/klauspost/compress' | grep -F 'v1.18.7' \
+    && go version -m /out/cloudflared | grep -F 'github.com/go-jose/go-jose/v4' | grep -F 'v4.1.6'
 
 FROM docker.io/cloudflare/sandbox:0.12.14-python@sha256:226351e2bbb2ab1f97f921e3e5930d7eb908a8f79865aa04b9a41553b2260230 AS brotli-builder
 USER root
@@ -52,11 +53,12 @@ RUN npm install --global npm@12.2.1 \
     && cp -R /tmp/npm-security/node_modules/undici /usr/local/lib/node_modules/npm/node_modules/ \
     && rm -rf /tmp/npm-security \
     && python3 -m pip install --no-cache-dir --upgrade \
-        setuptools==84.2.1 wheel==0.48.0 urllib3==2.8.0 msgpack==1.2.1 \
+        setuptools==84.2.1 wheel==0.48.0 urllib3==2.8.0 msgpack==1.2.3 \
     && rm -rf /usr/local/python/lib/python3.11/ensurepip \
     && npm --version | grep -Fx '12.2.1' \
     && node -e 'const {Address4}=require("/usr/local/lib/node_modules/npm/node_modules/ip-address"); new Address4("127.0.0.1")' \
-    && python3 -m pip check
+    && python3 -m pip check \
+    && python3 -c 'import msgpack; assert msgpack.__version__ == "1.2.3"'
 
 COPY --from=tunnel-builder /out/cloudflared /usr/local/bin/cloudflared
 RUN chmod 0755 /usr/local/bin/cloudflared \
