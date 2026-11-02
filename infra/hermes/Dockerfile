@@ -32,6 +32,8 @@ RUN uv --no-config pip install --python /opt/hermes/.venv/bin/python --no-cache 
         faster-whisper==1.2.1 \
         numpy==2.5.4 \
         piper-tts==1.8.0 \
+    && uv --no-config pip install --python /opt/hermes/.venv/bin/python --no-cache --no-deps \
+        pyasn1==0.6.5 \
     && /opt/hermes/tools/python-3.14.9+20261021-linux-x64/bin/python -c 'import importlib.util, subprocess, sys; subprocess.run([sys.executable, "-m", "pip", "uninstall", "--yes", "pip"], check=True) if importlib.util.find_spec("pip") else None' \
     && rm -rf /opt/hermes/tools/python-3.14.9+20261021-linux-x64/lib/python3.14/ensurepip
 
@@ -76,7 +78,8 @@ RUN install -d -m 0755 /opt/hermes/models/faster-whisper-base \
         'aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4' \
         '/opt/hermes/models/piper/en_GB-alba-medium.onnx.json' \
         | sha256sum --check --strict \
-    && /opt/hermes/.venv/bin/python -c 'import importlib.metadata as m; expected={"aiohttp":"3.14.5","certifi":"2026.10.19","cryptography":"50.0.2","oauthlib":"4.0.0","opentelemetry-api":"1.45.1","pillow":"13.0.0"}; actual={name:m.version(name) for name in expected}; assert actual == expected, actual' \
+    && /opt/hermes/.venv/bin/python -c 'import importlib.metadata as m; expected={"aiohttp":"3.14.5","certifi":"2026.10.19","cryptography":"50.0.2","oauthlib":"4.0.0","opentelemetry-api":"1.45.1","pillow":"13.0.0","pyasn1":"0.6.5"}; actual={name:m.version(name) for name in expected}; assert actual == expected, actual' \
+    && /opt/hermes/.venv/bin/python -c 'from pyasn1.codec.der.encoder import encode; from pyasn1.codec.der.decoder import decode; from pyasn1.type.univ import Integer; assert decode(encode(Integer(42)))[0] == 42' \
     && /opt/hermes/.venv/bin/python -c 'from aiohttp import web; from gateway.platforms.api_server import check_api_server_requirements; assert check_api_server_requirements()' \
     && /opt/hermes/.venv/bin/python -c 'import faster_whisper, piper; from pathlib import Path; assert Path("/opt/hermes/models/faster-whisper-base/model.bin").is_file(); assert Path("/opt/hermes/models/piper/en_GB-alba-medium.onnx").is_file()'
 

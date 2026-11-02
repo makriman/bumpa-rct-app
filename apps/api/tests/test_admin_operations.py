@@ -395,9 +395,11 @@ def test_hermes_control_client_rejects_non_private_and_invalid_responses() -> No
     assert seen[0].url == "http://hermes:8699/v1/profiles/tenant_safe/restart"
     assert seen[0].headers["authorization"] == "Bearer profile-key"
     assert seen[0].content == b'{"confirmation":"restart"}'
+    assert seen[0].extensions["timeout"]["read"] == 25
     assert seen[1].url == "http://hermes:8699/v1/profiles/tenant_safe/activate"
     assert seen[1].headers["authorization"] == "Bearer profile-key"
     assert seen[1].content == b'{"confirmation":"activate"}'
+    assert seen[1].extensions["timeout"]["read"] == 45
 
     invalid = Settings(app_env="test", hermes_base_internal_host="http://localhost")
     with pytest.raises(Exception, match="private runtime boundary"):

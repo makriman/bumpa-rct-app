@@ -428,6 +428,8 @@ services:
   hermes:
     image: ${HERMES_IMAGE:?Set immutable HERMES_IMAGE}
     build: !reset null
+    # Preserve the existing 2 GiB swap allowance alongside the 4 GiB RAM cap.
+    memswap_limit: 6G
     command: ["sleep", "infinity"]
     environment:
       ANTHROPIC_API_KEY_FILE: /run/secrets/hermes_anthropic_api_key
@@ -470,7 +472,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
           cpus: "2.0"
     logging:
       driver: json-file

@@ -443,7 +443,10 @@ def restart_profile(profile_name: str, *, timeout_seconds: int = 8) -> None:
     _run_gateway(profile_name, "restart", timeout_seconds=timeout_seconds)
 
 
-def start_profile(profile_name: str, *, timeout_seconds: int = 8) -> None:
+def start_profile(profile_name: str, *, timeout_seconds: int = 20) -> None:
+    # Native cold starts exceeded twelve seconds under the production CPU cap.
+    # Reserve time for readiness and registration inside the client's larger
+    # activation budget; existing-profile restart behavior remains unchanged.
     _run_gateway(profile_name, "start", timeout_seconds=timeout_seconds)
 
 
