@@ -443,7 +443,10 @@ def restart_profile(profile_name: str, *, timeout_seconds: int = 8) -> None:
     _run_gateway(profile_name, "restart", timeout_seconds=timeout_seconds)
 
 
-def start_profile(profile_name: str, *, timeout_seconds: int = 8) -> None:
+def start_profile(profile_name: str, *, timeout_seconds: int = 12) -> None:
+    # The native CLI's cold profile startup can exceed eight seconds. Keep the
+    # start plus ten-second readiness budget below the API client's 25-second
+    # control timeout; existing-profile restart behavior remains unchanged.
     _run_gateway(profile_name, "start", timeout_seconds=timeout_seconds)
 
 
