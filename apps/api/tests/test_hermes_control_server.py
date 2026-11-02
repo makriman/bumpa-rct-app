@@ -160,6 +160,7 @@ def test_lifecycle_invokes_only_native_profile_gateway_commands(
         "gateway",
         "start",
     ]
+    assert captured["timeout"] == 12
 
 
 def test_restart_failure_never_returns_command_output(monkeypatch: pytest.MonkeyPatch) -> None:
