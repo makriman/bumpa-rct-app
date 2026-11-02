@@ -57,7 +57,9 @@ class HermesControlClient:
         url = self._control_url(profile_name, operation)
         try:
             with httpx.Client(
-                timeout=httpx.Timeout(connect=3, read=25, write=3, pool=3),
+                timeout=httpx.Timeout(
+                    connect=3, read=45 if operation == "activate" else 25, write=3, pool=3
+                ),
                 follow_redirects=False,
                 trust_env=False,
                 transport=self._transport,
