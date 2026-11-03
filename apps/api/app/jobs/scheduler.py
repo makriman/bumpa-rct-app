@@ -121,7 +121,7 @@ def _ensure_bumpa_sync_jobs(
     settings: Settings,
     now: datetime | None = None,
 ) -> int:
-    """Create one rolling Bumpa refresh per active connection and store-local day."""
+    """Create one rolling refresh ending yesterday per connection and store-local day."""
 
     if not settings.bumpa_scheduled_sync_enabled:
         return 0
@@ -144,7 +144,8 @@ def _ensure_bumpa_sync_jobs(
             continue
         if local_now.hour < settings.bumpa_scheduled_sync_local_hour:
             continue
-        date_to = local_now.date()
+        local_day = local_now.date()
+        date_to = local_day - timedelta(days=1)
         date_from = date_to - timedelta(days=settings.bumpa_scheduled_sync_window_days - 1)
         payload = {
             "tenant_id": connection.tenant_id,
@@ -159,7 +160,7 @@ def _ensure_bumpa_sync_jobs(
             tenant_id=connection.tenant_id,
             idempotency_key=(
                 "scheduled-bumpa-sync:"
-                f"{connection.id}:{connection.boundary_revision}:{date_to.isoformat()}"
+                f"{connection.id}:{connection.boundary_revision}:{local_day.isoformat()}"
             ),
             payload=payload,
             max_attempts=5,

@@ -220,34 +220,143 @@ def test_scheduler_uses_tenant_timezone_and_idempotent_calendar_slots() -> None:
         db.rollback()
 
 
-def test_scheduler_enqueues_one_store_local_bumpa_refresh_per_day() -> None:
+@pytest.mark.parametrize(
+    ("store_timezone", "due_at", "window_days", "expected_from", "expected_to"),
+    [
+        pytest.param(
+            "Africa/Lagos",
+            "2026-07-13T02:00:00+00:00",
+            30,
+            "2026-06-13",
+            "2026-07-12",
+            id="lagos",
+        ),
+        pytest.param(
+            "Asia/Kolkata",
+            "2026-11-03T21:30:00+00:00",
+            30,
+            "2026-10-05",
+            "2026-11-03",
+            id="half-hour-offset",
+        ),
+        pytest.param(
+            "Pacific/Kiritimati",
+            "2025-12-31T13:00:00+00:00",
+            30,
+            "2025-12-02",
+            "2025-12-31",
+            id="positive-offset-year-rollover",
+        ),
+        pytest.param(
+            "America/Los_Angeles",
+            "2026-01-01T11:00:00+00:00",
+            30,
+            "2025-12-02",
+            "2025-12-31",
+            id="negative-offset-year-rollover",
+        ),
+        pytest.param(
+            "UTC",
+            "2026-05-01T03:00:00+00:00",
+            30,
+            "2026-04-01",
+            "2026-04-30",
+            id="month-rollover",
+        ),
+        pytest.param(
+            "UTC",
+            "2028-03-01T03:00:00+00:00",
+            30,
+            "2028-01-31",
+            "2028-02-29",
+            id="leap-day",
+        ),
+        pytest.param(
+            "America/New_York",
+            "2026-03-08T07:00:00+00:00",
+            30,
+            "2026-02-06",
+            "2026-03-07",
+            id="spring-forward-schedule",
+        ),
+        pytest.param(
+            "America/New_York",
+            "2026-03-09T07:00:00+00:00",
+            30,
+            "2026-02-07",
+            "2026-03-08",
+            id="completed-23-hour-day",
+        ),
+        pytest.param(
+            "America/New_York",
+            "2026-11-01T08:00:00+00:00",
+            30,
+            "2026-10-02",
+            "2026-10-31",
+            id="fall-back-schedule",
+        ),
+        pytest.param(
+            "America/New_York",
+            "2026-11-02T08:00:00+00:00",
+            30,
+            "2026-10-03",
+            "2026-11-01",
+            id="completed-25-hour-day",
+        ),
+        pytest.param(
+            "Africa/Lagos",
+            "2026-07-13T02:00:00+00:00",
+            7,
+            "2026-07-06",
+            "2026-07-12",
+            id="configured-seven-day-window",
+        ),
+        pytest.param(
+            "Africa/Lagos",
+            "2026-07-13T02:00:00+00:00",
+            1,
+            "2026-07-12",
+            "2026-07-12",
+            id="configured-single-day-window",
+        ),
+    ],
+)
+def test_scheduler_enqueues_one_store_local_bumpa_refresh_per_day(
+    store_timezone: str,
+    due_at: str,
+    window_days: int,
+    expected_from: str,
+    expected_to: str,
+) -> None:
     settings = _settings(
         bumpa_scheduled_sync_enabled=True,
         bumpa_scheduled_sync_local_hour=3,
-        bumpa_scheduled_sync_window_days=30,
+        bumpa_scheduled_sync_window_days=window_days,
     )
     with SessionLocal() as db:
-        tenant, _, _ = _tenant_owner(
-            db, slug=f"sync-schedule-{new_id()[:8]}", timezone="Africa/Lagos"
-        )
+        tenant, _, _ = _tenant_owner(db, slug=f"sync-schedule-{new_id()[:8]}", timezone="UTC")
         connection = BumpaConnection(
             id=new_id(),
             tenant_id=tenant.id,
             encrypted_api_key="encrypted",
             scope_type="business_id",
             scope_id="scope",
-            store_timezone="Africa/Lagos",
+            store_timezone=store_timezone,
             provider="bumpa",
             status="active",
         )
         db.add(connection)
         db.flush()
-        before_local_hour = datetime(2026, 7, 13, 1, 59, tzinfo=UTC)
-        due = datetime(2026, 7, 13, 2, 0, tzinfo=UTC)
+        due = datetime.fromisoformat(due_at)
+        before_local_hour = due - timedelta(minutes=1)
 
         assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=before_local_hour) == 0
         assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=due) == 1
         assert scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=due) == 0
+        assert (
+            scheduler._ensure_bumpa_sync_jobs(db, settings=settings, now=due + timedelta(hours=20))
+            == 0
+        )
 
         job = db.scalar(
             select(AsyncJob).where(
@@ -260,9 +369,16 @@ def test_scheduler_enqueues_one_store_local_bumpa_refresh_per_day() -> None:
             "tenant_id": tenant.id,
             "connection_id": connection.id,
             "boundary_revision": 1,
-            "date_from": "2026-06-14",
-            "date_to": "2026-07-13",
+            "date_from": expected_from,
+            "date_to": expected_to,
         }
+        assert (date.fromisoformat(expected_to) - date.fromisoformat(expected_from)).days == (
+            window_days - 1
+        )
+        scheduled_day = date.fromisoformat(expected_to) + timedelta(days=1)
+        assert job.idempotency_key == (
+            f"scheduled-bumpa-sync:{connection.id}:1:{scheduled_day.isoformat()}"
+        )
         db.rollback()
 
 
