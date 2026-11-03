@@ -41,6 +41,12 @@ send behavior at the adapter/job boundaries.
 
 ## Bumpa contract
 
+Scheduled refreshes run at the configured store-local hour (03:00 by default) and
+request a rolling window ending on the previous local calendar day. The default
+30-day window includes both endpoints. Daily job idempotency remains tied to the
+scheduling day. This excludes the current unfinished day; it does not establish a
+provider data-finalization guarantee or change analytics comparison validation.
+
 The defined read surface is ten analytics datasets plus paginated orders. Code and
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
