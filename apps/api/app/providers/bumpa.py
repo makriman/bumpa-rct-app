@@ -335,10 +335,19 @@ class BumpaClient:
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         if area not in DATASETS or dataset not in DATASETS[area]:
             raise ValueError("Unsupported Bumpa analytics dataset")
+        if date_to < date_from:
+            raise ValueError("Invalid Bumpa analytics date range")
+        # Bumpa's implicit comparison can leave a gap at calendar boundaries.
+        # Request its documented explicit comparison window in store-local days;
+        # response validation still rejects malformed or nonadjacent evidence.
+        compare_to = date_from - timedelta(days=1)
+        compare_from = compare_to - (date_to - date_from)
         params = {
             "dataset": dataset,
             "from": date_from.isoformat(),
             "to": date_to.isoformat(),
+            "compare_from": compare_from.isoformat(),
+            "compare_to": compare_to.isoformat(),
             **self._scope,
         }
         return self._request(

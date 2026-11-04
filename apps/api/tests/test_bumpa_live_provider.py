@@ -186,6 +186,13 @@ def test_live_bumpa_sync_reads_all_datasets_and_order_pages_without_key_leakage(
     assert result.rate_limit_limit == 100
     assert result.rate_limit_remaining == 88
     assert len([request for request in requests if request.url.path.endswith("/orders")]) == 2
+    for request in requests:
+        if request.url.path.endswith("/orders"):
+            assert "compare_from" not in request.url.params
+            assert "compare_to" not in request.url.params
+        else:
+            assert request.url.params["compare_from"] == "2025-12-01"
+            assert request.url.params["compare_to"] == "2025-12-31"
     assert "super-secret-test-key" not in repr(result)
     assert raw_request_id not in repr(result)
     assert any(
@@ -432,6 +439,97 @@ def test_live_bumpa_retries_rate_limits_and_bounds_retry_after() -> None:
     )
     assert status == 200 and payload["data"]
     assert calls == 2 and sleeps == [10.0]
+
+
+@pytest.mark.parametrize(
+    ("date_from", "date_to", "compare_from", "compare_to", "timezone_name"),
+    [
+        ("2026-10-05", "2026-11-03", "2026-09-05", "2026-10-04", "Africa/Lagos"),
+        ("2026-01-01", "2026-01-30", "2025-12-02", "2025-12-31", "Africa/Lagos"),
+        ("2024-03-01", "2024-03-30", "2024-01-31", "2024-02-29", "Africa/Lagos"),
+        ("2026-03-08", "2026-03-08", "2026-03-07", "2026-03-07", "America/New_York"),
+        ("2026-11-01", "2026-11-01", "2026-10-31", "2026-10-31", "America/New_York"),
+    ],
+)
+def test_analytics_requests_explicit_adjacent_equal_calendar_comparison(
+    date_from: str,
+    date_to: str,
+    compare_from: str,
+    compare_to: str,
+    timezone_name: str,
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _analytics_response(request)
+
+    provider = BumpaClient(
+        "secret",
+        "business_id",
+        "business-test",
+        store_timezone=timezone_name,
+        client=_client(httpx.MockTransport(respond)),
+    )
+    provider.get_analytics(
+        "sales", "total_sales", date.fromisoformat(date_from), date.fromisoformat(date_to)
+    )
+
+    assert len(captured) == 1
+    assert dict(captured[0].url.params) == {
+        "dataset": "total_sales",
+        "from": date_from,
+        "to": date_to,
+        "compare_from": compare_from,
+        "compare_to": compare_to,
+        "business_id": "business-test",
+    }
+
+
+def test_analytics_rejects_reversed_window_without_requesting_bumpa() -> None:
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("Invalid window must not reach Bumpa")
+
+    provider = BumpaClient(
+        "secret",
+        "location_id",
+        "location-test",
+        client=_client(httpx.MockTransport(unexpected_request)),
+    )
+    with pytest.raises(ValueError, match="Invalid Bumpa analytics date range"):
+        provider.get_analytics("sales", "total_sales", date(2026, 11, 3), date(2026, 10, 5))
+
+
+@pytest.mark.parametrize("provider_honors_comparison", [True, False])
+def test_explicit_comparison_keeps_gap_validation_fail_closed(
+    provider_honors_comparison: bool,
+) -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json=_empty_orders())
+        payload = _analytics_response(request).json()
+        if request.url.params["dataset"] == "total_sales":
+            assert request.url.params["compare_from"] == "2026-09-05"
+            assert request.url.params["compare_to"] == "2026-10-04"
+            payload["data"]["chart"]["previous_period"]["range"] = [
+                request.url.params["compare_from"],
+                request.url.params["compare_to"] if provider_honors_comparison else "2026-10-03",
+            ]
+        return httpx.Response(200, json=payload)
+
+    provider = BumpaClient(
+        "secret", "business_id", "business-test", client=_client(httpx.MockTransport(respond))
+    )
+    result = provider.sync(date(2026, 10, 5), date(2026, 11, 3))
+    total_sales = next(
+        row for row in result.datasets if row.resource == "sales" and row.dataset == "total_sales"
+    )
+    assert total_sales.availability == ("available" if provider_honors_comparison else "error")
+    if not provider_honors_comparison:
+        assert total_sales.value is None
+        response = next(row for row in result.responses if row.dataset == "total_sales")
+        assert response.failure_kind == "invalid_response"
+    assert result.orders_availability == "available"
 
 
 def test_products_overview_gets_only_the_extended_endpoint_read_timeout() -> None:
