@@ -47,6 +47,15 @@ request a rolling window ending on the previous local calendar day. The default
 scheduling day. This excludes the current unfinished day; it does not establish a
 provider data-finalization guarantee or change analytics comparison validation.
 
+Analytics requests send [Bumpa's documented](https://docs.bumpa.io/) `compare_from` and `compare_to`
+parameters for the immediately preceding, equal-length inclusive calendar window.
+For example, October 5–November 3 requests September 5–October 4 for comparison.
+Both windows use store-local dates, including across DST transitions; they are not
+fixed multiples of 24 hours. This avoids reliance on the provider's implicit
+comparison calculation. Existing response date, adjacency and currency validation
+remains in force; invalid evidence still fails closed if the provider ignores
+these parameters.
+
 The defined read surface is ten analytics datasets plus paginated orders. Code and
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
@@ -65,6 +74,13 @@ with `store_currency` used only as a fallback; conflicting aliases, nested line-
 claims, malformed codes, or invalid monetary facts fail the page closed. Customer
 ranking identity is removed, anonymous/deleted-customer aggregate counts remain
 usable, and product ranking labels accept product-specific fields only.
+
+Canonical order publication has a stricter whole-window contract: every order
+must be dated within the requested store-local window and use the configured
+store currency. A parseable `created_at` is not substituted for a present
+`order_date` that falls outside the window, and mixed-currency orders are not
+silently dropped or converted. These guards preserve the previous publication
+when the provider list cannot establish complete dated single-currency membership.
 
 Every queued sync captures the active `boundary_revision`. A material provider,
 scope, timezone, or currency replacement invalidates queued work, fences in-flight
