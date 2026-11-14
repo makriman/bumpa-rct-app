@@ -1,31 +1,8 @@
 import { SurfaceLoginPage } from "@/components/surface-login-page";
 import { createPhoneCountries } from "@/lib/phone";
+import { safeResearchNextPath } from "@/lib/research-navigation";
 
 const REGION_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
-
-function safeResearchNextPath(value: string | null): string | null {
-  if (
-    !value ||
-    !value.startsWith("/") ||
-    value.startsWith("//") ||
-    value.includes("\\")
-  )
-    return null;
-  const url = new URL(value, "https://research.bumpabestie.invalid");
-  if (url.origin !== "https://research.bumpabestie.invalid") return null;
-  return [
-    "/",
-    "/questions",
-    "/conversations",
-    "/classifications",
-    "/cohorts",
-    "/reports",
-    "/exports",
-    "/consent",
-  ].some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`))
-    ? `${url.pathname}${url.search}`
-    : null;
-}
 
 export default async function LoginPage({
   searchParams,

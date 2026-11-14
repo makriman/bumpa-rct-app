@@ -46,5 +46,7 @@ describe("consumer product rules", () => {
     );
     expect(safeConsumerNextPath("/chat/../admin/tenants")).toBeNull();
     expect(safeConsumerNextPath("/chat\\redirect")).toBeNull();
+    expect(safeConsumerNextPath("/.//evil.example")).toBeNull();
+    expect(safeConsumerNextPath("/\t/chat")).toBeNull();
   });
 });
