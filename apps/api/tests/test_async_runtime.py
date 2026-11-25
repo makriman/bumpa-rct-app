@@ -35,11 +35,12 @@ class FakeWakeQueue:
     def __init__(self, queue_name: str, *, fail_publish: bool = False) -> None:
         self.items: list[str] = []
         self.fail_publish = fail_publish
+        self.interactive = False
         self.config = SimpleNamespace(
             queue_name=queue_name, retry_base_seconds=1, retry_max_seconds=10
         )
 
-    def publish(self, job_id: str) -> None:
+    def publish(self, job_id: str, *, job_kind: str = "") -> None:
         if self.fail_publish:
             raise ConnectionError("credential-must-not-be-persisted")
         self.items.append(job_id)
@@ -113,7 +114,7 @@ class FakePipeline:
         return self
 
     def execute(self) -> list[object]:
-        return [True, 1, 1, len(self.redis.items)]
+        return [True, 1, 1, len(self.redis.items), 1, 0]
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -150,6 +151,7 @@ def test_runtime_config_and_redis_health_signals(monkeypatch: pytest.MonkeyPatch
     queue.publish("job-1")
     assert queue.pop() == "job-1" and queue.pop() is None
     queue.heartbeat("worker", "worker-1")
+    queue.heartbeat("worker_whatsapp", "whatsapp-1")
     queue.heartbeat("scheduler", "scheduler-1")
 
     health_probe = RedisHealthProbe(configured, cast(object, fake_redis))  # type: ignore[arg-type]
@@ -159,6 +161,8 @@ def test_runtime_config_and_redis_health_signals(monkeypatch: pytest.MonkeyPatch
         "worker": "ok",
         "scheduler": "ok",
         "queued_wakeups": 0,
+        "whatsapp_worker": "ok",
+        "whatsapp_queued_wakeups": 0,
     }
 
 
@@ -647,7 +651,7 @@ def test_health_command_and_enabled_entrypoint_cycles(
 
     worker_queue = FakeWakeQueue(configured.queue_name)
     monkeypatch.setattr(worker.AsyncRuntimeConfig, "from_env", lambda: configured)
-    monkeypatch.setattr(worker, "RedisWakeQueue", lambda _config: worker_queue)
+    monkeypatch.setattr(worker, "RedisWakeQueue", lambda _config, **_kwargs: worker_queue)
     monkeypatch.setattr(worker.signal, "signal", lambda *_args: None)
     worker.running = True
 

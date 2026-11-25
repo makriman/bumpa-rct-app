@@ -43,7 +43,7 @@ def test_probe_is_bounded_and_checks_only_the_requested_heartbeat(
     monkeypatch.setattr(health.Redis, "from_url", from_url)
 
     assert health._heartbeat_exists("worker") is True
-    assert client.keys == ["tenant-safe:health:worker"]
+    assert client.keys == ["tenant-safe:health:worker", "tenant-safe:health:worker_whatsapp"]
     assert client.closed is True
     assert captured == {
         "url": "redis://:credential@redis:6379/0",

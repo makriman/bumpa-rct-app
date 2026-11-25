@@ -9,9 +9,11 @@ import time
 from contextlib import nullcontext
 from types import TracebackType
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.logging import configure_logging
+from app.db.models import AsyncJob
 from app.db.session import SessionLocal, set_security_context
 from app.jobs import handlers as _handlers  # noqa: F401 - import registers worker handlers
 from app.jobs.runtime import (
@@ -79,7 +81,12 @@ class JobLeaseKeeper:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             try:
-                self.wake_queue.heartbeat("worker", self.worker_id)
+                service = (
+                    "worker_whatsapp"
+                    if getattr(self.wake_queue, "interactive", False)
+                    else "worker"
+                )
+                self.wake_queue.heartbeat(service, self.worker_id)
             except Exception:
                 logger.exception(
                     "worker_heartbeat_failed",
@@ -204,24 +211,47 @@ def process_one(
     return status
 
 
-def main() -> None:
-    global running
-    configure_logging()
-    config = AsyncRuntimeConfig.from_env()
-    if not config.enabled:
-        raise RuntimeError("Async runtime is disabled; refusing to start worker")
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
-    wake_queue = RedisWakeQueue(config)
-    logger.info("worker_starting", extra={"worker_id": worker_id, "queue": config.queue_name})
+def restore_interactive_wakeups(config: AsyncRuntimeConfig, wake_queue: RedisWakeQueue) -> int:
+    """Route pre-upgrade queued jobs without changing their durable identity.
+
+    Older Redis lists can retain duplicate IDs: claim epochs make those harmless.
+    Remaining/lost wakeups use the existing durable scheduler recovery policy.
+    """
+    with SessionLocal() as session:
+        set_security_context(session, privileged=True)
+        rows = session.execute(
+            select(AsyncJob.id, AsyncJob.kind)
+            .where(
+                AsyncJob.queue_name == config.queue_name,
+                AsyncJob.status == "queued",
+                AsyncJob.kind.startswith("whatsapp."),
+            )
+            .order_by(AsyncJob.created_at)
+            .limit(1000)
+        ).all()
+    for job_id, kind in rows:
+        wake_queue.publish(job_id, job_kind=kind)
+    return len(rows)
+
+
+def work_loop(config: AsyncRuntimeConfig, worker_id: str, wake_queue: RedisWakeQueue) -> None:
+    """Each lane has its own consumer, DB session, claim and renewal thread."""
+    service = "worker_whatsapp" if wake_queue.interactive else "worker"
     while running:
         try:
-            wake_queue.heartbeat("worker", worker_id)
+            wake_queue.heartbeat(service, worker_id)
             job_id = wake_queue.pop()
-            wake_queue.heartbeat("worker", worker_id)
+            wake_queue.heartbeat(service, worker_id)
             if job_id:
                 with SessionLocal() as session:
+                    set_security_context(session, privileged=True)
+                    kind = session.scalar(select(AsyncJob.kind).where(AsyncJob.id == job_id))
+                    session.rollback()
+                    if kind is None:
+                        continue
+                    if kind.startswith("whatsapp.") != wake_queue.interactive:
+                        wake_queue.publish(job_id, job_kind=kind)
+                        continue
                     process_one(
                         session,
                         job_id=job_id,
@@ -232,6 +262,42 @@ def main() -> None:
         except Exception:
             logger.exception("worker_cycle_failed")
             time.sleep(min(config.scheduler_interval_seconds, 5.0))
+
+
+def main() -> None:
+    global running
+    configure_logging()
+    config = AsyncRuntimeConfig.from_env()
+    if not config.enabled:
+        raise RuntimeError("Async runtime is disabled; refusing to start worker")
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    wake_queue = RedisWakeQueue(config)
+    # One bulk consumer preserves Bumpa's existing provider concurrency budget.
+    # Dedicated interactive consumers cannot be occupied by a long import.
+    restore_interactive_wakeups(config, wake_queue)
+    threads = [
+        threading.Thread(
+            target=work_loop,
+            args=(
+                config,
+                f"{worker_id}:whatsapp:{index}",
+                RedisWakeQueue(config, interactive=True),
+            ),
+            name=f"whatsapp-worker-{index}",
+        )
+        for index in range(config.whatsapp_workers)
+    ]
+    for thread in threads:
+        thread.start()
+    logger.info("worker_starting", extra={"worker_id": worker_id, "queue": config.queue_name})
+    try:
+        work_loop(config, worker_id, wake_queue)
+    finally:
+        running = False
+        for thread in threads:
+            thread.join()
     logger.info("worker_stopped", extra={"worker_id": worker_id})
 
 

@@ -45,7 +45,9 @@ def _heartbeat_exists(service: str) -> bool:
             retry_on_timeout=False,
         )
         try:
-            return client.exists(_heartbeat_key(service)) == 1
+            return client.exists(_heartbeat_key(service)) == 1 and (
+                service != "worker" or client.exists(_heartbeat_key("worker_whatsapp")) == 1
+            )
         finally:
             client.close()
     except Exception:

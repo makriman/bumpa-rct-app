@@ -512,6 +512,9 @@ class TenantOnboarding(IdMixin, TimestampMixin, Base):
     initial_sync_fingerprint: Mapped[str | None] = mapped_column(String(64))
     initial_sync_accept_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
     initial_sync_accept_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    initial_sync_partial_accepted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false()
+    )
     hermes_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))
     hermes_fingerprint: Mapped[str | None] = mapped_column(String(64))
     complete_idempotency_key_hash: Mapped[str | None] = mapped_column(String(64))

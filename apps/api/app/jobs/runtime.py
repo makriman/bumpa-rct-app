@@ -143,6 +143,7 @@ class AsyncRuntimeConfig:
     retry_base_seconds: int
     retry_max_seconds: int
     stale_lock_seconds: int
+    whatsapp_workers: int = 2
 
     @classmethod
     def from_env(cls) -> AsyncRuntimeConfig:
@@ -159,6 +160,7 @@ class AsyncRuntimeConfig:
             retry_base_seconds=_int_env("ASYNC_RETRY_BASE_SECONDS", 5),
             retry_max_seconds=_int_env("ASYNC_RETRY_MAX_SECONDS", 900),
             stale_lock_seconds=_int_env("ASYNC_STALE_LOCK_SECONDS", 300),
+            whatsapp_workers=_int_env("ASYNC_WHATSAPP_WORKERS", 2),
         )
         if not config.queue_name or ":" in config.queue_name:
             raise ValueError("ASYNC_QUEUE_NAME must be non-empty and cannot contain ':'")
@@ -178,6 +180,8 @@ class AsyncRuntimeConfig:
             raise ValueError("Async retry settings are invalid")
         if config.stale_lock_seconds < config.heartbeat_ttl_seconds:
             raise ValueError("ASYNC_STALE_LOCK_SECONDS must be at least the heartbeat TTL")
+        if not 1 <= config.whatsapp_workers <= 8:
+            raise ValueError("ASYNC_WHATSAPP_WORKERS must be between 1 and 8")
         return config
 
     @property
@@ -187,10 +191,17 @@ class AsyncRuntimeConfig:
     def heartbeat_key(self, service: str) -> str:
         return f"{self.queue_key_prefix}:health:{service}"
 
+    @property
+    def whatsapp_queue_key(self) -> str:
+        return f"{self.queue_key}:whatsapp"
+
 
 class RedisWakeQueue:
-    def __init__(self, config: AsyncRuntimeConfig, client: Redis | None = None) -> None:
+    def __init__(
+        self, config: AsyncRuntimeConfig, client: Redis | None = None, *, interactive: bool = False
+    ) -> None:
         self.config = config
+        self.interactive = interactive
         self.client = client or Redis.from_url(
             config.redis_url,
             decode_responses=True,
@@ -199,13 +210,21 @@ class RedisWakeQueue:
             health_check_interval=30,
         )
 
-    def publish(self, job_id: str) -> None:
-        self.client.rpush(self.config.queue_key, job_id)
+    def publish(self, job_id: str, *, job_kind: str = "") -> None:
+        key = (
+            self.config.whatsapp_queue_key
+            if job_kind.startswith("whatsapp.")
+            else self.config.queue_key
+        )
+        self.client.rpush(key, job_id)
 
     def pop(self) -> str | None:
         item = cast(
             list[str] | None,
-            self.client.blpop([self.config.queue_key], timeout=self.config.pop_timeout_seconds),
+            self.client.blpop(
+                [self.config.whatsapp_queue_key if self.interactive else self.config.queue_key],
+                timeout=self.config.pop_timeout_seconds,
+            ),
         )
         return item[1] if item else None
 
@@ -240,7 +259,10 @@ class RedisHealthProbe:
         )
 
     def is_healthy(self, service: str) -> bool:
-        return bool(self.client.exists(self.config.heartbeat_key(service)))
+        return bool(self.client.exists(self.config.heartbeat_key(service))) and (
+            service != "worker"
+            or bool(self.client.exists(self.config.heartbeat_key("worker_whatsapp")))
+        )
 
     def health_snapshot(self) -> dict[str, Any]:
         pipe = self.client.pipeline(transaction=False)
@@ -248,12 +270,16 @@ class RedisHealthProbe:
         pipe.exists(self.config.heartbeat_key("worker"))
         pipe.exists(self.config.heartbeat_key("scheduler"))
         pipe.llen(self.config.queue_key)
-        redis_ok, worker, scheduler, queued_ids = pipe.execute()
+        pipe.exists(self.config.heartbeat_key("worker_whatsapp"))
+        pipe.llen(self.config.whatsapp_queue_key)
+        redis_ok, worker, scheduler, queued_ids, whatsapp_worker, whatsapp_ids = pipe.execute()
         return {
             "redis": "ok" if redis_ok else "unavailable",
-            "worker": "ok" if worker else "stale",
+            "worker": "ok" if worker and whatsapp_worker else "stale",
             "scheduler": "ok" if scheduler else "stale",
-            "queued_wakeups": int(queued_ids),
+            "queued_wakeups": int(queued_ids) + int(whatsapp_ids),
+            "whatsapp_worker": "ok" if whatsapp_worker else "stale",
+            "whatsapp_queued_wakeups": int(whatsapp_ids),
         }
 
 
@@ -366,7 +392,7 @@ def dispatch_due_jobs(session: Session, wake_queue: RedisWakeQueue, *, limit: in
             session.commit()
             continue
         try:
-            wake_queue.publish(job.id)
+            wake_queue.publish(job.id, job_kind=job.kind)
         except Exception as exc:
             outbox.dispatch_attempts += 1
             outbox.last_error = _safe_error(exc, "queue publish failed")

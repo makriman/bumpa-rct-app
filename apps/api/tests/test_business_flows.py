@@ -17,7 +17,11 @@ def test_sync_chat_research_report_flow(client: TestClient) -> None:
     assert sync.json()["status"] == "success"
     results = sync.json()["dataset_results"]
     assert len([key for key in results if not key.startswith("_")]) == 10
-    assert results["_bumpa_order_publication"] == {"version": 1, "state": "complete"}
+    assert results["_bumpa_order_publication"] == {
+        "version": 2,
+        "state": "complete",
+        "currencies": {"NGN": 6},
+    }
 
     chat = client.post(
         "/v1/chat/web",

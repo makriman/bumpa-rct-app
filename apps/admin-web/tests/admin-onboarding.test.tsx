@@ -96,6 +96,8 @@ function onboarding(
       index > 3
         ? {
             attempt: 1,
+            can_accept_partial_data: false,
+            partial_data_accepted: false,
             requested_from: "2026-06-13",
             requested_to: "2026-07-13",
             job_id: "job-live",
@@ -315,6 +317,8 @@ describe("resumable production onboarding", () => {
   it("resumes from server state after a reload and never unlocks Hermes before sync acceptance", async () => {
     const syncing = onboarding("initial_sync", {
       initial_sync: {
+        can_accept_partial_data: false,
+        partial_data_accepted: false,
         attempt: 1,
         requested_from: "2026-06-13",
         requested_to: "2026-07-13",
@@ -419,6 +423,8 @@ describe("resumable production onboarding", () => {
   it("allows an accepted partial sync only when orders are available", async () => {
     const partial = onboarding("initial_sync", {
       initial_sync: {
+        can_accept_partial_data: false,
+        partial_data_accepted: false,
         attempt: 1,
         requested_from: "2026-06-13",
         requested_to: "2026-07-13",
@@ -445,11 +451,67 @@ describe("resumable production onboarding", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("requires explicit acceptance before continuing with evidenced partial data", async () => {
+    const partial = onboarding("initial_sync", {
+      initial_sync: {
+        attempt: 1,
+        requested_from: "2026-10-26",
+        requested_to: "2026-11-24",
+        job_id: "partial-job",
+        job_status: "succeeded",
+        sync_run_id: "partial-run",
+        sync_status: "partial",
+        completion_quality: "degraded",
+        orders_availability: "available",
+        orders_count: 7,
+        can_accept_partial_data: true,
+        partial_data_accepted: false,
+        unavailable_datasets: ["products.overview"],
+      },
+    });
+    apiRequest.mockImplementation(async (_path, init) =>
+      init?.method === "POST"
+        ? onboarding("hermes", {
+            initial_sync: {
+              ...partial.initial_sync!,
+              partial_data_accepted: true,
+            },
+          })
+        : partial,
+    );
+    render(<ResumableOnboarding onboardingId="onboarding-live" />);
+    const continueButton = await screen.findByRole("button", {
+      name: "Validate sync and continue",
+    });
+    expect(continueButton).toBeDisabled();
+    expect(
+      screen.getByText(/Some business data is unavailable/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /Continue with available data/ }),
+    );
+    expect(continueButton).toBeEnabled();
+    fireEvent.click(continueButton);
+    await waitFor(() => {
+      const request = apiRequest.mock.calls.find(
+        ([path, init]) =>
+          path.endsWith("/initial-sync/accept") && init?.method === "POST",
+      );
+      expect(request).toBeDefined();
+      expect(JSON.parse(String(request![1]?.body))).toEqual({
+        confirmation: "accept",
+        allow_partial_data: true,
+      });
+    });
+  });
+
   it("keeps Hermes locked and offers a new controlled attempt after an unusable sync", async () => {
     const failed = onboarding("initial_sync", {
       revision: 9,
       status: "attention_required",
       initial_sync: {
+        can_accept_partial_data: false,
+        partial_data_accepted: false,
         attempt: 2,
         requested_from: "2026-06-13",
         requested_to: "2026-07-13",

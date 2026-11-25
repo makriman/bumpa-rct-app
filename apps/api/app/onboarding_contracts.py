@@ -126,6 +126,7 @@ class OnboardingInitialSyncRequest(OnboardingInput):
 
 class OnboardingInitialSyncAcceptRequest(OnboardingInput):
     confirmation: Literal["accept"]
+    allow_partial_data: bool = False
 
 
 class OnboardingHermesRequest(OnboardingInput):
@@ -182,6 +183,9 @@ class OnboardingInitialSyncView(BaseModel):
     completion_quality: str | None
     orders_availability: str | None
     orders_count: int | None
+    can_accept_partial_data: bool = False
+    partial_data_accepted: bool = False
+    unavailable_datasets: list[str] = Field(default_factory=list)
 
 
 class OnboardingHermesView(BaseModel):

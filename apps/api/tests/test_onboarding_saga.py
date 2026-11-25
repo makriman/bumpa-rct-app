@@ -5,6 +5,7 @@ import json
 from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -20,6 +21,7 @@ from app.db.models import (
     AsyncJob,
     AuditLog,
     BumpaConnection,
+    BumpaMetricSnapshot,
     BumpaOrder,
     BumpaSyncRun,
     HermesProfile,
@@ -933,3 +935,80 @@ def test_production_completion_resources_reject_local_provider_records(
     connection.provider = "bumpa"
     profile.provider = "hermes"
     assert production_service._completion_resources(db, saga) is not None
+
+
+def test_explicit_partial_data_acceptance_can_activate_chat_without_fabricating_complete_data(
+    db, service
+):
+    data = _input(db)
+    *_prior, sync = _start_to_sync(service, db, data)
+    run = _finish_sync(db, sync, quality="degraded")
+    db.add(
+        BumpaMetricSnapshot(
+            tenant_id=sync.tenant_id,
+            sync_run_id=run.id,
+            metric_key="sales.total_sales",
+            metric_title="Total sales",
+            value_decimal=Decimal("100"),
+            currency_code="NGN",
+            requested_from=run.requested_from,
+            requested_to=run.requested_to,
+            response_from=utcnow() - timedelta(days=1),
+            response_to=utcnow(),
+            canonical_payload={"schema_version": 1, "kind": "summary"},
+            availability="available",
+        )
+    )
+    run.dataset_results = {"sales.total_sales": "available", "products.overview": "error"}
+    db.commit()
+    view = service.get(db, sync.id)
+    assert view.initial_sync.can_accept_partial_data
+    assert view.initial_sync.unavailable_datasets == ["products.overview"]
+    accepted = service.accept_initial_sync(
+        db,
+        sync.id,
+        OnboardingInitialSyncAcceptRequest(confirmation="accept", allow_partial_data=True),
+        actor_user_id=data.actor_user_id,
+        expected_revision=view.revision,
+        idempotency_key=data.key("partial-accept"),
+    ).view
+    assert accepted.initial_sync.partial_data_accepted
+    assert db.get(BumpaSyncRun, run.id).completion_quality == "degraded"
+    review = service.provision_hermes(
+        db,
+        sync.id,
+        OnboardingHermesRequest(confirmation="provision"),
+        actor_user_id=data.actor_user_id,
+        expected_revision=accepted.revision,
+        idempotency_key=data.key("partial-hermes"),
+    ).view
+    # Recover an account already activated by an audited operational mitigation.
+    db.get(Tenant, sync.tenant_id).status = "active"
+    db.commit()
+    completed = service.complete(
+        db,
+        sync.id,
+        OnboardingCompleteRequest(confirmation="activate"),
+        actor_user_id=data.actor_user_id,
+        expected_revision=review.revision,
+        idempotency_key=data.key("partial-complete"),
+    ).view
+    assert completed.status == "completed" and completed.tenant.status == "active"
+    assert completed.initial_sync.partial_data_accepted
+    assert completed.initial_sync.completion_quality == "degraded"
+
+
+def test_partial_data_option_cannot_activate_an_import_without_any_verified_facts(db, service):
+    data = _input(db)
+    *_prior, sync = _start_to_sync(service, db, data)
+    _finish_sync(db, sync, quality="degraded")
+    assert not service.get(db, sync.id).initial_sync.can_accept_partial_data
+    with pytest.raises(OnboardingError, match="initial_sync_not_ready"):
+        service.accept_initial_sync(
+            db,
+            sync.id,
+            OnboardingInitialSyncAcceptRequest(confirmation="accept", allow_partial_data=True),
+            actor_user_id=data.actor_user_id,
+            expected_revision=sync.revision,
+            idempotency_key=data.key("empty-partial-accept"),
+        )

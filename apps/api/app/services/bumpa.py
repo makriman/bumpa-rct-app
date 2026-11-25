@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -12,6 +13,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.core.crypto import FieldCipher
+from app.core.store_context import validate_store_currency
 from app.core.time import utcnow
 from app.db.models import (
     BumpaConnection,
@@ -32,6 +34,15 @@ from app.providers.redaction import redact_bumpa_payload, redact_order_payload
 from app.services.research_events import record_research_event
 
 logger = logging.getLogger("bumpabestie.providers")
+
+
+class OrderPublicationError(ValueError):
+    """A typed publication failure containing no provider/customer data."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
 
 EXPECTED_SYNC_DATASETS = frozenset(
     {
@@ -461,20 +472,28 @@ def _stage_sync_publication(
         live_result.orders_availability if live_result is not None else "available"
     )
     orders_error = live_result.orders_error if live_result is not None else None
+    publication_error: str | None = None
     if orders_availability == "available" and orders_error is None:
         try:
             _order_publication_scope(db, tenant_id, run_id, snapshot.orders)
-        except ValueError:
+        except OrderPublicationError as exc:
             # Preserve extraction evidence and independently valid analytics,
             # but an unbounded/mixed pull cannot prove any order's absence.
             orders_availability = "error"
-            orders_error = "Orders could not establish complete current-boundary publication"
+            publication_error = exc.code
+            orders_error = exc.code
     completion = classify_sync_completion(
         snapshot.datasets,
         orders_availability=orders_availability,
         orders_error=orders_error,
     )
     results: dict[str, Any] = {}
+    if publication_error:
+        results["_bumpa_order_publication"] = {
+            "version": 2,
+            "state": "failed",
+            "reason": publication_error,
+        }
     for dataset in snapshot.datasets:
         key = f"{dataset.resource}.{dataset.dataset}"
         results[key] = dataset.availability
@@ -542,7 +561,11 @@ def _stage_sync_publication(
         )
         # Server-owned evidence, including verified empty pulls. Provider
         # dataset keys always contain a dot and cannot supply this key.
-        results["_bumpa_order_publication"] = {"version": 1, "state": "complete"}
+        results["_bumpa_order_publication"] = {
+            "version": 2,
+            "state": "complete",
+            "currencies": dict(Counter(order.currency_code for order in snapshot.orders)),
+        }
     return StagedSync(
         live_result=live_result,
         completion=completion,
@@ -775,7 +798,11 @@ def _promote_orders(
             "raw_payload": {
                 **redact_order_payload(order.payload),
                 # Stamp AFTER redaction and replace any provider-supplied marker.
-                "_bumpa_publication": {"sync_run_id": sync_run_id, "state": "active"},
+                "_bumpa_publication": {
+                    "sync_run_id": sync_run_id,
+                    "state": "active",
+                    "currency_code": order.currency_code,
+                },
             },
             "shipping_status": _bounded_text(_text(order.payload, "shipping_status"), 80),
             "channel": _bounded_text(_text(order.payload, "channel", "sales_channel"), 80),
@@ -872,7 +899,7 @@ def _order_publication_scope(
         or run.error is not None
         or run.requested_to < run.requested_from
     ):
-        raise ValueError("Order publication boundary is unavailable")
+        raise OrderPublicationError("publication_boundary_unavailable")
     zone = ZoneInfo(connection.store_timezone)
     starts_at = datetime.combine(run.requested_from, time.min, zone).astimezone(UTC)
     ends_at = datetime.combine(run.requested_to + timedelta(days=1), time.min, zone).astimezone(UTC)
@@ -885,14 +912,20 @@ def _order_publication_scope(
                 if ordered_at.tzinfo is None
                 else ordered_at.astimezone(UTC)
             )
-        if (
-            not order.order_id
-            or order.order_id in identifiers
-            or order.currency_code != connection.store_currency
-            or ordered_at is None
-            or not starts_at <= ordered_at < ends_at
-        ):
-            raise ValueError("Orders do not establish complete dated single-currency membership")
+        if not order.order_id or order.order_id in identifiers:
+            raise OrderPublicationError("order_identifier_missing_or_duplicate")
+        if not isinstance(order.currency_code, str):
+            raise OrderPublicationError("order_currency_invalid")
+        try:
+            valid_currency = validate_store_currency(order.currency_code)
+        except ValueError:
+            raise OrderPublicationError("order_currency_invalid") from None
+        if valid_currency != order.currency_code:
+            raise OrderPublicationError("order_currency_invalid")
+        if ordered_at is None:
+            raise OrderPublicationError("order_date_missing")
+        if not starts_at <= ordered_at < ends_at:
+            raise OrderPublicationError("order_date_outside_requested_period")
         identifiers.add(order.order_id)
     return run, starts_at, ends_at
 

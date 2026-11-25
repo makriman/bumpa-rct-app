@@ -1299,3 +1299,55 @@ def test_immediate_read_receipts_and_basic_event_guards(
     )
     with pytest.raises(PermanentJobError, match="disabled"):
         whatsapp._messaging_provider(Settings(app_env="test", whatsapp_backend="disabled"))
+
+
+@pytest.mark.parametrize(
+    "state,opt_out,expected",
+    [
+        ("provisioning", False, "setup_pending"),
+        ("suspended", False, "rejected_unknown_sender"),
+        ("archived", False, "rejected_unknown_sender"),
+        ("provisioning", True, "rejected_unknown_sender"),
+    ],
+)
+def test_pending_setup_gets_a_static_notice_without_opening_suspended_or_opted_out_accounts(
+    monkeypatch, state, opt_out, expected
+):
+    factory = _factory()
+    with factory() as db:
+        tenant, user = _seed_authorized_phone(db)
+        tenant.status = state
+        identity = db.scalar(select(PhoneIdentity).where(PhoneIdentity.user_id == user.id))
+        identity.opt_out = opt_out
+        message = {
+            "id": f"pending-{state}-{opt_out}",
+            "from": "2348000000044",
+            "type": "text",
+            "text": {"body": "Hello"},
+        }
+        event = WebhookEvent(
+            provider="whatsapp",
+            external_event_id=message["id"],
+            signature_valid=True,
+            payload={"entry": [{"changes": [{"value": {"messages": [message]}}]}]},
+        )
+        db.add(event)
+        db.commit()
+        monkeypatch.setattr(
+            whatsapp,
+            "handle_chat",
+            lambda *_a, **_k: pytest.fail("Pending setup must not admit a model run"),
+        )
+        result = whatsapp._process_message(
+            db, event, message, Settings(app_env="test", whatsapp_backend="mock")
+        )
+        assert result["status"] == expected
+        outgoing = db.scalars(
+            select(WhatsappMessage).where(WhatsappMessage.direction == "outbound")
+        ).all()
+        if expected == "setup_pending":
+            assert len(outgoing) == 1 and outgoing[0].text_body == whatsapp.SETUP_PENDING_REPLY
+            assert outgoing[0].tenant_id == tenant.id
+            assert outgoing[0].status == "sent"
+        else:
+            assert outgoing == []
