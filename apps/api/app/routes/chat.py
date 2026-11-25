@@ -128,6 +128,7 @@ def web_chat(
                         db,
                         tenant_id=principal.tenant.id,
                         message_created_at=existing.created_at,
+                        reply=outbound,
                     ),
                     generated_media=_generated_media_views(
                         db,

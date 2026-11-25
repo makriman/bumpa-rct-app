@@ -1574,6 +1574,11 @@
       "OnboardingInitialSyncAcceptRequest": {
         "additionalProperties": false,
         "properties": {
+          "allow_partial_data": {
+            "default": false,
+            "title": "Allow Partial Data",
+            "type": "boolean"
+          },
           "confirmation": {
             "const": "accept",
             "title": "Confirmation",
@@ -1612,6 +1617,11 @@
           "attempt": {
             "title": "Attempt",
             "type": "integer"
+          },
+          "can_accept_partial_data": {
+            "default": false,
+            "title": "Can Accept Partial Data",
+            "type": "boolean"
           },
           "completion_quality": {
             "anyOf": [
@@ -1654,6 +1664,11 @@
             ],
             "title": "Orders Count"
           },
+          "partial_data_accepted": {
+            "default": false,
+            "title": "Partial Data Accepted",
+            "type": "boolean"
+          },
           "requested_from": {
             "format": "date",
             "title": "Requested From",
@@ -1685,6 +1700,13 @@
               }
             ],
             "title": "Sync Status"
+          },
+          "unavailable_datasets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unavailable Datasets",
+            "type": "array"
           }
         },
         "required": [

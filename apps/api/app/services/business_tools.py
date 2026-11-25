@@ -12,6 +12,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.core.store_context import validate_store_currency
 from app.db.models import (
     BumpaConnection,
     BumpaMetricSnapshot,
@@ -19,6 +20,11 @@ from app.db.models import (
     BumpaOrderItem,
     BumpaSyncRun,
     Tenant,
+)
+from app.services.order_publication import (
+    publication_marker_predicate,
+    publication_marker_valid,
+    published_currency_predicate,
 )
 
 PeriodName = Literal[
@@ -54,13 +60,7 @@ class ResolvedPeriod:
 
 def orders_publication_marker_valid(run: BumpaSyncRun) -> bool:
     """Only this release's server-written publication evidence admits even zero."""
-    marker = (run.dataset_results or {}).get("_bumpa_order_publication")
-    return (
-        isinstance(marker, dict)
-        and type(marker.get("version")) is int
-        and marker.get("version") == 1
-        and marker.get("state") == "complete"
-    )
+    return publication_marker_valid(run)
 
 
 def _publication_filters(run: Any, connection: Any, tenant_id: str) -> tuple[Any, ...]:
@@ -80,16 +80,17 @@ def _publication_filters(run: Any, connection: Any, tenant_id: str) -> tuple[Any
         run.completion_quality.in_(("complete", "accepted_partial", "degraded")),
         run.orders_availability == "available",
         run.orders_count.is_not(None),
-        run.dataset_results["_bumpa_order_publication"]["version"].as_integer() == 1,
-        run.dataset_results["_bumpa_order_publication"]["state"].as_string() == "complete",
+        publication_marker_predicate(run),
     )
 
 
-def published_orders_predicate(tenant_id: str) -> ColumnElement[bool]:
+def published_orders_predicate(
+    tenant_id: str, *, currency_code: str | None = None, include_all_currencies: bool = False
+) -> ColumnElement[bool]:
     """Shared SQL guard for canonical reads, including reports and joins to items.
 
-    Unmarked legacy rows, superseded cache members, foreign currencies and old
-    connection boundaries remain retained evidence rather than current facts.
+    Monetary queries select one currency. Cross-currency coverage explicitly opts
+    in to separately stamped v2 rows; legacy foreign rows remain excluded.
     """
     run = aliased(BumpaSyncRun)
     connection = aliased(BumpaConnection)
@@ -100,7 +101,15 @@ def published_orders_predicate(tenant_id: str) -> ColumnElement[bool]:
         .where(
             *_publication_filters(run, connection, tenant_id),
             run.id == publication["sync_run_id"].as_string(),
-            BumpaOrder.currency_code == connection.store_currency,
+            published_currency_predicate(BumpaOrder, run, connection),
+            *(
+                ()
+                if include_all_currencies
+                else (
+                    BumpaOrder.currency_code
+                    == (currency_code if currency_code is not None else connection.store_currency),
+                )
+            ),
         )
         .correlate(BumpaOrder)
         .exists()
@@ -214,7 +223,7 @@ def resolve_period(
     elif period == "all_available":
         bounds = db.execute(
             select(func.min(BumpaOrder.order_date), func.max(BumpaOrder.order_date)).where(
-                published_orders_predicate(tenant_id),
+                published_orders_predicate(tenant_id, include_all_currencies=True),
                 BumpaOrder.order_date.is_not(None),
             )
         ).one()
@@ -289,7 +298,7 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
             func.min(BumpaOrder.order_date),
             func.max(BumpaOrder.order_date),
             func.count(BumpaOrder.id),
-        ).where(published_orders_predicate(tenant_id))
+        ).where(published_orders_predicate(tenant_id, include_all_currencies=True))
     ).one()
     publication = order_publication_coverage(db, tenant_id)
     zone = ZoneInfo(timezone)
@@ -305,6 +314,8 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
         "currency": currency,
         "orders": {
             **publication,
+            "currency_scope": "all_published_currencies",
+            "currency_breakdown": _currency_breakdown(db, tenant_id),
             "count": (
                 int(order_bounds[2] or 0) if publication["availability"] == "available" else None
             ),
@@ -343,6 +354,7 @@ def business_overview(
     date_from: date | None = None,
     date_to: date | None = None,
     compare_to: Literal["previous_period", "none"] = "previous_period",
+    currency_code: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_period(
@@ -353,7 +365,7 @@ def business_overview(
         date_to=date_to,
         now=now,
     )
-    current = _overview_for_resolved_period(db, tenant_id, resolved)
+    current = _overview_for_resolved_period(db, tenant_id, resolved, currency_code)
     comparison: dict[str, Any] | None = None
     if compare_to == "previous_period":
         days = (resolved.date_to - resolved.date_from).days + 1
@@ -367,7 +379,7 @@ def business_overview(
             date_to=previous_to,
             now=now,
         )
-        prior = _overview_for_resolved_period(db, tenant_id, previous)
+        prior = _overview_for_resolved_period(db, tenant_id, previous, currency_code)
         comparison = {
             "period": previous.payload(),
             "sales_change": _decimal_change(current["sales_total"], prior["sales_total"]),
@@ -382,10 +394,12 @@ def business_overview(
         "currency": current.pop("currency"),
         "metrics": current,
         "comparison": comparison,
+        "currency_breakdown": _currency_breakdown(db, tenant_id, resolved),
         "inclusion_rules": [
             "Only active server-verified order publications from the current connection boundary.",
             "Orders whose order_date falls inside the exact store-local period.",
-            "Sales total sums available order total_amount values.",
+            "Sales total sums available order total_amount values in the selected currency only.",
+            "Currencies are reported separately; no exchange-rate conversion is inferred.",
             "Missing amounts are excluded and reported; cancelled/refunded orders remain visible.",
         ],
         "freshness": data_coverage(db, tenant_id)["latest_sync"],
@@ -400,6 +414,7 @@ def sales_trend(
     granularity: Literal["day", "week", "month"] = "day",
     date_from: date | None = None,
     date_to: date | None = None,
+    currency_code: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_period(
@@ -411,11 +426,12 @@ def sales_trend(
         now=now,
     )
     _tenant, timezone_name, currency = tenant_store_context(db, tenant_id)
+    currency = validate_store_currency(currency_code) if currency_code is not None else currency
     timezone = ZoneInfo(timezone_name)
     coverage = order_publication_coverage(db, tenant_id, resolved)
     rows = db.execute(
         select(BumpaOrder.order_date, BumpaOrder.total_amount).where(
-            published_orders_predicate(tenant_id),
+            published_orders_predicate(tenant_id, currency_code=currency),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
@@ -467,6 +483,7 @@ def order_breakdown(
     period: PeriodName | str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    currency_code: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_period(
@@ -477,9 +494,11 @@ def order_breakdown(
         date_to=date_to,
         now=now,
     )
+    _tenant, _timezone, currency = tenant_store_context(db, tenant_id)
+    currency = validate_store_currency(currency_code) if currency_code is not None else currency
     orders = db.scalars(
         select(BumpaOrder).where(
-            published_orders_predicate(tenant_id),
+            published_orders_predicate(tenant_id, currency_code=currency),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
@@ -489,6 +508,7 @@ def order_breakdown(
         orders = []
     return {
         "source": "Bumpa canonical orders",
+        "currency": currency,
         "period": resolved.payload(),
         "coverage": coverage,
         "availability": coverage["availability"],
@@ -508,6 +528,7 @@ def product_performance(
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 10,
+    currency_code: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_period(
@@ -519,6 +540,7 @@ def product_performance(
         now=now,
     )
     _tenant, _timezone, currency = tenant_store_context(db, tenant_id)
+    currency = validate_store_currency(currency_code) if currency_code is not None else currency
     safe_limit = min(max(limit, 1), 25)
     rows = db.execute(
         select(
@@ -531,7 +553,7 @@ def product_performance(
         .join(BumpaOrder, BumpaOrder.id == BumpaOrderItem.order_id)
         .where(
             BumpaOrderItem.tenant_id == tenant_id,
-            published_orders_predicate(tenant_id),
+            published_orders_predicate(tenant_id, currency_code=currency),
             BumpaOrder.order_date >= resolved.starts_at_utc,
             BumpaOrder.order_date < resolved.ends_at_utc_exclusive,
         )
@@ -638,8 +660,10 @@ def _overview_for_resolved_period(
     db: Session,
     tenant_id: str,
     period: ResolvedPeriod,
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
     _tenant, _timezone, currency = tenant_store_context(db, tenant_id)
+    currency = validate_store_currency(currency_code) if currency_code is not None else currency
     coverage = order_publication_coverage(db, tenant_id, period)
     rows = db.execute(
         select(
@@ -648,7 +672,7 @@ def _overview_for_resolved_period(
             func.count(BumpaOrder.total_amount),
             func.count(func.distinct(BumpaOrder.channel)),
         ).where(
-            published_orders_predicate(tenant_id),
+            published_orders_predicate(tenant_id, currency_code=currency),
             BumpaOrder.order_date >= period.starts_at_utc,
             BumpaOrder.order_date < period.ends_at_utc_exclusive,
         )
@@ -743,3 +767,38 @@ def _evaluate_decimal(node: ast.AST) -> Decimal:
                 raise ValueError("Exponent is outside the supported range")
             return left ** int(right)
     raise ValueError("Expression contains unsupported operations")
+
+
+def _currency_breakdown(
+    db: Session, tenant_id: str, period: ResolvedPeriod | None = None
+) -> list[dict[str, Any]]:
+    if order_publication_coverage(db, tenant_id, period)["availability"] != "available":
+        return []
+    filters = [published_orders_predicate(tenant_id, include_all_currencies=True)]
+    if period is not None:
+        filters.extend(
+            (
+                BumpaOrder.order_date >= period.starts_at_utc,
+                BumpaOrder.order_date < period.ends_at_utc_exclusive,
+            )
+        )
+    rows = db.execute(
+        select(
+            BumpaOrder.currency_code,
+            func.count(BumpaOrder.id),
+            func.sum(BumpaOrder.total_amount),
+            func.count(BumpaOrder.total_amount),
+        )
+        .where(*filters)
+        .group_by(BumpaOrder.currency_code)
+        .order_by(BumpaOrder.currency_code)
+    ).all()
+    return [
+        {
+            "currency": code,
+            "order_count": int(count),
+            "sales_total": str(total) if total is not None else None,
+            "orders_missing_amount": int(count - with_amount),
+        }
+        for code, count, total, with_amount in rows
+    ]

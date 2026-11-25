@@ -101,6 +101,81 @@ def overview(db, tenant, start=START, end=END):
     ]
 
 
+def test_multicurrency_import_publishes_without_combining_native_amounts(store, monkeypatch):
+    db, tenant, connection = store
+    run = publish(
+        monkeypatch,
+        db,
+        connection,
+        [
+            order("naira", amount="100", currency="NGN"),
+            order("dollar", amount="20", currency="USD"),
+            order("pound", amount="3", currency="GBP"),
+            order("shilling", amount="400", currency="KES"),
+        ],
+    )
+    assert run.orders_availability == "available" and run.orders_count == 4
+    assert run.dataset_results["_bumpa_order_publication"] == {
+        "version": 2,
+        "state": "complete",
+        "currencies": {"NGN": 1, "USD": 1, "GBP": 1, "KES": 1},
+    }
+    assert data_coverage(db, tenant.id)["orders"]["count"] == 4
+    base = business_overview(db, tenant.id, date_from=START, date_to=END, compare_to="none")
+    assert base["currency"] == "NGN" and Decimal(base["metrics"]["sales_total"]) == 100
+    currencies = {
+        entry["currency"]: Decimal(entry["sales_total"]) for entry in base["currency_breakdown"]
+    }
+    assert currencies == {"NGN": 100, "USD": 20, "GBP": 3, "KES": 400}
+    usd = business_overview(
+        db, tenant.id, date_from=START, date_to=END, compare_to="none", currency_code="USD"
+    )
+    assert usd["currency"] == "USD" and Decimal(usd["metrics"]["sales_total"]) == 20
+    assert usd["metrics"]["order_count"] == 1
+    assert (
+        order_breakdown(db, tenant.id, date_from=START, date_to=END, currency_code="KES")[
+            "order_count"
+        ]
+        == 1
+    )
+    assert (
+        Decimal(
+            sales_trend(db, tenant.id, date_from=START, date_to=END, currency_code="GBP")["points"][
+                0
+            ]["sales_total"]
+        )
+        == 3
+    )
+    assert (
+        Decimal(
+            product_performance(db, tenant.id, date_from=START, date_to=END, currency_code="USD")[
+                "products"
+            ][0]["sales_total"]
+        )
+        == 20
+    )
+    # A later full pull may supersede absent members across all currencies,
+    # without deleting the original amounts/evidence or reclassifying them as NGN.
+    publish(monkeypatch, db, connection, [order("naira", amount="110")])
+    assert db.scalar(select(func.count(BumpaOrder.id))) == 4
+    assert (
+        business_overview(
+            db, tenant.id, date_from=START, date_to=END, compare_to="none", currency_code="USD"
+        )["metrics"]["sales_total"]
+        == "0"
+    )
+
+
+def test_publication_failure_preserves_precise_safe_reason(store, monkeypatch):
+    db, _tenant, connection = store
+    run = publish(monkeypatch, db, connection, [replace(order(), order_date=None)])
+    assert run.dataset_results["_bumpa_order_publication"] == {
+        "version": 2,
+        "state": "failed",
+        "reason": "order_date_missing",
+    }
+
+
 def test_complete_empty_resync_supersedes_cache_without_deleting_evidence(store, monkeypatch):
     db, tenant, connection = store
     first = publish(monkeypatch, db, connection, [order()])
@@ -163,7 +238,7 @@ def test_unbounded_membership_fails_closed_without_sweeping(store, monkeypatch, 
     elif invalid == "outside":
         orders = [replace(candidate, order_date=datetime(2026, 11, 1, 12, tzinfo=UTC))]
     elif invalid == "currency":
-        orders = [replace(candidate, currency_code="USD")]
+        orders = [replace(candidate, currency_code="INVALID")]
     else:
         orders = [candidate, candidate]
     rejected = publish(monkeypatch, db, connection, orders)
@@ -194,6 +269,7 @@ def test_provider_cannot_forge_publication_marker(store, monkeypatch):
     assert db.scalar(select(BumpaOrder)).raw_payload["_bumpa_publication"] == {
         "state": "active",
         "sync_run_id": run.id,
+        "currency_code": "NGN",
     }
 
 

@@ -2194,6 +2194,11 @@ export interface components {
     /** OnboardingInitialSyncAcceptRequest */
     OnboardingInitialSyncAcceptRequest: {
       /**
+       * Allow Partial Data
+       * @default false
+       */
+      allow_partial_data: boolean;
+      /**
        * Confirmation
        * @constant
        */
@@ -2216,6 +2221,11 @@ export interface components {
     OnboardingInitialSyncView: {
       /** Attempt */
       attempt: number;
+      /**
+       * Can Accept Partial Data
+       * @default false
+       */
+      can_accept_partial_data: boolean;
       /** Completion Quality */
       completion_quality: string | null;
       /** Job Id */
@@ -2226,6 +2236,11 @@ export interface components {
       orders_availability: string | null;
       /** Orders Count */
       orders_count: number | null;
+      /**
+       * Partial Data Accepted
+       * @default false
+       */
+      partial_data_accepted: boolean;
       /**
        * Requested From
        * Format: date
@@ -2240,6 +2255,8 @@ export interface components {
       sync_run_id: string | null;
       /** Sync Status */
       sync_status: string | null;
+      /** Unavailable Datasets */
+      unavailable_datasets?: string[];
     };
     /** OnboardingOwnerRequest */
     OnboardingOwnerRequest: {

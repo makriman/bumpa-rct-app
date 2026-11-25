@@ -39,6 +39,7 @@ from app.providers.meta import MetaProviderError, MetaWhatsAppClient
 from app.providers.redaction import redact_text
 from app.services.business_tools import ResolvedPeriod, resolve_period, tenant_store_context
 from app.services.conversation_scope import receiver_scope
+from app.services.order_publication import publication_marker_valid
 
 InsightCadence = Literal["daily", "weekly"]
 MAX_TEMPLATE_SUMMARY_CHARS = 900
@@ -336,14 +337,7 @@ def _snapshot(
         <= now
     ):
         return None
-    publication = run.dataset_results.get("_bumpa_order_publication")
-    if (
-        not isinstance(publication, dict)
-        or type(publication.get("version")) is not int
-        or publication.get("version") != 1
-        or publication.get("state") != "complete"
-        or run.orders_count is None
-    ):
+    if not publication_marker_valid(run) or run.orders_count is None:
         return None
     current_orders = list(
         db.scalars(

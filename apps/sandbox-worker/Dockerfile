@@ -6,12 +6,13 @@ WORKDIR /src/cloudflared
 ADD --checksum=sha256:68d298c522aef45fe8412e0ccf8f21ff12a6ad768aa69cbc23e10eac688ac8c8 \
     https://github.com/cloudflare/cloudflared/archive/refs/tags/2026.10.3.tar.gz /tmp/cloudflared.tar.gz
 RUN tar -xzf /tmp/cloudflared.tar.gz --strip-components=1 \
-    && go get github.com/klauspost/compress@v1.18.7 github.com/go-jose/go-jose/v4@v4.1.6 \
+    && go get github.com/klauspost/compress@v1.18.7 github.com/go-jose/go-jose/v4@v4.1.6 golang.org/x/net@v0.62.0 \
     && go build -mod=mod -trimpath -buildvcs=false \
         -ldflags='-s -w -X main.Version=2026.10.3 -X main.BuildTime=2026-10-22' \
         -o /out/cloudflared ./cmd/cloudflared \
     && go version -m /out/cloudflared | grep -F 'github.com/klauspost/compress' | grep -F 'v1.18.7' \
-    && go version -m /out/cloudflared | grep -F 'github.com/go-jose/go-jose/v4' | grep -F 'v4.1.6'
+    && go version -m /out/cloudflared | grep -F 'github.com/go-jose/go-jose/v4' | grep -F 'v4.1.6' \
+    && go version -m /out/cloudflared | grep -F 'golang.org/x/net' | grep -F 'v0.62.0'
 
 FROM docker.io/cloudflare/sandbox:0.12.14-python@sha256:226351e2bbb2ab1f97f921e3e5930d7eb908a8f79865aa04b9a41553b2260230 AS brotli-builder
 USER root

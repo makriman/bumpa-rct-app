@@ -84,6 +84,11 @@ DELIVERY_STATUS_RANK = {
     "read": 5,
 }
 
+SETUP_PENDING_REPLY = (
+    "Hello! Your Bumpa Bestie account setup is still in progress. "
+    "I've received your message; your store's administrator can finish activating the account."
+)
+
 
 def process_inbox_event(db: Session, event_id: str, settings: Settings) -> dict[str, Any]:
     event = db.get(WebhookEvent, event_id)
@@ -428,6 +433,33 @@ def _process_message(
         and tenant.status == "active"
     )
     if not authorized:
+        if (
+            identity
+            and identity.status == "approved"
+            and not identity.opt_out
+            and membership
+            and user
+            and user.status == "active"
+            and tenant
+            and tenant.status == "provisioning"
+        ):
+            _bind_inbound_job_tenant(db, event=event, tenant_id=tenant.id)
+            _deliver_once(
+                db,
+                event=event,
+                purpose="setup-pending",
+                phone=phone,
+                body=SETUP_PENDING_REPLY,
+                settings=settings,
+                tenant_id=tenant.id,
+                user_id=user.id,
+                meta_sender=reply_sender,
+                reply_to_message_id=external_id,
+            )
+            inbound.status = "processed"
+            event.processing_status = "processed"
+            db.commit()
+            return {"status": "setup_pending"}
         # Only a genuinely unknown phone receives onboarding guidance. Known
         # disabled accounts are processed silently so suspended tenants cannot
         # trigger outbound sends and account state is not disclosed.
@@ -1379,7 +1411,12 @@ def _bind_inbound_job_tenant(db: Session, *, event: WebhookEvent, tenant_id: str
 
 
 def assert_delivery_actor(
-    db: Session, *, tenant_id: str | None, user_id: str | None, phone: str
+    db: Session,
+    *,
+    tenant_id: str | None,
+    user_id: str | None,
+    phone: str,
+    setup_notice: bool = False,
 ) -> None:
     if not tenant_id or not user_id:
         return  # generic unknown-sender denial contains no business/private data
@@ -1411,7 +1448,7 @@ def assert_delivery_actor(
         or not user
         or user.status != "active"
         or not tenant
-        or tenant.status != "active"
+        or tenant.status != ("provisioning" if setup_notice else "active")
         or not member
     ):
         raise PermanentJobError("The receiving account is no longer authorized")
@@ -1496,7 +1533,17 @@ def _deliver_once(
     db.commit()
     try:
         assert_current_job_lease(db)
-        assert_delivery_actor(db, tenant_id=tenant_id, user_id=user_id, phone=phone)
+        assert_delivery_actor(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            phone=phone,
+            setup_notice=(
+                purpose == "setup-pending"
+                and body == SETUP_PENDING_REPLY
+                and not interactive_buttons
+            ),
+        )
         provider = _messaging_provider(
             settings,
             meta_sender=meta_sender,

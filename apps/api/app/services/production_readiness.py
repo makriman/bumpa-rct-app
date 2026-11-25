@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from redis.exceptions import RedisError
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import Settings
-from app.db.session import SessionLocal
+from app.core.time import utcnow
+from app.db.models import AsyncJob
+from app.db.session import SessionLocal, set_security_context
 from app.jobs.runtime import AsyncRuntimeConfig, RedisHealthProbe
 
 DatabaseStatus = Literal["ok", "unavailable"]
@@ -117,6 +119,8 @@ def check_production_readiness(
                 "queued_wakeups": None,
             }
         async_health.update(snapshot)
+        if database == "ok" and database_probe is None:
+            async_health.update(whatsapp_queue_delay(runtime.queue_name))
         async_ready = all(
             snapshot.get(service) == "ok" for service in ("redis", "worker", "scheduler")
         )
@@ -132,3 +136,25 @@ def check_production_readiness(
 def _probe_database() -> None:
     with SessionLocal() as db:
         db.execute(text("SELECT 1"))
+
+
+def whatsapp_queue_delay(queue_name: str = "default") -> dict[str, object]:
+    """Expose durable work age; Redis ID counts/heartbeats cannot prove latency."""
+    now = utcnow()
+    with SessionLocal() as db:
+        set_security_context(db, privileged=True)
+        oldest = db.scalar(
+            select(func.min(AsyncJob.available_at)).where(
+                AsyncJob.queue_name == queue_name,
+                AsyncJob.kind.startswith("whatsapp."),
+                AsyncJob.status.in_(("pending", "queued", "retry")),
+                AsyncJob.available_at <= now,
+            )
+        )
+    if oldest is not None and oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=now.tzinfo)
+    age = max(0, int((now - oldest).total_seconds())) if oldest is not None else 0
+    return {
+        "whatsapp_oldest_wait_seconds": age,
+        "whatsapp_queue": "delayed" if age > 60 else "ok",
+    }

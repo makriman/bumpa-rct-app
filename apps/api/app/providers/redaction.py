@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import re
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -18,6 +19,24 @@ SENSITIVE_ORDER_FIELDS = {
     "proof_urls",
     "shipping_slip",
 }
+
+OPERATIONAL_DATE_FIELDS = frozenset({"order_date", "created_at", "updated_at", "deleted_at"})
+OPERATIONAL_DATE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})?)?$"
+)
+
+
+def _operational_date(key: str, value: Any) -> bool:
+    if key not in OPERATIONAL_DATE_FIELDS or not isinstance(value, str):
+        return False
+    if not OPERATIONAL_DATE_RE.fullmatch(value):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
 
 # Research text may come from historic rows written before the latest redaction
 # rules. Keep these patterns here as a reusable, defence-in-depth boundary for
@@ -204,6 +223,8 @@ def _redact_structured(value: Any) -> Any:
             key: (
                 "[REDACTED]"
                 if _normalise_key(str(key)) in SENSITIVE_STRUCTURED_FIELDS
+                else item
+                if _operational_date(str(key), item)
                 else _redact_structured(item)
             )
             for key, item in value.items()

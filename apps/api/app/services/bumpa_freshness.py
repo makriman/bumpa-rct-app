@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.models import BumpaConnection, BumpaMetricSnapshot, BumpaSyncRun
+from app.services.order_publication import publication_marker_predicate
 
 
 @dataclass(frozen=True)
@@ -36,10 +37,7 @@ def usable_bumpa_sync_run_predicate() -> ColumnElement[bool]:
                 BumpaSyncRun.partial_reason == "profit_not_calculable",
                 BumpaSyncRun.orders_availability == "available",
                 BumpaSyncRun.orders_count.is_not(None),
-                BumpaSyncRun.dataset_results["_bumpa_order_publication"]["version"].as_integer()
-                == 1,
-                BumpaSyncRun.dataset_results["_bumpa_order_publication"]["state"].as_string()
-                == "complete",
+                publication_marker_predicate(BumpaSyncRun),
             ),
         ),
     )

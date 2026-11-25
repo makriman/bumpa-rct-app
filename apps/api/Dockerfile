@@ -21,7 +21,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}"
 
 WORKDIR /app
-RUN python -m pip uninstall --yes pip \
+# The pinned Python base predates Alpine's Kerberos security fixes.
+RUN apk add --no-cache --upgrade krb5-libs=1.22.3-r0 \
+    && python -m pip uninstall --yes pip \
     && rm -rf /usr/local/lib/python3.12/ensurepip \
     && addgroup --system app && adduser --system --ingroup app app
 COPY --from=builder --chown=app:app /app /app

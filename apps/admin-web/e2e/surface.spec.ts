@@ -280,6 +280,87 @@ for (const route of routes) {
   });
 }
 
+test("partial data requires explicit acceptance and remains accessible on desktop and mobile", async ({
+  page,
+}) => {
+  await grantAdminSession(page);
+  await mockAdminData(page);
+  const partial = {
+    ...onboardingFixture,
+    current_step: "initial_sync",
+    revision: 4,
+    initial_sync: {
+      attempt: 1,
+      requested_from: "2026-10-26",
+      requested_to: "2026-11-24",
+      job_id: "partial-job",
+      job_status: "succeeded",
+      sync_run_id: "partial-sync",
+      sync_status: "partial",
+      completion_quality: "degraded",
+      orders_availability: "available",
+      orders_count: 7,
+      can_accept_partial_data: true,
+      partial_data_accepted: false,
+      unavailable_datasets: ["products.overview"],
+    },
+  };
+  await page.route(
+    "**/api/backend/admin/onboardings/demo-onboarding",
+    async (route) => {
+      await fulfillJson(route, partial);
+    },
+  );
+  let accepted = false;
+  await page.route(
+    "**/api/backend/admin/onboardings/demo-onboarding/initial-sync/accept",
+    async (route) => {
+      expect(route.request().postDataJSON()).toEqual({
+        confirmation: "accept",
+        allow_partial_data: true,
+      });
+      accepted = true;
+      await fulfillJson(route, {
+        ...partial,
+        current_step: "hermes",
+        revision: 5,
+      });
+    },
+  );
+  await page.goto("/onboarding/demo-onboarding");
+  const next = page.getByRole("button", { name: "Validate sync and continue" });
+  await expect(next).toBeDisabled();
+  await expect(
+    page.getByText(/Some business data is unavailable/),
+  ).toBeVisible();
+  await settleDocumentGeometry(page);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.screenshot({
+    path: test.info().outputPath("onboarding-partial-data.png"),
+    fullPage: true,
+  });
+  await page
+    .getByRole("checkbox", { name: /Continue with available data/ })
+    .check();
+  await expect(next).toBeEnabled();
+  await next.click();
+  await expect(
+    page.getByRole("button", { name: /Provision.*Hermes|Provision.*profile/i }),
+  ).toBeVisible();
+  expect(accepted).toBe(true);
+});
+
 test("operator login establishes a server-issued session and returns to the protected route", async ({
   page,
 }) => {

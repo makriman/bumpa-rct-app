@@ -15,6 +15,12 @@ RUN mkdir -p /out \
 
 FROM postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36 AS upstream
 
+# Keep the pinned PostgreSQL binary while applying Alpine security fixes.
+RUN apk add --no-cache --upgrade \
+        krb5-libs=1.22.3-r0 \
+        libxml2=2.13.9-r3 \
+        libxslt=1.1.43-r4
+
 COPY --from=gosu-builder /out/gosu /usr/local/bin/gosu
 COPY infra/postgres/init-app-role.sh /docker-entrypoint-initdb.d/10-app-role.sh
 RUN chmod 0755 /usr/local/bin/gosu \

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Any, Protocol, cast
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from app.core.time import utcnow
 from app.db.models import (
     AsyncJob,
     BumpaConnection,
+    BumpaMetricSnapshot,
     BumpaSyncRun,
     HermesProfile,
     PhoneIdentity,
@@ -59,6 +60,7 @@ from app.services.admin_operations import mask_phone
 from app.services.audit import audit
 from app.services.bumpa_connections import BumpaBoundaryInput, replace_bumpa_connection
 from app.services.bumpa_freshness import usable_bumpa_sync_run_predicate
+from app.services.order_publication import publication_marker_predicate
 from app.services.production_readiness import (
     ProductionReadiness,
     check_production_readiness,
@@ -81,6 +83,47 @@ class BumpaClientFactory(Protocol):
 
 
 _TERMINAL_JOB_STATUSES = frozenset({"succeeded", "dead_letter", "cancelled"})
+
+
+def onboarding_sync_predicate(*, allow_partial_data: bool = False) -> Any:
+    """Chat may start with independently evidenced facts after explicit acceptance.
+
+    This does not weaken canonical monetary reads or mark degraded data complete.
+    Empty, failed, cross-boundary or untyped extractions remain ineligible.
+    """
+    complete = usable_bumpa_sync_run_predicate()
+    if not allow_partial_data:
+        return complete
+    metrics = (
+        select(BumpaMetricSnapshot.id)
+        .where(
+            BumpaMetricSnapshot.sync_run_id == BumpaSyncRun.id,
+            BumpaMetricSnapshot.tenant_id == BumpaSyncRun.tenant_id,
+            BumpaMetricSnapshot.availability == "available",
+            BumpaMetricSnapshot.response_from.is_not(None),
+            BumpaMetricSnapshot.response_to.is_not(None),
+            or_(
+                BumpaMetricSnapshot.value_decimal.is_not(None),
+                BumpaMetricSnapshot.canonical_payload["kind"].as_string() == "ranking",
+            ),
+        )
+        .exists()
+    )
+    orders = and_(
+        BumpaSyncRun.orders_availability == "available",
+        BumpaSyncRun.orders_count.is_not(None),
+        publication_marker_predicate(BumpaSyncRun),
+    )
+    return or_(
+        complete,
+        and_(
+            BumpaSyncRun.error.is_(None),
+            BumpaSyncRun.finished_at.is_not(None),
+            BumpaSyncRun.status == "partial",
+            BumpaSyncRun.completion_quality == "degraded",
+            or_(metrics, orders),
+        ),
+    )
 
 
 class OnboardingService:
@@ -678,6 +721,7 @@ class OnboardingService:
             raise OnboardingError("idempotency_conflict")
         saga.initial_sync_job_id = job.id
         saga.initial_sync_run_id = None
+        saga.initial_sync_partial_accepted = False
         saga.sync_attempt = attempt
         self._record_command(
             saga,
@@ -758,7 +802,7 @@ class OnboardingService:
                 if job.status not in _TERMINAL_JOB_STATUSES
                 else "initial_sync_not_ready"
             )
-        run = self._usable_run_for_job(db, saga, job)
+        run = self._usable_run_for_job(db, saga, job, allow_partial_data=payload.allow_partial_data)
         if run is None:
             self._mark_failure(
                 saga,
@@ -780,6 +824,9 @@ class OnboardingService:
             raise OnboardingError("initial_sync_not_ready")
 
         saga.initial_sync_run_id = run.id
+        saga.initial_sync_partial_accepted = (
+            payload.allow_partial_data and run.completion_quality == "degraded"
+        )
         self._advance(
             saga,
             next_step="hermes",
@@ -800,6 +847,7 @@ class OnboardingService:
                 "job_id": job.id,
                 "status": run.status,
                 "completion_quality": run.completion_quality,
+                "partial_data_accepted": saga.initial_sync_partial_accepted,
                 "revision": saga.revision,
             },
         )
@@ -1066,7 +1114,7 @@ class OnboardingService:
             return OnboardingMutation(view=self._view(db, saga), replayed=True)
         self._require_step(saga, "review", expected_revision)
         tenant = db.get(Tenant, saga.tenant_id)
-        if tenant is None or tenant.status != "provisioning":
+        if tenant is None or tenant.status not in {"provisioning", "active"}:
             raise OnboardingError("completion_requirements_not_met")
         if saga.hermes_profile_id is not None and not self.settings.is_local:
             reconciled_profile = db.get(HermesProfile, saga.hermes_profile_id)
@@ -1085,6 +1133,7 @@ class OnboardingService:
             raise OnboardingError("completion_requirements_not_met")
         user, membership, phone, connection, run, profile = resources
 
+        previous_tenant_status = tenant.status
         tenant.status = "active"
         saga.status = "completed"
         saga.current_step = "completed"
@@ -1105,7 +1154,7 @@ class OnboardingService:
             action="tenant.onboarding.completed",
             resource_type="tenant_onboarding",
             resource_id=saga.id,
-            before={"tenant_status": "provisioning", "current_step": "review"},
+            before={"tenant_status": previous_tenant_status, "current_step": "review"},
             after={
                 "tenant_id": tenant.id,
                 "user_id": user.id,
@@ -1144,6 +1193,12 @@ class OnboardingService:
         extra: dict[str, str] | None = None,
     ) -> str:
         dumped = payload.model_dump(mode="json", exclude=exclude or set())
+        if (
+            isinstance(payload, OnboardingInitialSyncAcceptRequest)
+            and not payload.allow_partial_data
+        ):
+            # Preserve fingerprints of accept commands issued before this option existed.
+            dumped.pop("allow_partial_data", None)
         if extra:
             dumped.update(extra)
         encoded = json.dumps(
@@ -1302,6 +1357,8 @@ class OnboardingService:
         db: Session,
         saga: TenantOnboarding,
         job: AsyncJob,
+        *,
+        allow_partial_data: bool = False,
     ) -> BumpaSyncRun | None:
         run_id = self._job_run_id(job)
         if run_id is None or saga.bumpa_connection_id is None:
@@ -1330,7 +1387,7 @@ class OnboardingService:
                 BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
                 BumpaSyncRun.requested_from == requested_from,
                 BumpaSyncRun.requested_to == requested_to,
-                usable_bumpa_sync_run_predicate(),
+                onboarding_sync_predicate(allow_partial_data=allow_partial_data),
             )
         )
 
@@ -1386,7 +1443,7 @@ class OnboardingService:
                 BumpaConnection.tenant_id == saga.tenant_id,
                 BumpaConnection.status == "active",
                 BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
-                usable_bumpa_sync_run_predicate(),
+                onboarding_sync_predicate(allow_partial_data=saga.initial_sync_partial_accepted),
             )
         )
         profile = db.get(HermesProfile, saga.hermes_profile_id)
@@ -1557,6 +1614,18 @@ class OnboardingService:
             completion_quality=run.completion_quality if run is not None else None,
             orders_availability=run.orders_availability if run is not None else None,
             orders_count=run.orders_count if run is not None else None,
+            can_accept_partial_data=bool(
+                run is not None
+                and job.status == "succeeded"
+                and run.completion_quality == "degraded"
+                and self._usable_run_for_job(db, saga, job, allow_partial_data=True) is not None
+            ),
+            partial_data_accepted=saga.initial_sync_partial_accepted,
+            unavailable_datasets=sorted(
+                key
+                for key, value in (run.dataset_results if run is not None else {}).items()
+                if not key.startswith("_") and value != "available"
+            ),
         )
 
 

@@ -1,5 +1,9 @@
 # Operations runbook
 
+See [chat readiness and partial Bumpa data](launch-reliability.md) for reserved
+WhatsApp consumers, currency-aware order publication, explicit partial-data
+onboarding and the additional queue-delay health signals.
+
 ## Safety boundary
 
 The repository's production target includes Meta WhatsApp, direct Bumpa sync,

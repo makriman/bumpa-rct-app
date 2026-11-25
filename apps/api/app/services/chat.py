@@ -123,8 +123,18 @@ def data_freshness_at_message(
     *,
     tenant_id: str,
     message_created_at: datetime,
+    reply: AgentMessage | None = None,
 ) -> datetime | None:
-    """Reconstruct the freshness value returned with an idempotent chat response."""
+    """Replay the accepted response's snapshot, with a legacy reconstruction fallback."""
+
+    if reply is not None and "data_freshness" in (reply.media_metadata or {}):
+        stored = reply.media_metadata["data_freshness"]
+        if not isinstance(stored, str):
+            return None
+        try:
+            return _as_utc(datetime.fromisoformat(stored))
+        except ValueError:
+            return None
 
     metrics = latest_available_metrics(
         db,
@@ -719,6 +729,9 @@ def handle_chat(
                 "event_kind": "reply",
                 "execution_run_id": run.id if run else None,
                 "model_outcome": "failed" if provider_failed else "completed",
+                "data_freshness": (
+                    _as_utc(freshness).isoformat() if isinstance(freshness, datetime) else None
+                ),
                 **(
                     {"type": "voice_call", "voice_playback_state": "generated"}
                     if (media_metadata or {}).get("type") == "voice_call"

@@ -196,6 +196,7 @@ def get_business_overview(
     date_from: date | None = None,
     date_to: date | None = None,
     compare_to: str = "previous_period",
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
     """Calculate sales and order totals for an exact store-local period."""
     return _run_tool(
@@ -206,6 +207,7 @@ def get_business_overview(
             period=period,
             date_from=date_from,
             date_to=date_to,
+            currency_code=currency_code,
             compare_to="none" if compare_to == "none" else "previous_period",
         ),
         action_context_token=action_context_token,
@@ -219,6 +221,7 @@ def get_sales_trend(
     granularity: Literal["day", "week", "month"] = "day",
     date_from: date | None = None,
     date_to: date | None = None,
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
     """Calculate a daily, weekly or monthly sales trend for an exact period."""
     safe_granularity = granularity if granularity in {"day", "week", "month"} else "day"
@@ -231,6 +234,7 @@ def get_sales_trend(
             granularity=safe_granularity,
             date_from=date_from,
             date_to=date_to,
+            currency_code=currency_code,
         ),
         action_context_token=action_context_token,
     )
@@ -242,12 +246,18 @@ def get_order_breakdown(
     period: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
     """Break down orders by status, payment status, channel and origin."""
     return _run_tool(
         "get_order_breakdown",
         lambda db, tenant_id: order_breakdown(
-            db, tenant_id, period=period, date_from=date_from, date_to=date_to
+            db,
+            tenant_id,
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            currency_code=currency_code,
         ),
         action_context_token=action_context_token,
     )
@@ -260,12 +270,19 @@ def get_product_performance(
     date_from: date | None = None,
     date_to: date | None = None,
     limit: int = 10,
+    currency_code: str | None = None,
 ) -> dict[str, Any]:
     """Rank products using canonical order-item quantity and sales totals."""
     return _run_tool(
         "get_product_performance",
         lambda db, tenant_id: product_performance(
-            db, tenant_id, period=period, date_from=date_from, date_to=date_to, limit=limit
+            db,
+            tenant_id,
+            period=period,
+            date_from=date_from,
+            date_to=date_to,
+            currency_code=currency_code,
+            limit=limit,
         ),
         action_context_token=action_context_token,
     )

@@ -1186,6 +1186,10 @@ function InitialSyncStep({
   syncWindow,
 }: ResumableViewProps & { onboarding: TenantOnboarding }) {
   const sync = onboarding.initial_sync;
+  const [acceptedPartialJob, setAcceptedPartialJob] = useState<string | null>(
+    null,
+  );
+  const acceptPartial = acceptedPartialJob === sync?.job_id;
   const succeeded =
     sync?.job_status === "succeeded" &&
     ((sync.sync_status === "success" &&
@@ -1198,8 +1202,8 @@ function InitialSyncStep({
     return (
       <div aria-live="polite" aria-busy={busy}>
         <p style={{ color: "var(--ink-soft)", lineHeight: 1.6 }}>
-          Queue the first strict Bumpa import. Activation remains locked until
-          the run succeeds and is validated.
+          Start the initial Bumpa import, then review the available data before
+          activating chat.
         </p>
         <div className="grid grid-2">
           <div className="field">
@@ -1270,6 +1274,29 @@ function InitialSyncStep({
           <span>{value}</span>
         </div>
       ))}
+      {sync.can_accept_partial_data && (
+        <div className="field">
+          <p>
+            Some business data is unavailable. You can activate chat with the
+            data that is ready.
+          </p>
+          <p>
+            Unavailable:{" "}
+            {(sync.unavailable_datasets ?? []).join(", ") || "Orders"}.
+          </p>
+          <label>
+            <input
+              type="checkbox"
+              checked={acceptPartial}
+              disabled={busy}
+              onChange={(event) =>
+                setAcceptedPartialJob(event.target.checked ? sync.job_id : null)
+              }
+            />{" "}
+            Continue with available data; missing figures will stay unavailable
+          </label>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <button
           className="button button-secondary"
@@ -1284,10 +1311,16 @@ function InitialSyncStep({
         <button
           className="button button-primary"
           type="button"
-          disabled={busy || !succeeded}
+          disabled={
+            busy ||
+            !(succeeded || (sync.can_accept_partial_data && acceptPartial))
+          }
           onClick={() =>
             void command("initial_sync", "initial-sync/accept", {
               confirmation: "accept",
+              ...(acceptPartial && sync.can_accept_partial_data
+                ? { allow_partial_data: true }
+                : {}),
             })
           }
         >
