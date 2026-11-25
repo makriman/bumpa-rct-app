@@ -78,6 +78,7 @@ The release also applies Alpine's pinned security updates for Kerberos in the
 API image and Kerberos/XML/XSLT in the PostgreSQL and backup images. PostgreSQL's
 pinned binary stays at 16.15. Caddy and the sandbox tunnel binary use patched
 `golang.org/x/net` 0.62.0.
+Hermes uses patched OAuthLib 4.0.1 outside the older dependency cutoff.
 Promote the reviewed infrastructure images with
 the normal compatibility rehearsal and pre-deploy backup; retain the existing
 data volume.
