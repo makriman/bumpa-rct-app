@@ -82,3 +82,22 @@ Hermes uses patched OAuthLib 4.0.1 outside the older dependency cutoff.
 Promote the reviewed infrastructure images with
 the normal compatibility rehearsal and pre-deploy backup; retain the existing
 data volume.
+
+
+## Reply query performance
+
+Reply preparation reads verified publication metadata rather than scanning the
+entire order history. The span of verified pulls is not a claim that gaps are
+covered; exact period tools still validate every requested day. Financial tools
+validate the current tenant/boundary/generation publication set once, preserve
+legacy and v2 currency rules, and reuse one grouped order scan for overview
+metrics and currency breakdown. Freshness reads sync metadata independently.
+Coverage uses the same grouped scan for bounds and counts. The PostgreSQL RLS
+gate exercises 1,000 mixed-currency orders and rejects repeated per-order
+publication validation, while checking cross-tenant denial.
+
+A live refresh also detected an upstream order dated before the requested range.
+Such a pull remains unpublished with `order_date_outside_requested_period`;
+validated analytics remain available. Neither discarding the offending row nor
+substituting its creation date proves complete order-date coverage. Provider
+range semantics must be corrected or independently verified before publication.

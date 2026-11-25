@@ -16,11 +16,12 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from fastapi import HTTPException, Request, Response
-from sqlalchemy import Engine, Table, create_engine, inspect, select, text, update
+from sqlalchemy import Engine, Table, create_engine, func, inspect, select, text, update
 from sqlalchemy.engine import URL, Connection, RowMapping, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import sessionmaker
@@ -33,6 +34,7 @@ from app.providers.contracts import BumpaSnapshot, ProviderDataset, ProviderOrde
 from app.routes.auth import request_otp, verify_code
 from app.schemas import OtpRequest, OtpVerify
 from app.services import bumpa as bumpa_service
+from app.services.business_tools import business_overview, published_orders_predicate
 from app.voice.backend import Caller, CallerDenied
 from app.voice.backend import _check as check_voice_caller
 
@@ -2032,6 +2034,85 @@ def _exercise_whatsapp_job_scope(
             )
 
 
+def _assert_publication_query_scaling(
+    admin_engine: Engine, app_engine: Engine, tenant_ids: tuple[str, str]
+) -> None:
+    """Verify current publication reads under RLS without per-order run validation."""
+    tenant_id = tenant_ids[0]
+    factory = sessionmaker(bind=admin_engine, expire_on_commit=False)
+    with factory() as db:
+        bumpa_connection = db.scalar(
+            select(models.BumpaConnection).where(models.BumpaConnection.tenant_id == tenant_id)
+        )
+        run = db.scalar(
+            select(models.BumpaSyncRun).where(models.BumpaSyncRun.tenant_id == tenant_id)
+        )
+        if bumpa_connection is None or run is None:
+            raise AssertionError("Publication scaling fixture is missing")
+        bumpa_connection.sync_generation = bumpa_connection.published_sync_generation = 1
+        run.sync_generation = 1
+        run.orders_count = 1000
+        run.dataset_results = {"_bumpa_order_publication": {"version": 2, "state": "complete"}}
+        db.add_all(
+            models.BumpaOrder(
+                id=str(uuid4()),
+                tenant_id=tenant_id,
+                bumpa_order_id=f"scaling-{index}",
+                currency_code="NGN" if index % 2 == 0 else "USD",
+                total_amount=Decimal("2"),
+                order_date=datetime(2026, 1, 1, 12, tzinfo=UTC),
+                raw_payload={
+                    "evidence": "synthetic " * 500,
+                    "_bumpa_publication": {
+                        "sync_run_id": run.id,
+                        "state": "active",
+                        "currency_code": "NGN" if index % 2 == 0 else "USD",
+                    },
+                },
+            )
+            for index in range(1000)
+        )
+        db.commit()
+    with app_engine.connect() as connection:
+        with connection.begin():
+            _set_context(connection, tenant_id)
+            query = select(func.count(models.BumpaOrder.id)).where(
+                published_orders_predicate(tenant_id, include_all_currencies=True)
+            )
+            if connection.scalar(query) != 1000:
+                raise AssertionError("Publication query lost verified native-currency orders")
+            sql = str(
+                query.compile(dialect=connection.dialect, compile_kwargs={"literal_binds": True})
+            )
+            plan = connection.execute(text("EXPLAIN (ANALYZE, FORMAT JSON) " + sql)).scalar_one()[
+                0
+            ]["Plan"]
+
+            def assert_bounded_validation(node: dict[str, Any]) -> None:
+                if node.get("Relation Name") == "bumpa_sync_runs" and node["Actual Loops"] > 2:
+                    raise AssertionError("Publication validity was recomputed for each order")
+                for child in node.get("Plans", []):
+                    assert_bounded_validation(child)
+
+            assert_bounded_validation(plan)
+            with sessionmaker(bind=connection)() as db:
+                result = business_overview(
+                    db,
+                    tenant_id,
+                    date_from=date(2026, 1, 1),
+                    date_to=date(2026, 1, 1),
+                    compare_to="none",
+                )
+                if (
+                    result["metrics"]["order_count"] != 500
+                    or len(result["currency_breakdown"]) != 2
+                ):
+                    raise AssertionError("Grouped overview mixed native currencies")
+            _set_context(connection, tenant_ids[1])
+            if connection.scalar(query) != 0:
+                raise AssertionError("Publication query bypassed tenant RLS")
+
+
 def _cleanup(
     admin_engine: Engine,
     app_engine: Engine | None,
@@ -2154,6 +2235,7 @@ def main() -> None:
         app_url = admin_url.set(username=role, password=password)
         app_engine = create_engine(app_url, pool_pre_ping=True)
         _exercise_role(app_engine, admin_engine, role, tenant_tables, tenant_ids, user_ids)
+        _assert_publication_query_scaling(admin_engine, app_engine, tenant_ids)
         print(
             "PostgreSQL RLS integration gate passed: "
             f"{len(tenant_tables)} tenant tables; no-context, tenant isolation, "
