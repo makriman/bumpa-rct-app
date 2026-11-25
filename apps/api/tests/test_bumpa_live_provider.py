@@ -2231,3 +2231,116 @@ def test_catalog_request_starts_are_spaced_across_prefetch_threads():
                 )
     assert len(starts) == 4
     assert all(later - earlier >= 0.018 for earlier, later in zip(starts, starts[1:], strict=False))
+
+
+def test_catalog_has_a_separate_larger_bounded_body_limit():
+    from app.providers import bumpa as module
+
+    payload = {
+        "success": True,
+        "orders": _empty_orders()["orders"],
+        "padding": "x" * (module.MAX_RESPONSE_BYTES + 1),
+    }
+
+    def respond(request):
+        return httpx.Response(200, json=payload)
+
+    provider = BumpaClient(
+        "secret", "business_id", "store", client=_client(httpx.MockTransport(respond))
+    )
+    status, data, _ = provider.get_orders_page(None, None, 1)
+    assert status == 200 and len(data["padding"]) > module.MAX_RESPONSE_BYTES
+    with pytest.raises(BumpaProviderError) as error:
+        provider.get_analytics("sales", "total_sales", date(2026, 1, 1), date(2026, 1, 1))
+    assert error.value.failure_kind == "response_too_large"
+
+
+def test_chunked_response_is_closed_when_decoded_body_exceeds_cap(monkeypatch):
+    from app.providers import bumpa as module
+
+    monkeypatch.setattr(module, "MAX_RESPONSE_BYTES", 128 * 1024)
+
+    class Body(httpx.SyncByteStream):
+        closed = False
+        reads = 0
+
+        def __iter__(self):
+            for _ in range(100):
+                self.reads += 1
+                yield b"x" * 65_536
+
+        def close(self):
+            self.closed = True
+
+    body = Body()
+    provider = BumpaClient(
+        "secret",
+        "business_id",
+        "store",
+        client=_client(httpx.MockTransport(lambda request: httpx.Response(200, stream=body))),
+    )
+    with pytest.raises(BumpaProviderError) as error:
+        provider.get_analytics("sales", "total_sales", date(2026, 1, 1), date(2026, 1, 1))
+    assert error.value.failure_kind == "response_too_large"
+    assert body.closed and body.reads == 3
+
+
+@pytest.mark.parametrize("retry_succeeds", [True, False])
+def test_oversized_catalog_restarts_once_with_smaller_pages(retry_succeeds):
+    from app.providers import bumpa as module
+
+    limits = []
+
+    def respond(request):
+        if not request.url.path.endswith("/orders"):
+            return _analytics_response(request)
+        limit = int(request.url.params["limit"])
+        limits.append(limit)
+        if limit == 100 or not retry_succeeds:
+            return httpx.Response(
+                200,
+                content=b"{}",
+                headers={"Content-Length": str(module.MAX_CATALOG_RESPONSE_BYTES + 1)},
+            )
+        page = int(request.url.params["page"])
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "orders": {
+                    "data": [{"id": str(page), "order_date": "2026-01-01T12:00:00Z", "total": "1"}],
+                    "current_page": page,
+                    "last_page": 2,
+                    "per_page": 1,
+                    "total": 2,
+                },
+            },
+        )
+
+    result = BumpaClient(
+        "secret", "business_id", "store", client=_client(httpx.MockTransport(respond))
+    ).sync(date(2026, 1, 1), date(2026, 1, 1))
+    assert limits == ([100, 50, 50] if retry_succeeds else [100, 50])
+    assert result.orders_availability == ("available" if retry_succeeds else "error")
+    assert result.orders_catalog_count == (2 if retry_succeeds else None)
+    assert [o.order_id for o in result.orders] == (["1", "2"] if retry_succeeds else [])
+    assert result.responses[-(3 if retry_succeeds else 2)].dataset == "catalog_retry"
+
+
+def test_catalog_retries_also_respect_request_start_spacing():
+    import time
+
+    starts = []
+
+    def respond(request):
+        starts.append(time.monotonic())
+        if len(starts) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json=_empty_orders())
+
+    with _client(httpx.MockTransport(respond)) as http:
+        with BumpaClient(
+            "secret", "business_id", "store", client=http, catalog_request_spacing_seconds=0.02
+        ) as provider:
+            provider.get_orders_page(None, None, 1, max_attempts=2)
+    assert len(starts) == 2 and starts[1] - starts[0] >= 0.018

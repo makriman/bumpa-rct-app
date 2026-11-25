@@ -23,6 +23,7 @@ from app.providers.redaction import parse_money
 
 BUMPA_BASE_URL = "https://api.getbumpa.com/api"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_CATALOG_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ORDER_PAGES = 1_000
 MAX_ORDER_RECORDS = 100_000
 MAX_ANALYTICS_POINTS = 2_000
@@ -175,7 +176,7 @@ class BumpaClient:
         self._client = client or httpx.Client(
             base_url=BUMPA_BASE_URL,
             timeout=DEFAULT_REQUEST_POLICY.to_httpx(),
-            limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=4),
             follow_redirects=False,
         )
         self._owns_client = client is None
@@ -216,7 +217,12 @@ class BumpaClient:
         *,
         max_attempts: int | None = None,
         request_policy: BumpaEndpointRequestPolicy | None = None,
+        max_response_bytes: int | None = None,
+        paced_catalog: bool = False,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        size_limit = MAX_RESPONSE_BYTES if max_response_bytes is None else max_response_bytes
+        if not 1 <= size_limit <= MAX_CATALOG_RESPONSE_BYTES:
+            raise ValueError("Invalid Bumpa response size limit")
         requested_attempt_limit = self._max_attempts if max_attempts is None else max_attempts
         if not 1 <= requested_attempt_limit <= self._max_attempts:
             raise ValueError("Invalid Bumpa request attempt limit")
@@ -226,16 +232,50 @@ class BumpaClient:
             else requested_attempt_limit
         )
         for attempt in range(1, attempt_limit + 1):
+            if paced_catalog:
+                with self._catalog_request_lock:
+                    delay = self._catalog_next_request_at - time.monotonic()
+                    if delay > 0:
+                        self._sleep(delay)
+                    self._catalog_next_request_at = time.monotonic() + self._catalog_spacing
             try:
-                if request_policy is None:
-                    response = self._client.get(path, params=params, headers=self._headers)
-                else:
-                    response = self._client.get(
+                stream = (
+                    self._client.stream("GET", path, params=params, headers=self._headers)
+                    if request_policy is None
+                    else self._client.stream(
+                        "GET",
                         path,
                         params=params,
                         headers=self._headers,
                         timeout=request_policy.to_httpx(),
                     )
+                )
+                content = bytearray()
+                with stream as response:
+                    request_id_hash = provider_request_id_hash(response.headers.get("x-request-id"))
+                    # Connection-level errors need no untrusted response body.
+                    if response.status_code not in {401, 403, 429} and response.status_code < 500:
+                        content_length = response.headers.get("content-length")
+                        if (
+                            content_length
+                            and content_length.isdigit()
+                            and int(content_length) > size_limit
+                        ):
+                            raise BumpaProviderError(
+                                "Bumpa response exceeded the size limit",
+                                status_code=response.status_code,
+                                failure_kind="response_too_large",
+                                request_id_hash=request_id_hash,
+                            )
+                        for chunk in response.iter_bytes(chunk_size=65_536):
+                            if len(content) + len(chunk) > size_limit:
+                                raise BumpaProviderError(
+                                    "Bumpa response exceeded the size limit",
+                                    status_code=response.status_code,
+                                    failure_kind="response_too_large",
+                                    request_id_hash=request_id_hash,
+                                )
+                            content.extend(chunk)
             except httpx.TimeoutException as exc:
                 if attempt == attempt_limit:
                     raise BumpaProviderError(
@@ -288,28 +328,8 @@ class BumpaClient:
                     retry_after_seconds=_bounded_retry_after(response.headers.get("retry-after")),
                 )
 
-            content_length = response.headers.get("content-length")
-            if (
-                content_length
-                and content_length.isdigit()
-                and int(content_length) > MAX_RESPONSE_BYTES
-            ):
-                raise BumpaProviderError(
-                    "Bumpa response exceeded the size limit",
-                    status_code=response.status_code,
-                    failure_kind="response_too_large",
-                    request_id_hash=request_id_hash,
-                )
-            content = response.content
-            if len(content) > MAX_RESPONSE_BYTES:
-                raise BumpaProviderError(
-                    "Bumpa response exceeded the size limit",
-                    status_code=response.status_code,
-                    failure_kind="response_too_large",
-                    request_id_hash=request_id_hash,
-                )
             try:
-                decoded = response.json()
+                decoded = json.loads(content)
             except ValueError as exc:
                 raise BumpaProviderError(
                     "Bumpa returned an invalid response",
@@ -397,18 +417,18 @@ class BumpaClient:
             params.update(
                 from_date=date_from.isoformat(), to_date=(date_to + timedelta(days=1)).isoformat()
             )
-        if date_from is None:
-            with self._catalog_request_lock:
-                delay = self._catalog_next_request_at - time.monotonic()
-                if delay > 0:
-                    self._sleep(delay)
-                self._catalog_next_request_at = time.monotonic() + self._catalog_spacing
-        return self._request("/commerce/v1/orders", params, max_attempts=max_attempts)
+        return self._request(
+            "/commerce/v1/orders",
+            params,
+            max_attempts=max_attempts,
+            max_response_bytes=MAX_CATALOG_RESPONSE_BYTES if date_from is None else None,
+            paced_catalog=date_from is None,
+        )
 
     def _catalog_pages(
-        self, *, max_attempts: int | None
+        self, *, max_attempts: int | None, page_limit: int
     ) -> Generator[tuple[int, tuple[int, dict[str, Any], dict[str, str]]], None, None]:
-        first = self.get_orders_page(None, None, 1, max_attempts=max_attempts)
+        first = self.get_orders_page(None, None, 1, limit=page_limit, max_attempts=max_attempts)
         yield 1, first
         # The caller validates page one before this generator is resumed.
         last = first[1]["orders"]["last_page"]
@@ -418,7 +438,12 @@ class BumpaClient:
             try:
                 while next_page <= min(last, 5):
                     pending[next_page] = pool.submit(
-                        self.get_orders_page, None, None, next_page, max_attempts=max_attempts
+                        self.get_orders_page,
+                        None,
+                        None,
+                        next_page,
+                        limit=page_limit,
+                        max_attempts=max_attempts,
                     )
                     next_page += 1
                 for page in range(2, last + 1):
@@ -426,7 +451,12 @@ class BumpaClient:
                     yield page, result
                     if next_page <= last:
                         pending[next_page] = pool.submit(
-                            self.get_orders_page, None, None, next_page, max_attempts=max_attempts
+                            self.get_orders_page,
+                            None,
+                            None,
+                            next_page,
+                            limit=page_limit,
+                            max_attempts=max_attempts,
                         )
                         next_page += 1
             finally:
@@ -441,6 +471,7 @@ class BumpaClient:
         current_remaining: int | None,
         *,
         max_attempts: int | None = None,
+        _page_limit: Literal[50, 100] = 100,
     ) -> tuple[
         list[ProviderOrder],
         list[BumpaResponse],
@@ -468,7 +499,9 @@ class BumpaClient:
         offending_payload: dict[str, Any] = {}
         offending_headers: dict[str, str] = {}
         try:
-            with closing(self._catalog_pages(max_attempts=max_attempts)) as pages:
+            with closing(
+                self._catalog_pages(max_attempts=max_attempts, page_limit=_page_limit)
+            ) as pages:
                 for page, (status, payload, headers) in pages:
                     # End-of-page reset below keeps a failed prefetched request
                     # from inheriting evidence from the previously consumed page.
@@ -608,6 +641,41 @@ class BumpaClient:
         except BumpaProviderError as exc:
             if exc.failure_kind in {"authentication", "rate_limited"}:
                 raise
+            if exc.failure_kind == "response_too_large" and _page_limit == 100:
+                # Restart membership verification rather than changing page size
+                # mid-scan. Release the discarded window payload before retrying.
+                orders.clear()
+                responses.clear()
+                seen_orders.clear()
+                retried = self._sync_orders(
+                    date_from,
+                    date_to,
+                    current_limit,
+                    current_remaining,
+                    max_attempts=max_attempts,
+                    _page_limit=50,
+                )
+                retried[1].insert(
+                    0,
+                    BumpaResponse(
+                        "orders",
+                        "catalog_retry",
+                        exc.status_code,
+                        {
+                            "schema_version": 1,
+                            "kind": "catalog_page_size_retry",
+                            "original_page_size": 100,
+                            "retry_page_size": 50,
+                        },
+                        {},
+                        "error",
+                        str(exc),
+                        "invalid_response",
+                        False,
+                        exc.request_id_hash,
+                    ),
+                )
+                return retried
             orders.clear()
             availability, error = "error", str(exc)
             evidence_kind: DatasetFailureKind = (

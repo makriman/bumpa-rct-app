@@ -33,7 +33,11 @@ keys and claim epochs. The outbox routes `whatsapp.*` wakeups to the Redis
 WhatsApp consumers by default. `ASYNC_WHATSAPP_WORKERS` accepts 1 through 8;
 Bulk job concurrency remains one. Catalog scans prefetch at most four pages
 with one request start per second; buffered pages are bounded to four, and
-failures cancel the remaining prefetch. WhatsApp retains its reserved consumers.
+failures cancel the remaining prefetch. Catalog bodies are streamed with an
+8 MiB decoded-body cap per page; analytics retain their 2 MiB cap. Oversized
+responses are closed immediately. An oversized catalog page restarts the scan
+once at 50 rows per page, discarding prior partial membership; a second failure
+remains unavailable. WhatsApp retains its reserved consumers.
 
 Each consumer owns its database sessions and lease renewal. Receiver/actor FIFO
 and claim fencing still control admission. On startup, queued legacy WhatsApp
