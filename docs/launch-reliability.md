@@ -31,7 +31,9 @@ PostgreSQL remains the source of truth and keeps existing job IDs, idempotency
 keys and claim epochs. The outbox routes `whatsapp.*` wakeups to the Redis
 `<queue-key>:whatsapp` list. The worker runs one bulk consumer and two reserved
 WhatsApp consumers by default. `ASYNC_WHATSAPP_WORKERS` accepts 1 through 8;
-changing it does not increase Bumpa request concurrency.
+Bulk job concurrency remains one. Catalog scans prefetch at most four pages
+with one request start per second; buffered pages are bounded to four, and
+failures cancel the remaining prefetch. WhatsApp retains its reserved consumers.
 
 Each consumer owns its database sessions and lease renewal. Receiver/actor FIFO
 and claim fencing still control admission. On startup, queued legacy WhatsApp

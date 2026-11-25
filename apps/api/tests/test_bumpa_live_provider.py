@@ -40,6 +40,7 @@ class BumpaClient(ProductionBumpaClient):
         store_currency: str = "NGN",
         **kwargs: Any,
     ) -> None:
+        kwargs.setdefault("catalog_request_spacing_seconds", 0)
         super().__init__(
             api_key,
             scope_type,
@@ -2123,3 +2124,110 @@ def test_direct_creation_date_page_uses_next_day_exclusive_bound():
         with pytest.raises(ValueError):
             provider.get_orders_page(start, end, 1)
     assert len(seen) == 1
+
+
+def test_catalog_prefetch_is_bounded_and_keeps_publication_page_order():
+    from threading import Barrier, Lock
+
+    barrier = Barrier(4)
+    lock = Lock()
+    active = 0
+    maximum = 0
+    seen = []
+
+    def respond(request):
+        nonlocal active, maximum
+        if not request.url.path.endswith("/orders"):
+            return _analytics_response(request)
+        page = int(request.url.params["page"])
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+            seen.append(page)
+        if page > 1:
+            barrier.wait(timeout=5)
+        with lock:
+            active -= 1
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "orders": {
+                    "data": [{"id": str(page), "order_date": "2026-01-01T12:00:00Z", "total": "1"}],
+                    "current_page": page,
+                    "last_page": 5,
+                    "per_page": 1,
+                    "total": 5,
+                },
+            },
+        )
+
+    result = BumpaClient(
+        "secret", "business_id", "store", client=_client(httpx.MockTransport(respond))
+    ).sync(date(2026, 1, 1), date(2026, 1, 1))
+    assert maximum == 4 and sorted(seen) == [1, 2, 3, 4, 5]
+    assert result.orders_catalog_count == 5
+    assert [o.order_id for o in result.orders] == ["1", "2", "3", "4", "5"]
+
+
+def test_catalog_prefetch_failure_stops_before_another_batch():
+    seen = []
+
+    def respond(request):
+        if not request.url.path.endswith("/orders"):
+            return _analytics_response(request)
+        page = int(request.url.params["page"])
+        seen.append(page)
+        if page == 2:
+            raise httpx.ReadTimeout("Synthetic failure", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "orders": {
+                    "data": [{"id": str(page), "order_date": "2026-01-01T12:00:00Z", "total": "1"}],
+                    "current_page": page,
+                    "last_page": 20,
+                    "per_page": 1,
+                    "total": 20,
+                },
+            },
+        )
+
+    result = BumpaClient(
+        "secret",
+        "business_id",
+        "store",
+        client=_client(httpx.MockTransport(respond)),
+        max_attempts=1,
+    ).sync(date(2026, 1, 1), date(2026, 1, 1))
+    assert result.orders_availability == "error" and result.orders_catalog_count is None
+    assert len(seen) <= 5 and max(seen) <= 5
+    assert result.orders == []
+
+
+def test_invalid_catalog_spacing_is_rejected_before_io():
+    with pytest.raises(ValueError, match="catalog request spacing"):
+        BumpaClient("secret", "business_id", "store", catalog_request_spacing_seconds=-1)
+
+
+def test_catalog_request_starts_are_spaced_across_prefetch_threads():
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    starts = []
+
+    def respond(request):
+        starts.append(time.monotonic())
+        return httpx.Response(200, json=_empty_orders())
+
+    with _client(httpx.MockTransport(respond)) as http:
+        with BumpaClient(
+            "secret", "business_id", "store", client=http, catalog_request_spacing_seconds=0.02
+        ) as provider:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(
+                    pool.map(lambda page: provider.get_orders_page(None, None, page), [1, 2, 3, 4])
+                )
+    assert len(starts) == 4
+    assert all(later - earlier >= 0.018 for earlier, later in zip(starts, starts[1:], strict=False))
