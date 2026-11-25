@@ -41,6 +41,11 @@ completed effect. Both lane heartbeats are required for worker health.
 `whatsapp_oldest_wait_seconds` and `whatsapp_queue` (`delayed` above 60 seconds).
 Readiness counts alone must not be treated as a reply-latency guarantee.
 
+Accepted replies persist their exact context freshness, including an unavailable
+value. An idempotent web retry uses that snapshot even if an import finished
+between input admission and context construction. Historical replies retain the
+existing reconstruction fallback.
+
 ## Product overview timeouts
 
 Bumpa product overview has a bounded 90-second read window and at most two
