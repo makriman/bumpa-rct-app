@@ -31,7 +31,13 @@ PostgreSQL remains the source of truth and keeps existing job IDs, idempotency
 keys and claim epochs. The outbox routes `whatsapp.*` wakeups to the Redis
 `<queue-key>:whatsapp` list. The worker runs one bulk consumer and two reserved
 WhatsApp consumers by default. `ASYNC_WHATSAPP_WORKERS` accepts 1 through 8;
-changing it does not increase Bumpa request concurrency.
+Bulk job concurrency remains one. Catalog scans prefetch at most four pages
+with one request start per second; buffered pages are bounded to four, and
+failures cancel the remaining prefetch. Catalog bodies are streamed with an
+8 MiB decoded-body cap per page; analytics retain their 2 MiB cap. Oversized
+responses are closed immediately. An oversized catalog page restarts the scan
+once at 50 rows per page, discarding prior partial membership; a second failure
+remains unavailable. WhatsApp retains its reserved consumers.
 
 Each consumer owns its database sessions and lease renewal. Receiver/actor FIFO
 and claim fencing still control admission. On startup, queued legacy WhatsApp
@@ -96,8 +102,11 @@ Coverage uses the same grouped scan for bounds and counts. The PostgreSQL RLS
 gate exercises 1,000 mixed-currency orders and rejects repeated per-order
 publication validation, while checking cross-tenant denial.
 
-A live refresh also detected an upstream order dated before the requested range.
-Such a pull remains unpublished with `order_date_outside_requested_period`;
-validated analytics remain available. Neither discarding the offending row nor
-substituting its creation date proves complete order-date coverage. Provider
-range semantics must be corrected or independently verified before publication.
+Live date-boundary probes found that a same-day creation filter could return
+zero despite actual orders, and backdated orders could fall outside that filter's
+requested reporting window. The version 3 importer scans the scoped full catalogue
+and selects by store-local order date. It records a complete-catalogue attestation;
+production legacy range publications remain unavailable until refreshed. The
+operator quarantines prior incomplete publications with preserved original
+metadata and an audit trail. Independent valid analytics and active chat accounts
+remain available throughout repair.

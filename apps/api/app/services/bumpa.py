@@ -473,6 +473,17 @@ def _stage_sync_publication(
     )
     orders_error = live_result.orders_error if live_result is not None else None
     publication_error: str | None = None
+    if (
+        live_result is not None
+        and orders_availability == "available"
+        and (
+            type(live_result.orders_catalog_count) is not int
+            or live_result.orders_catalog_count < len(snapshot.orders)
+        )
+    ):
+        orders_availability = "error"
+        publication_error = "full_order_catalog_verification_required"
+        orders_error = publication_error
     if orders_availability == "available" and orders_error is None:
         try:
             _order_publication_scope(db, tenant_id, run_id, snapshot.orders)
@@ -566,6 +577,12 @@ def _stage_sync_publication(
             "state": "complete",
             "currencies": dict(Counter(order.currency_code for order in snapshot.orders)),
         }
+        if live_result is not None:
+            results["_bumpa_order_publication"].update(
+                version=3,
+                range_contract="full_catalog_order_date_v1",
+                catalog_count=live_result.orders_catalog_count,
+            )
     return StagedSync(
         live_result=live_result,
         completion=completion,

@@ -239,7 +239,9 @@ def _sync_result(
         for dataset in datasets
     ]
     responses.append(BumpaResponse("orders", None, 200, {"data": []}, {}, "available", None))
-    return BumpaSyncResult(datasets, orders or [], responses, None, None, "available", None)
+    return BumpaSyncResult(
+        datasets, orders or [], responses, None, None, "available", None, len(orders or [])
+    )
 
 
 def _order(order_id: str, *, status: str, item_name: str) -> ProviderOrder:

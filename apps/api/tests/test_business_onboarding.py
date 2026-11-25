@@ -325,6 +325,7 @@ def test_order_prefill_requires_exact_complete_current_month_boundary(
         completion_quality="complete",
         orders_availability="available",
         orders_count=18,
+        dataset_results={"_bumpa_order_publication": {"version": 2, "state": "complete"}},
         finished_at=utcnow(),
     )
     db.add(run)

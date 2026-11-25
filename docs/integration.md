@@ -75,12 +75,27 @@ claims, malformed codes, or invalid monetary facts fail the page closed. Custome
 ranking identity is removed, anonymous/deleted-customer aggregate counts remain
 usable, and product ranking labels accept product-specific fields only.
 
-Canonical order publication has a stricter whole-window contract: every order
-must be dated within the requested store-local window and use the configured
-store currency. A parseable `created_at` is not substituted for a present
-`order_date` that falls outside the window, and mixed-currency orders are not
-silently dropped or converted. These guards preserve the previous publication
-when the provider list cannot establish complete dated single-currency membership.
+Canonical order publication proves exact store-local order-date membership.
+Bumpa's `from_date`/`to_date` orders filter uses creation dates and an exclusive
+upper day; it cannot establish complete reporting coverage for backdated orders.
+The reporting adapter therefore scans the scoped full catalogue without these
+filters, validates every page and unique identifier/date, and selects the exact
+local order-date window. Commercial values are validated for selected orders;
+missing placement dates, changed totals, conflicting duplicates, truncation and
+safety-limit failures invalidate the entire order publication, including zero.
+
+Live version 3 publication evidence records the `full_catalog_order_date_v1`
+contract and verified catalogue count. Production version 1/2 publications cannot
+prove this contract and remain excluded until a fresh verified pull. Deterministic
+local fixtures retain their legacy version support. Current-generation, boundary,
+tenant and per-row currency provenance rules apply throughout. No creation date is
+substituted for a present invalid order date, and native currencies remain separate.
+
+Full-catalogue evidence uses explicitly labelled `orders.catalog_scan` page
+receipts: provider pagination, original page digest, scanned/selected/excluded
+counts and the requested-window rows. Out-of-window commercial payloads are not
+retained, bounding worker memory and evidence storage to the requested facts plus
+compact receipts. These receipts are projections, not untouched provider pages.
 
 Every queued sync captures the active `boundary_revision`. A material provider,
 scope, timezone, or currency replacement invalidates queued work, fences in-flight

@@ -103,8 +103,8 @@ def published_orders_predicate(
     # Uncorrelated, positive membership permits a hashed publication set.
     # IS TRUE keeps PostgreSQL from pulling this back into a per-order semi-join;
     # missing publication IDs still fail closed.
-    version2_runs = verified_runs.where(
-        run.dataset_results["_bumpa_order_publication"]["version"].as_integer() == 2
+    multicurrency_runs = verified_runs.where(
+        run.dataset_results["_bumpa_order_publication"]["version"].as_integer().in_((2, 3))
     )
     store_currency = (
         select(BumpaConnection.store_currency)
@@ -121,7 +121,7 @@ def published_orders_predicate(
         or_(
             BumpaOrder.currency_code == store_currency,
             and_(
-                publication_id.in_(version2_runs),
+                publication_id.in_(multicurrency_runs),
                 publication["currency_code"].as_string() == BumpaOrder.currency_code,
             ),
         ),

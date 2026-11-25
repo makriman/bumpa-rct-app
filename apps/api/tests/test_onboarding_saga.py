@@ -257,7 +257,16 @@ def _finish_sync(
         error=None,
         orders_availability=orders_availability,
         orders_count=orders_count,
-        dataset_results={},
+        dataset_results={
+            "_bumpa_order_publication": {
+                "version": 3,
+                "state": "complete",
+                "range_contract": "full_catalog_order_date_v1",
+                "catalog_count": orders_count,
+            }
+        }
+        if orders_count is not None
+        else {},
     )
     db.add(run)
     db.flush()

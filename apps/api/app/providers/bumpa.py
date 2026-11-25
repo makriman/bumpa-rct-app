@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Lock
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -19,6 +23,7 @@ from app.providers.redaction import parse_money
 
 BUMPA_BASE_URL = "https://api.getbumpa.com/api"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_CATALOG_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_ORDER_PAGES = 1_000
 MAX_ORDER_RECORDS = 100_000
 MAX_ANALYTICS_POINTS = 2_000
@@ -138,6 +143,7 @@ class BumpaSyncResult:
     rate_limit_remaining: int | None
     orders_availability: str
     orders_error: str | None
+    orders_catalog_count: int | None = None
 
 
 class BumpaClient:
@@ -154,6 +160,7 @@ class BumpaClient:
         client: httpx.Client | None = None,
         sleep: Callable[[float], None] = time.sleep,
         max_attempts: int = DEFAULT_REQUEST_POLICY.max_attempts,
+        catalog_request_spacing_seconds: float = 1.0,
     ) -> None:
         if scope_type not in {"business_id", "location_id"}:
             raise ValueError("Invalid Bumpa scope_type")
@@ -169,12 +176,17 @@ class BumpaClient:
         self._client = client or httpx.Client(
             base_url=BUMPA_BASE_URL,
             timeout=DEFAULT_REQUEST_POLICY.to_httpx(),
-            limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
+            limits=httpx.Limits(max_connections=5, max_keepalive_connections=4),
             follow_redirects=False,
         )
         self._owns_client = client is None
         self._sleep = sleep
         self._max_attempts = max(1, min(max_attempts, 4))
+        if not 0 <= catalog_request_spacing_seconds <= 60:
+            raise ValueError("Invalid catalog request spacing")
+        self._catalog_spacing = catalog_request_spacing_seconds
+        self._catalog_request_lock = Lock()
+        self._catalog_next_request_at = 0.0
 
     def close(self) -> None:
         if self._owns_client:
@@ -205,7 +217,12 @@ class BumpaClient:
         *,
         max_attempts: int | None = None,
         request_policy: BumpaEndpointRequestPolicy | None = None,
+        max_response_bytes: int | None = None,
+        paced_catalog: bool = False,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        size_limit = MAX_RESPONSE_BYTES if max_response_bytes is None else max_response_bytes
+        if not 1 <= size_limit <= MAX_CATALOG_RESPONSE_BYTES:
+            raise ValueError("Invalid Bumpa response size limit")
         requested_attempt_limit = self._max_attempts if max_attempts is None else max_attempts
         if not 1 <= requested_attempt_limit <= self._max_attempts:
             raise ValueError("Invalid Bumpa request attempt limit")
@@ -215,16 +232,50 @@ class BumpaClient:
             else requested_attempt_limit
         )
         for attempt in range(1, attempt_limit + 1):
+            if paced_catalog:
+                with self._catalog_request_lock:
+                    delay = self._catalog_next_request_at - time.monotonic()
+                    if delay > 0:
+                        self._sleep(delay)
+                    self._catalog_next_request_at = time.monotonic() + self._catalog_spacing
             try:
-                if request_policy is None:
-                    response = self._client.get(path, params=params, headers=self._headers)
-                else:
-                    response = self._client.get(
+                stream = (
+                    self._client.stream("GET", path, params=params, headers=self._headers)
+                    if request_policy is None
+                    else self._client.stream(
+                        "GET",
                         path,
                         params=params,
                         headers=self._headers,
                         timeout=request_policy.to_httpx(),
                     )
+                )
+                content = bytearray()
+                with stream as response:
+                    request_id_hash = provider_request_id_hash(response.headers.get("x-request-id"))
+                    # Connection-level errors need no untrusted response body.
+                    if response.status_code not in {401, 403, 429} and response.status_code < 500:
+                        content_length = response.headers.get("content-length")
+                        if (
+                            content_length
+                            and content_length.isdigit()
+                            and int(content_length) > size_limit
+                        ):
+                            raise BumpaProviderError(
+                                "Bumpa response exceeded the size limit",
+                                status_code=response.status_code,
+                                failure_kind="response_too_large",
+                                request_id_hash=request_id_hash,
+                            )
+                        for chunk in response.iter_bytes(chunk_size=65_536):
+                            if len(content) + len(chunk) > size_limit:
+                                raise BumpaProviderError(
+                                    "Bumpa response exceeded the size limit",
+                                    status_code=response.status_code,
+                                    failure_kind="response_too_large",
+                                    request_id_hash=request_id_hash,
+                                )
+                            content.extend(chunk)
             except httpx.TimeoutException as exc:
                 if attempt == attempt_limit:
                     raise BumpaProviderError(
@@ -277,28 +328,8 @@ class BumpaClient:
                     retry_after_seconds=_bounded_retry_after(response.headers.get("retry-after")),
                 )
 
-            content_length = response.headers.get("content-length")
-            if (
-                content_length
-                and content_length.isdigit()
-                and int(content_length) > MAX_RESPONSE_BYTES
-            ):
-                raise BumpaProviderError(
-                    "Bumpa response exceeded the size limit",
-                    status_code=response.status_code,
-                    failure_kind="response_too_large",
-                    request_id_hash=request_id_hash,
-                )
-            content = response.content
-            if len(content) > MAX_RESPONSE_BYTES:
-                raise BumpaProviderError(
-                    "Bumpa response exceeded the size limit",
-                    status_code=response.status_code,
-                    failure_kind="response_too_large",
-                    request_id_hash=request_id_hash,
-                )
             try:
-                decoded = response.json()
+                decoded = json.loads(content)
             except ValueError as exc:
                 raise BumpaProviderError(
                     "Bumpa returned an invalid response",
@@ -359,8 +390,8 @@ class BumpaClient:
 
     def get_orders_page(
         self,
-        date_from: date,
-        date_to: date,
+        date_from: date | None,
+        date_to: date | None,
         page: int,
         *,
         limit: int = 100,
@@ -369,15 +400,68 @@ class BumpaClient:
         if page < 1 or not 1 <= limit <= 100:
             raise ValueError("Invalid Bumpa pagination")
         params = {
-            "from_date": date_from.isoformat(),
-            "to_date": date_to.isoformat(),
             "page": str(page),
             "limit": str(limit),
             "orderBy": "desc",
             "orderByField": "created_at",
             **self._scope,
         }
-        return self._request("/commerce/v1/orders", params, max_attempts=max_attempts)
+        if (date_from is None) != (date_to is None):
+            raise ValueError("Both creation-date bounds are required")
+        if date_from is not None and date_to is not None:
+            if date_to < date_from or date_to == date.max:
+                raise ValueError("Invalid Bumpa creation-date range")
+            # This endpoint filters creation dates, with an exclusive upper day.
+            # Reporting syncs use an unfiltered catalogue instead: backdated
+            # order_date values cannot be proved complete with creation filters.
+            params.update(
+                from_date=date_from.isoformat(), to_date=(date_to + timedelta(days=1)).isoformat()
+            )
+        return self._request(
+            "/commerce/v1/orders",
+            params,
+            max_attempts=max_attempts,
+            max_response_bytes=MAX_CATALOG_RESPONSE_BYTES if date_from is None else None,
+            paced_catalog=date_from is None,
+        )
+
+    def _catalog_pages(
+        self, *, max_attempts: int | None, page_limit: int
+    ) -> Generator[tuple[int, tuple[int, dict[str, Any], dict[str, str]]], None, None]:
+        first = self.get_orders_page(None, None, 1, limit=page_limit, max_attempts=max_attempts)
+        yield 1, first
+        # The caller validates page one before this generator is resumed.
+        last = first[1]["orders"]["last_page"]
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="bumpa-catalog") as pool:
+            pending: dict[int, Future[tuple[int, dict[str, Any], dict[str, str]]]] = {}
+            next_page = 2
+            try:
+                while next_page <= min(last, 5):
+                    pending[next_page] = pool.submit(
+                        self.get_orders_page,
+                        None,
+                        None,
+                        next_page,
+                        limit=page_limit,
+                        max_attempts=max_attempts,
+                    )
+                    next_page += 1
+                for page in range(2, last + 1):
+                    result = pending.pop(page).result()
+                    yield page, result
+                    if next_page <= last:
+                        pending[next_page] = pool.submit(
+                            self.get_orders_page,
+                            None,
+                            None,
+                            next_page,
+                            limit=page_limit,
+                            max_attempts=max_attempts,
+                        )
+                        next_page += 1
+            finally:
+                for future in pending.values():
+                    future.cancel()
 
     def _sync_orders(
         self,
@@ -387,11 +471,13 @@ class BumpaClient:
         current_remaining: int | None,
         *,
         max_attempts: int | None = None,
+        _page_limit: Literal[50, 100] = 100,
     ) -> tuple[
         list[ProviderOrder],
         list[BumpaResponse],
         str,
         str | None,
+        int | None,
         int | None,
         int | None,
     ]:
@@ -400,118 +486,154 @@ class BumpaClient:
         page = 1
         expected_total: int | None = None
         expected_last_page: int | None = None
-        seen_orders: dict[str, ProviderOrder] = {}
+        seen_orders: dict[str, str] = {}
+        starts_at = datetime.combine(date_from, datetime.min.time(), self._store_zone).astimezone(
+            UTC
+        )
+        ends_at = datetime.combine(
+            date_to + timedelta(days=1), datetime.min.time(), self._store_zone
+        ).astimezone(UTC)
         availability = "unavailable"
         error: str | None = "Orders were not requested"
         offending_status: int | None = None
         offending_payload: dict[str, Any] = {}
         offending_headers: dict[str, str] = {}
         try:
-            while page <= MAX_ORDER_PAGES:
-                # Reset the evidence boundary before I/O so a transport failure on
-                # a later page can never be attributed to the previous response.
-                offending_status = None
-                offending_payload = {}
-                offending_headers = {}
-                status, payload, headers = self.get_orders_page(
-                    date_from,
-                    date_to,
-                    page,
-                    max_attempts=max_attempts,
-                )
-                offending_status = status
-                offending_payload = payload
-                offending_headers = headers
-                availability, error = classify_availability(status, payload)
-                current_limit, current_remaining = _merge_rate_limits(
-                    headers, current_limit, current_remaining
-                )
-                if availability != "available":
+            with closing(
+                self._catalog_pages(max_attempts=max_attempts, page_limit=_page_limit)
+            ) as pages:
+                for page, (status, payload, headers) in pages:
+                    # End-of-page reset below keeps a failed prefetched request
+                    # from inheriting evidence from the previously consumed page.
+                    offending_status = status
+                    offending_payload = payload
+                    offending_headers = headers
+                    availability, error = classify_availability(status, payload)
+                    current_limit, current_remaining = _merge_rate_limits(
+                        headers, current_limit, current_remaining
+                    )
+                    if availability != "available":
+                        responses.append(
+                            BumpaResponse(
+                                "orders",
+                                None,
+                                status,
+                                payload,
+                                headers,
+                                availability,
+                                error,
+                                "upstream_http" if availability == "error" else None,
+                                status == 429 or status >= 500,
+                                headers.get("x-request-id-sha256"),
+                                _bounded_retry_after(headers.get("retry-after")),
+                            )
+                        )
+                        orders.clear()
+                        break
+                    raw_orders, current, last, total = _decode_orders_page(payload, page)
+                    if total > MAX_ORDER_RECORDS or last > MAX_ORDER_PAGES:
+                        raise BumpaProviderError(
+                            "Bumpa orders exceeded the synchronization safety limit",
+                            status_code=status,
+                            failure_kind="invalid_response",
+                        )
+                    if expected_total is None:
+                        expected_total, expected_last_page = total, last
+                    elif total != expected_total or last != expected_last_page:
+                        raise BumpaProviderError(
+                            "Bumpa orders pagination changed during synchronization",
+                            status_code=status,
+                            failure_kind="invalid_response",
+                        )
+                    selected_rows = []
+                    for row in raw_orders:
+                        identifier = row.get("id") or row.get("order_id") or row.get("uuid")
+                        if identifier is None:
+                            raise BumpaProviderError(
+                                "Bumpa catalog order is missing an identifier",
+                                failure_kind="invalid_response",
+                            )
+                        order_id = _bounded_provider_identifier(str(identifier), limit=120)
+                        ordered_at = _parse_datetime(
+                            row.get("order_date") or row.get("created_at") or row.get("date")
+                        )
+                        if ordered_at is None:
+                            raise BumpaProviderError(
+                                "Bumpa catalog contains an undated order",
+                                failure_kind="invalid_response",
+                            )
+                        fingerprint = hashlib.sha256(
+                            json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+                        ).hexdigest()
+                        existing_order = seen_orders.get(order_id)
+                        if existing_order is not None and existing_order != fingerprint:
+                            raise BumpaProviderError(
+                                "Bumpa orders pagination returned a conflicting duplicate order",
+                                status_code=status,
+                                failure_kind="invalid_response",
+                            )
+                        if existing_order is not None:
+                            continue
+                        seen_orders[order_id] = fingerprint
+                        if starts_at <= ordered_at.astimezone(UTC) < ends_at:
+                            orders.append(_normalise_order(row, store_currency=self.store_currency))
+                            selected_rows.append(row)
+                    if current < last and not raw_orders:
+                        raise BumpaProviderError(
+                            "Bumpa orders pagination did not advance",
+                            status_code=status,
+                            failure_kind="invalid_response",
+                        )
                     responses.append(
                         BumpaResponse(
                             "orders",
-                            None,
+                            "catalog_scan",
                             status,
-                            payload,
+                            {
+                                "schema_version": 1,
+                                "kind": "order_catalog_page_receipt",
+                                "source_page_sha256": hashlib.sha256(
+                                    json.dumps(
+                                        payload, sort_keys=True, separators=(",", ":")
+                                    ).encode()
+                                ).hexdigest(),
+                                "pagination": {
+                                    "current_page": current,
+                                    "last_page": last,
+                                    "total": total,
+                                },
+                                "source_record_count": len(raw_orders),
+                                "selected_record_count": len(selected_rows),
+                                "excluded_record_count": len(raw_orders) - len(selected_rows),
+                                "selected_orders": selected_rows,
+                            },
                             headers,
                             availability,
                             error,
-                            "upstream_http" if availability == "error" else None,
-                            status == 429 or status >= 500,
+                            None,
+                            False,
                             headers.get("x-request-id-sha256"),
                             _bounded_retry_after(headers.get("retry-after")),
                         )
                     )
-                    orders.clear()
-                    break
-                raw_orders, current, last, total = _decode_orders_page(payload, page)
-                if total > MAX_ORDER_RECORDS or last > MAX_ORDER_PAGES:
-                    raise BumpaProviderError(
-                        "Bumpa orders exceeded the synchronization safety limit",
-                        status_code=status,
-                        failure_kind="invalid_response",
-                    )
-                if expected_total is None:
-                    expected_total, expected_last_page = total, last
-                elif total != expected_total or last != expected_last_page:
-                    raise BumpaProviderError(
-                        "Bumpa orders pagination changed during synchronization",
-                        status_code=status,
-                        failure_kind="invalid_response",
-                    )
-                for row in raw_orders:
-                    order = _normalise_order(row, store_currency=self.store_currency)
-                    existing_order = seen_orders.get(order.order_id)
-                    if existing_order is not None and existing_order != order:
-                        raise BumpaProviderError(
-                            "Bumpa orders pagination returned a conflicting duplicate order",
-                            status_code=status,
-                            failure_kind="invalid_response",
-                        )
-                    if existing_order is not None:
-                        continue
-                    seen_orders[order.order_id] = order
-                    orders.append(order)
-                if current < last and not raw_orders:
-                    raise BumpaProviderError(
-                        "Bumpa orders pagination did not advance",
-                        status_code=status,
-                        failure_kind="invalid_response",
-                    )
-                responses.append(
-                    BumpaResponse(
-                        "orders",
-                        None,
-                        status,
-                        payload,
-                        headers,
-                        availability,
-                        error,
-                        None,
-                        False,
-                        headers.get("x-request-id-sha256"),
-                        _bounded_retry_after(headers.get("retry-after")),
-                    )
-                )
-                if current >= last:
+                    if current >= last:
+                        offending_status = None
+                        offending_payload = {}
+                        offending_headers = {}
+                        break
                     offending_status = None
                     offending_payload = {}
                     offending_headers = {}
-                    break
-                page = current + 1
-                offending_status = None
-                offending_payload = {}
-                offending_headers = {}
-            else:
-                raise BumpaProviderError(
-                    "Bumpa orders exceeded the pagination limit",
-                    failure_kind="invalid_response",
-                )
+                else:
+                    raise BumpaProviderError(
+                        "Bumpa orders exceeded the pagination limit",
+                        failure_kind="invalid_response",
+                    )
 
             if (
                 availability == "available"
                 and error is None
-                and (expected_total is None or len(orders) != expected_total)
+                and (expected_total is None or len(seen_orders) != expected_total)
             ):
                 raise BumpaProviderError(
                     "Bumpa orders response was incomplete", failure_kind="invalid_response"
@@ -519,6 +641,41 @@ class BumpaClient:
         except BumpaProviderError as exc:
             if exc.failure_kind in {"authentication", "rate_limited"}:
                 raise
+            if exc.failure_kind == "response_too_large" and _page_limit == 100:
+                # Restart membership verification rather than changing page size
+                # mid-scan. Release the discarded window payload before retrying.
+                orders.clear()
+                responses.clear()
+                seen_orders.clear()
+                retried = self._sync_orders(
+                    date_from,
+                    date_to,
+                    current_limit,
+                    current_remaining,
+                    max_attempts=max_attempts,
+                    _page_limit=50,
+                )
+                retried[1].insert(
+                    0,
+                    BumpaResponse(
+                        "orders",
+                        "catalog_retry",
+                        exc.status_code,
+                        {
+                            "schema_version": 1,
+                            "kind": "catalog_page_size_retry",
+                            "original_page_size": 100,
+                            "retry_page_size": 50,
+                        },
+                        {},
+                        "error",
+                        str(exc),
+                        "invalid_response",
+                        False,
+                        exc.request_id_hash,
+                    ),
+                )
+                return retried
             orders.clear()
             availability, error = "error", str(exc)
             evidence_kind: DatasetFailureKind = (
@@ -550,6 +707,7 @@ class BumpaClient:
             error,
             current_limit,
             current_remaining,
+            expected_total if availability == "available" and error is None else None,
         )
 
     def verify(self) -> None:
@@ -723,6 +881,7 @@ class BumpaClient:
             orders_error,
             limit,
             remaining,
+            orders_catalog_count,
         ) = self._sync_orders(
             date_from,
             date_to,
@@ -757,6 +916,7 @@ class BumpaClient:
             remaining,
             orders_availability,
             orders_error,
+            orders_catalog_count,
         )
 
 
