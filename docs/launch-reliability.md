@@ -73,3 +73,11 @@ and unchanged suspension/opt-out rules. After promotion, pull fresh provider
 data through durable jobs and reconcile per-currency canonical counts with the
 provider's complete pagination. Any remaining upstream dataset error must stay
 visible in the release evidence.
+
+The release also applies Alpine's pinned security updates for Kerberos in the
+API image and Kerberos/XML/XSLT in the PostgreSQL and backup images. PostgreSQL's
+pinned binary stays at 16.15. Caddy and the sandbox tunnel binary use patched
+`golang.org/x/net` 0.62.0.
+Promote the reviewed infrastructure images with
+the normal compatibility rehearsal and pre-deploy backup; retain the existing
+data volume.
