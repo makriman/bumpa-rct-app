@@ -139,7 +139,14 @@ def _fresh_sync(db, tenant: Tenant, *, finished_at: datetime) -> BumpaSyncRun:  
         error=None,
         orders_availability="available",
         orders_count=7,
-        dataset_results={"_bumpa_order_publication": {"version": 1, "state": "complete"}},
+        dataset_results={
+            "_bumpa_order_publication": {
+                "version": 3,
+                "state": "complete",
+                "range_contract": "full_catalog_order_date_v1",
+                "catalog_count": 7,
+            }
+        },
     )
     snapshot = BumpaMetricSnapshot(
         id=new_id(),

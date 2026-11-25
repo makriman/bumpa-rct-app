@@ -421,3 +421,53 @@ def test_reply_context_and_overview_avoid_redundant_order_scans(store, monkeypat
         assert len(statements) == 1, "Coverage bounds, counts and currencies share one scan"
     finally:
         event.remove(db.bind, "before_cursor_execute", record)
+
+
+def test_live_provider_requires_complete_catalog_range_attestation(store, monkeypatch):
+    from app.services.bumpa_freshness import latest_complete_orders_run
+
+    db, tenant, connection = store
+    run = publish(monkeypatch, db, connection, [order()])
+    connection.provider = "bumpa"
+    db.commit()
+    assert overview(db, tenant)["order_count"] is None
+    assert latest_complete_orders_run(db, tenant.id) is None
+    marker = {
+        "version": 3,
+        "state": "complete",
+        "range_contract": "full_catalog_order_date_v1",
+        "catalog_count": 10,
+    }
+    run.dataset_results = {**run.dataset_results, "_bumpa_order_publication": marker}
+    db.commit()
+    assert overview(db, tenant)["order_count"] == 1
+    assert latest_complete_orders_run(db, tenant.id).id == run.id
+    for invalid in (
+        {**marker, "catalog_count": 0},
+        {**marker, "range_contract": "creation_date_filter"},
+        {**marker, "state": "quarantined"},
+    ):
+        run.dataset_results = {**run.dataset_results, "_bumpa_order_publication": invalid}
+        db.commit()
+        assert overview(db, tenant)["order_count"] is None
+        assert latest_complete_orders_run(db, tenant.id) is None
+
+
+@pytest.mark.parametrize("catalog_count", [None, True, -1, 0])
+def test_live_result_without_catalog_count_cannot_publish(store, monkeypatch, catalog_count):
+    db, tenant, connection = store
+    connection.provider = "bumpa"
+    db.commit()
+    result = BumpaSyncResult([], [order()], [], None, None, "available", None, catalog_count)
+    monkeypatch.setattr(
+        bumpa, "_extract_sync", lambda **kwargs: bumpa.ExtractedSync(result, result)
+    )
+    run = bumpa.run_sync(
+        db, tenant_id=tenant.id, connection=connection, date_from=START, date_to=END
+    )
+    assert run.orders_availability == "error" and run.orders_count is None
+    assert (
+        run.dataset_results["_bumpa_order_publication"]["reason"]
+        == "full_order_catalog_verification_required"
+    )
+    assert db.scalar(select(func.count(BumpaOrder.id))) == 0

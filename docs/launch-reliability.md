@@ -96,8 +96,11 @@ Coverage uses the same grouped scan for bounds and counts. The PostgreSQL RLS
 gate exercises 1,000 mixed-currency orders and rejects repeated per-order
 publication validation, while checking cross-tenant denial.
 
-A live refresh also detected an upstream order dated before the requested range.
-Such a pull remains unpublished with `order_date_outside_requested_period`;
-validated analytics remain available. Neither discarding the offending row nor
-substituting its creation date proves complete order-date coverage. Provider
-range semantics must be corrected or independently verified before publication.
+Live date-boundary probes found that a same-day creation filter could return
+zero despite actual orders, and backdated orders could fall outside that filter's
+requested reporting window. The version 3 importer scans the scoped full catalogue
+and selects by store-local order date. It records a complete-catalogue attestation;
+production legacy range publications remain unavailable until refreshed. The
+operator quarantines prior incomplete publications with preserved original
+metadata and an audit trail. Independent valid analytics and active chat accounts
+remain available throughout repair.

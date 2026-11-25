@@ -163,7 +163,14 @@ def data(
         finished_at=now - timedelta(minutes=5),
         orders_availability="available",
         orders_count=len(amounts),
-        dataset_results={"_bumpa_order_publication": {"version": 1, "state": "complete"}},
+        dataset_results={
+            "_bumpa_order_publication": {
+                "version": 3,
+                "state": "complete",
+                "range_contract": "full_catalog_order_date_v1",
+                "catalog_count": len(amounts),
+            }
+        },
     )
     db.add(run)
     db.flush()
@@ -647,7 +654,14 @@ def test_verified_complete_empty_resync_never_attributes_old_orders_to_current_r
         finished_at=NOW - timedelta(minutes=2),
         orders_availability="available",
         orders_count=0,
-        dataset_results={"_bumpa_order_publication": {"version": 1, "state": "complete"}},
+        dataset_results={
+            "_bumpa_order_publication": {
+                "version": 3,
+                "state": "complete",
+                "range_contract": "full_catalog_order_date_v1",
+                "catalog_count": 0,
+            }
+        },
     )
     db.add(current_run)
     db.commit()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 from collections.abc import Callable
@@ -138,6 +139,7 @@ class BumpaSyncResult:
     rate_limit_remaining: int | None
     orders_availability: str
     orders_error: str | None
+    orders_catalog_count: int | None = None
 
 
 class BumpaClient:
@@ -359,8 +361,8 @@ class BumpaClient:
 
     def get_orders_page(
         self,
-        date_from: date,
-        date_to: date,
+        date_from: date | None,
+        date_to: date | None,
         page: int,
         *,
         limit: int = 100,
@@ -369,14 +371,23 @@ class BumpaClient:
         if page < 1 or not 1 <= limit <= 100:
             raise ValueError("Invalid Bumpa pagination")
         params = {
-            "from_date": date_from.isoformat(),
-            "to_date": date_to.isoformat(),
             "page": str(page),
             "limit": str(limit),
             "orderBy": "desc",
             "orderByField": "created_at",
             **self._scope,
         }
+        if (date_from is None) != (date_to is None):
+            raise ValueError("Both creation-date bounds are required")
+        if date_from is not None and date_to is not None:
+            if date_to < date_from or date_to == date.max:
+                raise ValueError("Invalid Bumpa creation-date range")
+            # This endpoint filters creation dates, with an exclusive upper day.
+            # Reporting syncs use an unfiltered catalogue instead: backdated
+            # order_date values cannot be proved complete with creation filters.
+            params.update(
+                from_date=date_from.isoformat(), to_date=(date_to + timedelta(days=1)).isoformat()
+            )
         return self._request("/commerce/v1/orders", params, max_attempts=max_attempts)
 
     def _sync_orders(
@@ -394,13 +405,20 @@ class BumpaClient:
         str | None,
         int | None,
         int | None,
+        int | None,
     ]:
         responses: list[BumpaResponse] = []
         orders: list[ProviderOrder] = []
         page = 1
         expected_total: int | None = None
         expected_last_page: int | None = None
-        seen_orders: dict[str, ProviderOrder] = {}
+        seen_orders: dict[str, str] = {}
+        starts_at = datetime.combine(date_from, datetime.min.time(), self._store_zone).astimezone(
+            UTC
+        )
+        ends_at = datetime.combine(
+            date_to + timedelta(days=1), datetime.min.time(), self._store_zone
+        ).astimezone(UTC)
         availability = "unavailable"
         error: str | None = "Orders were not requested"
         offending_status: int | None = None
@@ -414,8 +432,8 @@ class BumpaClient:
                 offending_payload = {}
                 offending_headers = {}
                 status, payload, headers = self.get_orders_page(
-                    date_from,
-                    date_to,
+                    None,
+                    None,
                     page,
                     max_attempts=max_attempts,
                 )
@@ -459,10 +477,28 @@ class BumpaClient:
                         status_code=status,
                         failure_kind="invalid_response",
                     )
+                selected_rows = []
                 for row in raw_orders:
-                    order = _normalise_order(row, store_currency=self.store_currency)
-                    existing_order = seen_orders.get(order.order_id)
-                    if existing_order is not None and existing_order != order:
+                    identifier = row.get("id") or row.get("order_id") or row.get("uuid")
+                    if identifier is None:
+                        raise BumpaProviderError(
+                            "Bumpa catalog order is missing an identifier",
+                            failure_kind="invalid_response",
+                        )
+                    order_id = _bounded_provider_identifier(str(identifier), limit=120)
+                    ordered_at = _parse_datetime(
+                        row.get("order_date") or row.get("created_at") or row.get("date")
+                    )
+                    if ordered_at is None:
+                        raise BumpaProviderError(
+                            "Bumpa catalog contains an undated order",
+                            failure_kind="invalid_response",
+                        )
+                    fingerprint = hashlib.sha256(
+                        json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                    existing_order = seen_orders.get(order_id)
+                    if existing_order is not None and existing_order != fingerprint:
                         raise BumpaProviderError(
                             "Bumpa orders pagination returned a conflicting duplicate order",
                             status_code=status,
@@ -470,8 +506,10 @@ class BumpaClient:
                         )
                     if existing_order is not None:
                         continue
-                    seen_orders[order.order_id] = order
-                    orders.append(order)
+                    seen_orders[order_id] = fingerprint
+                    if starts_at <= ordered_at.astimezone(UTC) < ends_at:
+                        orders.append(_normalise_order(row, store_currency=self.store_currency))
+                        selected_rows.append(row)
                 if current < last and not raw_orders:
                     raise BumpaProviderError(
                         "Bumpa orders pagination did not advance",
@@ -481,9 +519,24 @@ class BumpaClient:
                 responses.append(
                     BumpaResponse(
                         "orders",
-                        None,
+                        "catalog_scan",
                         status,
-                        payload,
+                        {
+                            "schema_version": 1,
+                            "kind": "order_catalog_page_receipt",
+                            "source_page_sha256": hashlib.sha256(
+                                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                            ).hexdigest(),
+                            "pagination": {
+                                "current_page": current,
+                                "last_page": last,
+                                "total": total,
+                            },
+                            "source_record_count": len(raw_orders),
+                            "selected_record_count": len(selected_rows),
+                            "excluded_record_count": len(raw_orders) - len(selected_rows),
+                            "selected_orders": selected_rows,
+                        },
                         headers,
                         availability,
                         error,
@@ -511,7 +564,7 @@ class BumpaClient:
             if (
                 availability == "available"
                 and error is None
-                and (expected_total is None or len(orders) != expected_total)
+                and (expected_total is None or len(seen_orders) != expected_total)
             ):
                 raise BumpaProviderError(
                     "Bumpa orders response was incomplete", failure_kind="invalid_response"
@@ -550,6 +603,7 @@ class BumpaClient:
             error,
             current_limit,
             current_remaining,
+            expected_total if availability == "available" and error is None else None,
         )
 
     def verify(self) -> None:
@@ -723,6 +777,7 @@ class BumpaClient:
             orders_error,
             limit,
             remaining,
+            orders_catalog_count,
         ) = self._sync_orders(
             date_from,
             date_to,
@@ -757,6 +812,7 @@ class BumpaClient:
             remaining,
             orders_availability,
             orders_error,
+            orders_catalog_count,
         )
 
 

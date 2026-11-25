@@ -22,6 +22,7 @@ def usable_bumpa_sync_run_predicate() -> ColumnElement[bool]:
     """Select only terminal runs carrying current, typed usability evidence."""
 
     return and_(
+        publication_marker_predicate(BumpaSyncRun),
         BumpaSyncRun.error.is_(None),
         BumpaSyncRun.finished_at.is_not(None),
         or_(
@@ -37,7 +38,6 @@ def usable_bumpa_sync_run_predicate() -> ColumnElement[bool]:
                 BumpaSyncRun.partial_reason == "profit_not_calculable",
                 BumpaSyncRun.orders_availability == "available",
                 BumpaSyncRun.orders_count.is_not(None),
-                publication_marker_predicate(BumpaSyncRun),
             ),
         ),
     )
@@ -121,6 +121,7 @@ def latest_complete_orders_run(
         BumpaSyncRun.status.in_(("success", "partial")),
         BumpaSyncRun.orders_availability == "available",
         BumpaSyncRun.orders_count.is_not(None),
+        publication_marker_predicate(BumpaSyncRun),
         BumpaConnection.tenant_id == tenant_id,
         BumpaConnection.status == "active",
         BumpaSyncRun.bumpa_connection_id == BumpaConnection.id,

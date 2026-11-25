@@ -39,7 +39,7 @@ from app.providers.meta import MetaProviderError, MetaWhatsAppClient
 from app.providers.redaction import redact_text
 from app.services.business_tools import ResolvedPeriod, resolve_period, tenant_store_context
 from app.services.conversation_scope import receiver_scope
-from app.services.order_publication import publication_marker_valid
+from app.services.order_publication import publication_marker_predicate, publication_marker_valid
 
 InsightCadence = Literal["daily", "weekly"]
 MAX_TEMPLATE_SUMMARY_CHARS = 900
@@ -318,6 +318,7 @@ def _snapshot(
             BumpaSyncRun.bumpa_connection_id == connection.id,
             BumpaSyncRun.boundary_revision == connection.boundary_revision,
             BumpaSyncRun.sync_generation == connection.published_sync_generation,
+            publication_marker_predicate(BumpaSyncRun),
             BumpaSyncRun.status.in_(("success", "partial")),
             BumpaSyncRun.completion_quality.in_(("complete", "accepted_partial")),
             BumpaSyncRun.orders_availability == "available",

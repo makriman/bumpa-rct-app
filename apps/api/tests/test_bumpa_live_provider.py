@@ -142,6 +142,9 @@ def _inclusive_local_day_range(
 def test_live_bumpa_sync_reads_all_datasets_and_order_pages_without_key_leakage() -> None:
     page_one = json.loads((FIXTURES / "orders_page_1.json").read_text())
     page_two = json.loads((FIXTURES / "orders_page_2.json").read_text())
+    for page in (page_one, page_two):
+        for row in page["orders"]["data"]:
+            row["order_date"] = "2026-01-15T12:00:00+01:00"
     raw_request_id = "bumpa-success-request-A1B2C3D4"
     requests: list[httpx.Request] = []
 
@@ -1133,7 +1136,14 @@ def test_live_bumpa_marks_paginated_orders_partial_when_a_later_page_fails() -> 
                 json={
                     "success": True,
                     "orders": {
-                        "data": [{"id": "page-one-order", "status": "paid", "total": "5"}],
+                        "data": [
+                            {
+                                "id": "page-one-order",
+                                "status": "paid",
+                                "total": "5",
+                                "order_date": "2026-01-01T12:00:00Z",
+                            }
+                        ],
                         "current_page": 1,
                         "last_page": 2,
                         "per_page": 1,
@@ -1880,7 +1890,12 @@ def test_order_pagination_supports_more_than_ten_thousand_records() -> None:
         page = int(request.url.params["page"])
         start = (page - 1) * per_page
         rows = [
-            {"id": f"order-{index}", "status": "paid", "total": "1.00"}
+            {
+                "id": f"order-{index}",
+                "status": "paid",
+                "total": "1.00",
+                "order_date": "2026-01-01T12:00:00Z",
+            }
             for index in range(start, min(start + per_page, total))
         ]
         return httpx.Response(
@@ -1915,7 +1930,14 @@ def test_exact_page_overlap_is_deduplicated_but_cannot_hide_a_missing_order() ->
             if not request.url.path.endswith("/orders"):
                 return _analytics_response(request)
             page = int(request.url.params["page"])
-            rows = [{"id": "order-1", "status": "paid", "total": "1"}]
+            rows = [
+                {
+                    "id": "order-1",
+                    "status": "paid",
+                    "total": "1",
+                    "order_date": "2026-01-01T12:00:00Z",
+                }
+            ]
             if page == 2:
                 rows = second_page
             return httpx.Response(
@@ -1940,8 +1962,8 @@ def test_exact_page_overlap_is_deduplicated_but_cannot_hide_a_missing_order() ->
             sleep=lambda _seconds: None,
         )
 
-    exact = {"id": "order-1", "status": "paid", "total": "1"}
-    second = {"id": "order-2", "status": "paid", "total": "2"}
+    exact = {"id": "order-1", "status": "paid", "total": "1", "order_date": "2026-01-01T12:00:00Z"}
+    second = {"id": "order-2", "status": "paid", "total": "2", "order_date": "2026-01-01T12:00:00Z"}
     accepted = provider_for([exact, second], 2).sync(date(2026, 1, 1), date(2026, 1, 2))
     assert [order.order_id for order in accepted.orders] == ["order-1", "order-2"]
 
@@ -1951,7 +1973,12 @@ def test_exact_page_overlap_is_deduplicated_but_cannot_hide_a_missing_order() ->
     assert incomplete.responses[-1].failure_kind == "invalid_response"
     assert "incomplete" in (incomplete.orders_error or "")
 
-    conflicting = {"id": "order-1", "status": "refunded", "total": "1"}
+    conflicting = {
+        "id": "order-1",
+        "status": "refunded",
+        "total": "1",
+        "order_date": "2026-01-01T12:00:00Z",
+    }
     conflict = provider_for([conflicting, second], 2).sync(date(2026, 1, 1), date(2026, 1, 2))
     assert conflict.orders == []
     assert conflict.responses[-1].failure_kind == "invalid_response"
@@ -1978,3 +2005,121 @@ def test_orders_transport_failure_preserves_strictly_decoded_metric_domains() ->
     assert result.orders_availability == "error"
     assert result.responses[-1].failure_kind == "timeout"
     assert "private order timeout" not in repr(result)
+
+
+def test_catalog_scan_includes_backdated_orders_and_last_local_day_without_creation_filters():
+    rows = [
+        {
+            "id": "old",
+            "order_date": "2026-01-01T00:00:00+01:00",
+            "created_at": "2026-01-01T00:00:00+01:00",
+            "total": "1",
+            "description": "outside-commercial-detail",
+            "currency": "not-a-valid-currency",
+            "grand_total": "historical-unparseable-money",
+        },
+        {
+            "id": "backdated",
+            "order_date": "2026-01-31T23:59:59+01:00",
+            "created_at": "2026-02-02T10:00:00+01:00",
+            "total": "20",
+        },
+        {
+            "id": "next-day",
+            "order_date": "2026-01-31T23:00:00Z",
+            "created_at": "2026-02-02T12:00:00+01:00",
+            "total": "3",
+        },
+    ]
+    pages = []
+
+    def respond(request):
+        if not request.url.path.endswith("/orders"):
+            return _analytics_response(request)
+        assert "from_date" not in request.url.params and "to_date" not in request.url.params
+        page = int(request.url.params["page"])
+        pages.append(page)
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "orders": {
+                    "data": rows[:1] if page == 1 else rows[1:],
+                    "current_page": page,
+                    "last_page": 2,
+                    "per_page": 2,
+                    "total": 3,
+                },
+            },
+        )
+
+    result = BumpaClient(
+        "secret", "business_id", "store", client=_client(httpx.MockTransport(respond))
+    ).sync(date(2026, 1, 31), date(2026, 1, 31))
+    assert pages == [1, 2]
+    assert result.orders_availability == "available" and result.orders_catalog_count == 3
+    assert [order.order_id for order in result.orders] == ["backdated"]
+    receipts = [r for r in result.responses if r.resource == "orders"]
+    assert all(
+        r.dataset == "catalog_scan" and r.payload["kind"] == "order_catalog_page_receipt"
+        for r in receipts
+    )
+    assert sum(r.payload["source_record_count"] for r in receipts) == 3
+    assert sum(r.payload["selected_record_count"] for r in receipts) == 1
+    assert sum(r.payload["excluded_record_count"] for r in receipts) == 2
+    assert all(len(r.payload["source_page_sha256"]) == 64 for r in receipts)
+    assert "outside-commercial-detail" not in repr(result)
+
+
+def test_empty_window_requires_complete_catalog_including_later_page():
+    def respond(request):
+        if not request.url.path.endswith("/orders"):
+            return _analytics_response(request)
+        if request.url.params["page"] == "2":
+            return httpx.Response(502, json={"error": "unavailable"})
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "orders": {
+                    "data": [{"id": "outside", "order_date": "2025-01-01T12:00:00Z", "total": "1"}],
+                    "current_page": 1,
+                    "last_page": 2,
+                    "per_page": 1,
+                    "total": 2,
+                },
+            },
+        )
+
+    result = BumpaClient(
+        "secret",
+        "business_id",
+        "store",
+        client=_client(httpx.MockTransport(respond)),
+        sleep=lambda _: None,
+        max_attempts=1,
+    ).sync(date(2026, 1, 31), date(2026, 1, 31))
+    assert result.orders == [] and result.orders_catalog_count is None
+    assert result.orders_availability == "error"
+
+
+def test_direct_creation_date_page_uses_next_day_exclusive_bound():
+    seen = []
+
+    def respond(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=_empty_orders())
+
+    provider = BumpaClient(
+        "secret", "business_id", "store", client=_client(httpx.MockTransport(respond))
+    )
+    provider.get_orders_page(date(2026, 12, 31), date(2026, 12, 31), 1)
+    assert seen[0]["from_date"] == "2026-12-31" and seen[0]["to_date"] == "2027-01-01"
+    for start, end in [
+        (date(2026, 2, 1), date(2026, 1, 1)),
+        (None, date(2026, 1, 1)),
+        (date.max, date.max),
+    ]:
+        with pytest.raises(ValueError):
+            provider.get_orders_page(start, end, 1)
+    assert len(seen) == 1
