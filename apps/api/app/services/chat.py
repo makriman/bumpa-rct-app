@@ -43,7 +43,7 @@ from app.services.agent_actions import create_action_context_token
 from app.services.agent_execution import ExecutionDenied, begin_run, finish_run, require_active_run
 from app.services.bumpa_freshness import latest_available_metrics, latest_complete_orders_run
 from app.services.business_onboarding import chat_reply, memory_context
-from app.services.business_tools import business_profile, data_coverage
+from app.services.business_tools import business_profile, order_publication_coverage
 from app.services.conversation_scope import receiver_scope
 from app.services.research_events import record_research_event
 
@@ -91,7 +91,10 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
     boundaries = [value for value in (metric_freshness, orders_freshness) if value is not None]
     freshness = min(boundaries) if boundaries else None
     profile_context = business_profile(db, tenant_id)
-    coverage = data_coverage(db, tenant_id)
+    coverage = order_publication_coverage(db, tenant_id)
+    verified_periods = coverage["verified_periods"]
+    coverage_from = min((period["date_from"] for period in verified_periods), default=None)
+    coverage_to = max((period["date_to"] for period in verified_periods), default=None)
     context = (
         f"Business: {profile_context['business']['name']}; "
         f"category: {profile_context['business']['category'] or 'unavailable'}; "
@@ -109,9 +112,8 @@ def build_business_context(db: Session, tenant_id: str) -> tuple[str, object | N
         f"metrics refreshed: {_format_timestamp(metric_freshness)}; "
         f"orders refreshed: {_format_timestamp(orders_freshness)}; "
         f"conservative data boundary: {_format_timestamp(freshness)}; "
-        f"canonical order coverage: {coverage['orders']['date_from'] or 'unavailable'} "
-        f"to {coverage['orders']['date_to'] or 'unavailable'} "
-        f"({coverage['orders']['count']} orders). "
+        f"verified order pulls span: {coverage_from or 'unavailable'} "
+        f"to {coverage_to or 'unavailable'} (gaps may exist). "
         "Use the business-data tools for any requested period; do not treat these snapshot "
         "metrics as the requested period unless their exact bounds match."
     )

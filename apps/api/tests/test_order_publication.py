@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
@@ -393,3 +393,31 @@ def test_current_publications_remain_tenant_scoped(store, monkeypatch):
     publish(monkeypatch, db, other_connection, [order("other", amount="999")])
     assert overview(db, tenant)["sales_total"] == "100.000000"
     assert overview(db, other)["sales_total"] == "999.000000"
+
+
+def test_reply_context_and_overview_avoid_redundant_order_scans(store, monkeypatch):
+    from app.services.chat import build_business_context
+
+    db, tenant, connection = store
+    publish(monkeypatch, db, connection, [order("ngn"), order("usd", currency="USD")])
+    statements = []
+
+    def record(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if "FROM bumpa_orders" in statement:
+            statements.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", record)
+    try:
+        context, freshness = build_business_context(db, tenant.id)
+        assert "verified order pulls span: 2026-10-01 to 2026-10-31" in context
+        assert freshness is not None
+        assert statements == [], "Reply preparation must not scan order history"
+        result = business_overview(db, tenant.id, date_from=START, date_to=END, compare_to="none")
+        assert result["metrics"]["order_count"] == 1
+        assert len(result["currency_breakdown"]) == 2
+        assert len(statements) == 1, "Overview metrics and currency breakdown share one scan"
+        statements.clear()
+        assert data_coverage(db, tenant.id)["orders"]["count"] == 2
+        assert len(statements) == 1, "Coverage bounds, counts and currencies share one scan"
+    finally:
+        event.remove(db.bind, "before_cursor_execute", record)

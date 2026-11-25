@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -24,7 +24,6 @@ from app.db.models import (
 from app.services.order_publication import (
     publication_marker_predicate,
     publication_marker_valid,
-    published_currency_predicate,
 )
 
 PeriodName = Literal[
@@ -95,30 +94,45 @@ def published_orders_predicate(
     run = aliased(BumpaSyncRun)
     connection = aliased(BumpaConnection)
     publication = BumpaOrder.raw_payload["_bumpa_publication"]
-    source = (
+    verified_runs = (
         select(run.id)
         .join(connection, connection.id == run.bumpa_connection_id)
-        .where(
-            *_publication_filters(run, connection, tenant_id),
-            run.id == publication["sync_run_id"].as_string(),
-            published_currency_predicate(BumpaOrder, run, connection),
-            *(
-                ()
-                if include_all_currencies
-                else (
-                    BumpaOrder.currency_code
-                    == (currency_code if currency_code is not None else connection.store_currency),
-                )
-            ),
-        )
-        .correlate(BumpaOrder)
-        .exists()
+        .where(*_publication_filters(run, connection, tenant_id))
+        .correlate(None)
     )
+    # Uncorrelated, positive membership permits a hashed publication set.
+    # IS TRUE keeps PostgreSQL from pulling this back into a per-order semi-join;
+    # missing publication IDs still fail closed.
+    version2_runs = verified_runs.where(
+        run.dataset_results["_bumpa_order_publication"]["version"].as_integer() == 2
+    )
+    store_currency = (
+        select(BumpaConnection.store_currency)
+        .where(BumpaConnection.tenant_id == tenant_id, BumpaConnection.status == "active")
+        .correlate(None)
+        .scalar_subquery()
+    )
+    publication_id = publication["sync_run_id"].as_string()
     return and_(
         BumpaOrder.tenant_id == tenant_id,
         BumpaOrder.order_date.is_not(None),
         publication["state"].as_string() == "active",
-        source,
+        publication_id.in_(verified_runs).is_(True),
+        or_(
+            BumpaOrder.currency_code == store_currency,
+            and_(
+                publication_id.in_(version2_runs),
+                publication["currency_code"].as_string() == BumpaOrder.currency_code,
+            ),
+        ),
+        *(
+            ()
+            if include_all_currencies
+            else (
+                BumpaOrder.currency_code
+                == (currency_code if currency_code is not None else store_currency),
+            )
+        ),
     )
 
 
@@ -280,8 +294,7 @@ def business_profile(db: Session, tenant_id: str) -> dict[str, Any]:
     }
 
 
-def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
-    _tenant, timezone, currency = tenant_store_context(db, tenant_id)
+def latest_sync_summary(db: Session, tenant_id: str) -> dict[str, Any]:
     latest = db.scalar(
         select(BumpaSyncRun)
         .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
@@ -293,15 +306,6 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
         )
         .order_by(BumpaSyncRun.finished_at.desc().nullslast(), BumpaSyncRun.started_at.desc())
     )
-    order_bounds = db.execute(
-        select(
-            func.min(BumpaOrder.order_date),
-            func.max(BumpaOrder.order_date),
-            func.count(BumpaOrder.id),
-        ).where(published_orders_predicate(tenant_id, include_all_currencies=True))
-    ).one()
-    publication = order_publication_coverage(db, tenant_id)
-    zone = ZoneInfo(timezone)
     dataset_results = latest.dataset_results if latest is not None else {}
     unavailable = sorted(
         key
@@ -310,32 +314,42 @@ def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
         and (value.get("availability") if isinstance(value, dict) else value) != "available"
     )
     return {
+        "status": latest.status if latest else "unavailable",
+        "quality": latest.completion_quality if latest else None,
+        "finished_at": (
+            _as_utc(latest.finished_at).isoformat() if latest and latest.finished_at else None
+        ),
+        "requested_from": latest.requested_from.isoformat() if latest else None,
+        "requested_to": latest.requested_to.isoformat() if latest else None,
+        "unavailable_datasets": unavailable,
+    }
+
+
+def data_coverage(db: Session, tenant_id: str) -> dict[str, Any]:
+    _tenant, timezone, currency = tenant_store_context(db, tenant_id)
+    publication = order_publication_coverage(db, tenant_id)
+    summaries = _order_currency_summaries(db, tenant_id)
+    first_dates = [row["first_order_at"] for row in summaries if row["first_order_at"]]
+    last_dates = [row["last_order_at"] for row in summaries if row["last_order_at"]]
+    first_order = min(first_dates) if first_dates else None
+    last_order = max(last_dates) if last_dates else None
+    zone = ZoneInfo(timezone)
+    return {
         "timezone": timezone,
         "currency": currency,
         "orders": {
             **publication,
             "currency_scope": "all_published_currencies",
-            "currency_breakdown": _currency_breakdown(db, tenant_id),
+            "currency_breakdown": _public_currency_breakdown(summaries),
             "count": (
-                int(order_bounds[2] or 0) if publication["availability"] == "available" else None
+                sum(row["order_count"] for row in summaries)
+                if publication["availability"] == "available"
+                else None
             ),
-            "date_from": (
-                _as_local_date(order_bounds[0], zone).isoformat() if order_bounds[0] else None
-            ),
-            "date_to": (
-                _as_local_date(order_bounds[1], zone).isoformat() if order_bounds[1] else None
-            ),
+            "date_from": (_as_local_date(first_order, zone).isoformat() if first_order else None),
+            "date_to": (_as_local_date(last_order, zone).isoformat() if last_order else None),
         },
-        "latest_sync": {
-            "status": latest.status if latest else "unavailable",
-            "quality": latest.completion_quality if latest else None,
-            "finished_at": (
-                _as_utc(latest.finished_at).isoformat() if latest and latest.finished_at else None
-            ),
-            "requested_from": latest.requested_from.isoformat() if latest else None,
-            "requested_to": latest.requested_to.isoformat() if latest else None,
-            "unavailable_datasets": unavailable,
-        },
+        "latest_sync": latest_sync_summary(db, tenant_id),
         "warnings": (
             [
                 "A verified current-boundary order sync is required; retained legacy rows are excluded."
@@ -388,13 +402,14 @@ def business_overview(
                 prior["order_count"],
             ),
         }
+    currency_breakdown = current.pop("_currency_breakdown")
     return {
         "source": "Bumpa canonical orders",
         "period": resolved.payload(),
         "currency": current.pop("currency"),
         "metrics": current,
         "comparison": comparison,
-        "currency_breakdown": _currency_breakdown(db, tenant_id, resolved),
+        "currency_breakdown": currency_breakdown,
         "inclusion_rules": [
             "Only active server-verified order publications from the current connection boundary.",
             "Orders whose order_date falls inside the exact store-local period.",
@@ -402,7 +417,7 @@ def business_overview(
             "Currencies are reported separately; no exchange-rate conversion is inferred.",
             "Missing amounts are excluded and reported; cancelled/refunded orders remain visible.",
         ],
-        "freshness": data_coverage(db, tenant_id)["latest_sync"],
+        "freshness": latest_sync_summary(db, tenant_id),
     }
 
 
@@ -665,28 +680,19 @@ def _overview_for_resolved_period(
     _tenant, _timezone, currency = tenant_store_context(db, tenant_id)
     currency = validate_store_currency(currency_code) if currency_code is not None else currency
     coverage = order_publication_coverage(db, tenant_id, period)
-    rows = db.execute(
-        select(
-            func.count(BumpaOrder.id),
-            func.sum(BumpaOrder.total_amount),
-            func.count(BumpaOrder.total_amount),
-            func.count(func.distinct(BumpaOrder.channel)),
-        ).where(
-            published_orders_predicate(tenant_id, currency_code=currency),
-            BumpaOrder.order_date >= period.starts_at_utc,
-            BumpaOrder.order_date < period.ends_at_utc_exclusive,
-        )
-    ).one()
-    order_count = int(rows[0] or 0)
-    amount_count = int(rows[2] or 0)
+    summaries = _order_currency_summaries(db, tenant_id, period)
+    selected = next((row for row in summaries if row["currency"] == currency), {})
+    order_count = selected.get("order_count", 0)
+    amount_count = selected.get("orders_with_amount", 0)
     available = coverage["availability"] == "available"
     return {
         "currency": currency,
+        "_currency_breakdown": _public_currency_breakdown(summaries),
         "availability": coverage["availability"],
         "coverage": coverage,
         "sales_total": (
-            str(rows[1])
-            if available and rows[1] is not None
+            selected["sales_total"]
+            if available and selected.get("sales_total") is not None
             else "0"
             if available and order_count == 0
             else None
@@ -694,7 +700,7 @@ def _overview_for_resolved_period(
         "order_count": order_count if available else None,
         "orders_with_amount": amount_count if available else None,
         "orders_missing_amount": order_count - amount_count if available else None,
-        "distinct_channels": int(rows[3] or 0) if available else None,
+        "distinct_channels": selected.get("distinct_channels", 0) if available else None,
         "gross_profit": None,
         "net_profit": None,
         "profit_warning": (
@@ -769,7 +775,7 @@ def _evaluate_decimal(node: ast.AST) -> Decimal:
     raise ValueError("Expression contains unsupported operations")
 
 
-def _currency_breakdown(
+def _order_currency_summaries(
     db: Session, tenant_id: str, period: ResolvedPeriod | None = None
 ) -> list[dict[str, Any]]:
     if order_publication_coverage(db, tenant_id, period)["availability"] != "available":
@@ -788,6 +794,9 @@ def _currency_breakdown(
             func.count(BumpaOrder.id),
             func.sum(BumpaOrder.total_amount),
             func.count(BumpaOrder.total_amount),
+            func.count(func.distinct(BumpaOrder.channel)),
+            func.min(BumpaOrder.order_date),
+            func.max(BumpaOrder.order_date),
         )
         .where(*filters)
         .group_by(BumpaOrder.currency_code)
@@ -799,6 +808,20 @@ def _currency_breakdown(
             "order_count": int(count),
             "sales_total": str(total) if total is not None else None,
             "orders_missing_amount": int(count - with_amount),
+            "orders_with_amount": int(with_amount),
+            "distinct_channels": int(channels),
+            "first_order_at": first,
+            "last_order_at": last,
         }
-        for code, count, total, with_amount in rows
+        for code, count, total, with_amount, channels, first, last in rows
+    ]
+
+
+def _public_currency_breakdown(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: row[key]
+            for key in ("currency", "order_count", "sales_total", "orders_missing_amount")
+        }
+        for row in summaries
     ]
