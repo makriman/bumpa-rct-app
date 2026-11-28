@@ -1,5 +1,5 @@
 # PyAV/aiortc publish manylinux wheels; keep the main Alpine API image unchanged.
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS builder
+FROM python:3.15-slim-bookworm@sha256:498829c717b1e59fc42f0e7865eafe4e04ca0f70a3769d4ae70ba218df54507c AS builder
 # Disable retries while bootstrapping the APT fix for CVE-2026-109518.
 RUN apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any update \
     && apt-get -o Acquire::Retries=0 install --yes --no-install-recommends --only-upgrade \
@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir uv==0.13.5 && uv sync --frozen --no-dev --extra v
 COPY apps/api/app ./app
 RUN uv sync --frozen --no-dev --extra voice
 
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS runtime
+FROM python:3.15-slim-bookworm@sha256:498829c717b1e59fc42f0e7865eafe4e04ca0f70a3769d4ae70ba218df54507c AS runtime
 # Disable retries while bootstrapping the APT fix for CVE-2026-109518.
 RUN apt-get -o Acquire::Retries=0 -o APT::Update::Error-Mode=any update \
     && apt-get -o Acquire::Retries=0 install --yes --no-install-recommends --only-upgrade \
