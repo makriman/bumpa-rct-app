@@ -17,6 +17,16 @@ The historical application release transcript is
 
 ## Evidence rules
 
+Product overview recovery (2026-11-27): release verification is pending. Live
+diagnostics reproduced upstream HTTP 504 at approximately 60 seconds for both
+one-day and 30-day requests, including requests without comparison parameters.
+The documented summary endpoints independently returned usable counts and retail
+valuation. These diagnostics establish the provider boundary failure, not an
+internal Bumpa database root cause. Synthetic regression tests cover partial
+recovery, retail/cost and dated/lifetime distinctions, currency/range rejection,
+tenant/boundary isolation and preservation of original error receipts. Deployment
+and a durable production refresh must be verified before reporting this fix live.
+
 - CI retains backend JUnit/coverage, frontend coverage/Playwright output and local
   image-scan JSON for 14 days. Checked-in synthetic Darwin/Linux baselines use a
   200-pixel visual-diff ceiling, and CI runs the Linux browser gate. The publish

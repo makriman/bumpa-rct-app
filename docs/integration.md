@@ -56,7 +56,10 @@ comparison calculation. Existing response date, adjacency and currency validatio
 remains in force; invalid evidence still fails closed if the provider ignores
 these parameters.
 
-The defined read surface is ten analytics datasets plus paginated orders. Code and
+The defined read surface is ten logical analytics datasets plus paginated orders.
+An isolated upstream product-overview outage may add two bounded summary-endpoint
+requests without adding logical datasets. See [inventory recovery](launch-reliability.md#product-overview-timeouts)
+for partialness, source receipts and financial semantics. Code and
 documentation must not ambiguously call all eleven items “datasets.” The direct
 adapter enforces allowlisted endpoints, response/page limits, bounded retries,
 Decimal money, unknown-value preservation, and deep redaction. Every connection

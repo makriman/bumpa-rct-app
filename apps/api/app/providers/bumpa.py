@@ -219,7 +219,10 @@ class BumpaClient:
         request_policy: BumpaEndpointRequestPolicy | None = None,
         max_response_bytes: int | None = None,
         paced_catalog: bool = False,
+        wrap_inventory_cards: bool = False,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        if wrap_inventory_cards and path != "/commerce/v1/analytics/products/summary":
+            raise ValueError("List responses are restricted to inventory summary cards")
         size_limit = MAX_RESPONSE_BYTES if max_response_bytes is None else max_response_bytes
         if not 1 <= size_limit <= MAX_CATALOG_RESPONSE_BYTES:
             raise ValueError("Invalid Bumpa response size limit")
@@ -338,6 +341,10 @@ class BumpaClient:
                     failure_kind="invalid_response",
                     request_id_hash=request_id_hash,
                 ) from exc
+            if wrap_inventory_cards and isinstance(decoded, list):
+                # Keep the upstream list distinguishable from a vendor JSON
+                # object. This envelope is evidence, not an invented response.
+                decoded = {"kind": "upstream_inventory_cards", "items": decoded}
             if not isinstance(decoded, dict):
                 raise BumpaProviderError(
                     "Bumpa returned an unexpected response",
@@ -364,7 +371,9 @@ class BumpaClient:
         *,
         max_attempts: int | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        if area not in DATASETS or dataset not in DATASETS[area]:
+        if area not in DATASETS or (
+            dataset not in DATASETS[area] and (area, dataset) != ("products", "summary")
+        ):
             raise ValueError("Unsupported Bumpa analytics dataset")
         if date_to < date_from:
             raise ValueError("Invalid Bumpa analytics date range")
@@ -792,7 +801,12 @@ class BumpaClient:
                         # Bound worst-case extraction time after one endpoint has
                         # exhausted its retry budget, while still probing every
                         # independent dataset and orders endpoint.
-                        max_attempts=1 if exhausted_degradable_failures else None,
+                        max_attempts=(
+                            1
+                            if exhausted_degradable_failures
+                            or (area, name) == ("products", "overview")
+                            else None
+                        ),
                     )
                     decoded = decode_analytics_dataset(
                         area,
@@ -874,6 +888,34 @@ class BumpaClient:
                 datasets.append(decoded)
                 limit, remaining = _merge_rate_limits(headers, limit, remaining)
 
+        overview_failure = next(
+            (
+                response
+                for response in responses
+                if (response.resource, response.dataset) == ("products", "overview")
+                and response.availability == "error"
+                and (
+                    response.failure_kind in {"timeout", "transport"}
+                    or (
+                        response.failure_kind == "upstream_http"
+                        and response.status_code is not None
+                        and response.status_code >= 500
+                    )
+                )
+            ),
+            None,
+        )
+        if overview_failure is not None and successful_dataset_requests:
+            recovered, evidence = self._recover_inventory_summary(date_from, date_to, datasets)
+            responses.extend(evidence)
+            for response in evidence:
+                limit, remaining = _merge_rate_limits(response.headers, limit, remaining)
+            if recovered is not None:
+                datasets = [
+                    recovered if (row.resource, row.dataset) == ("products", "overview") else row
+                    for row in datasets
+                ]
+
         (
             orders,
             order_responses,
@@ -918,6 +960,224 @@ class BumpaClient:
             orders_error,
             orders_catalog_count,
         )
+
+    def _recover_inventory_summary(
+        self, date_from: date, date_to: date, datasets: list[ProviderDataset]
+    ) -> tuple[ProviderDataset | None, list[BumpaResponse]]:
+        """Recover independently evidenced inventory facts, never fake full charts."""
+        evidence: list[BumpaResponse] = []
+        components: list[dict[str, Any]] = []
+        for name in ("summary", "summary_cards"):
+            status: int | None = None
+            payload: dict[str, Any] = {}
+            headers: dict[str, str] = {}
+            try:
+                if name == "summary":
+                    status, payload, headers = self.get_analytics(
+                        "products", "summary", date_from, date_to, max_attempts=1
+                    )
+                    if not _response_range_matches_request(
+                        payload,
+                        *_response_range(payload),
+                        date_from,
+                        date_to,
+                        store_timezone=self._store_zone,
+                    ):
+                        raise _invalid_analytics_shape()
+                else:
+                    status, payload, headers = self._request(
+                        "/commerce/v1/analytics/products/summary",
+                        self._scope,
+                        max_attempts=1,
+                        wrap_inventory_cards=True,
+                    )
+                if classify_availability(status, payload)[0] != "available":
+                    raise _invalid_analytics_shape()
+                # Validate each response before fetching or accepting the next.
+                _inventory_summary_values(
+                    payload, cards=name == "summary_cards", store_currency=self.store_currency
+                )
+                components.append(payload)
+                evidence.append(
+                    BumpaResponse("products", name, status, payload, headers, "available", None)
+                )
+            except BumpaProviderError as exc:
+                if exc.failure_kind in {"authentication", "rate_limited"}:
+                    raise
+                evidence.append(
+                    BumpaResponse(
+                        "products",
+                        name,
+                        exc.status_code or status,
+                        payload,
+                        headers,
+                        "error",
+                        str(exc),
+                        _dataset_failure_kind(exc),
+                        exc.retryable,
+                        exc.request_id_hash,
+                        exc.retry_after_seconds,
+                    )
+                )
+                return None, evidence
+        try:
+            return _decode_inventory_summary(
+                components[0],
+                components[1],
+                datasets,
+                store_timezone=self._store_zone,
+                store_currency=self.store_currency,
+            ), evidence
+        except BumpaProviderError:
+            # Both receipts remain available for diagnosis, but inconsistent
+            # component facts cannot replace the failed logical overview.
+            return None, evidence
+
+
+def _inventory_summary_values(
+    payload: dict[str, Any], *, cards: bool, store_currency: str
+) -> dict[str, Decimal]:
+    """Decode only known provider cards; cost value is not retail value."""
+    if cards:
+        if payload.get("kind") != "upstream_inventory_cards":
+            raise _invalid_analytics_shape()
+        rows = payload.get("items")
+        required = {"total retail value", "out of stock"}
+    else:
+        data = payload.get("data")
+        rows = data.get("summary") if isinstance(data, dict) else None
+        required = {"total products", "total collections", "out of stock", "product variations"}
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 32:
+        raise _invalid_analytics_shape()
+    values: dict[str, Decimal] = {}
+    titles: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("title"), str):
+            raise _invalid_analytics_shape()
+        title = " ".join(row["title"].casefold().split())
+        if title in titles:
+            raise _invalid_analytics_shape()
+        titles.add(title)
+        if title not in required:
+            continue
+        value = parse_money(
+            row.get("value"),
+            currency_code=store_currency if title == "total retail value" else "UNSPECIFIED",
+        )
+        if value is None or (title != "total retail value" and not _is_nonnegative_integral(value)):
+            raise _invalid_analytics_shape()
+        values[title] = value
+    if set(values) != required:
+        raise _invalid_analytics_shape()
+    return values
+
+
+def _decode_inventory_summary(
+    summary: dict[str, Any],
+    cards: dict[str, Any],
+    datasets: list[ProviderDataset],
+    *,
+    store_timezone: ZoneInfo,
+    store_currency: str,
+) -> ProviderDataset:
+    counts = _inventory_summary_values(summary, cards=False, store_currency=store_currency)
+    card_values = _inventory_summary_values(cards, cards=True, store_currency=store_currency)
+    if (
+        counts["out of stock"] != card_values["out of stock"]
+        or _resolve_currency(summary, store_currency) != store_currency
+        or _resolve_currency(cards, store_currency) != store_currency
+    ):
+        raise _invalid_analytics_shape()
+    starts, ends = _response_range(summary)
+    sold = next(
+        (
+            row
+            for row in datasets
+            if (row.resource, row.dataset) == ("products", "products_sold")
+            and row.availability == "available"
+            and row.error is None
+            and row.response_from == starts
+            and row.response_to == ends
+            and row.canonical_payload.get("kind") == "summary_chart"
+        ),
+        None,
+    )
+    sold_series = sold.canonical_payload.get("series", {}).get("current_period") if sold else None
+    unavailable = ["total_stock", "series.total_products"]
+    if sold_series is None:
+        unavailable.append("series.total_products_sold")
+    canonical = {
+        "schema_version": 1,
+        "kind": "products_overview_summary",
+        "completeness": "partial",
+        "range": _decode_range(summary, store_timezone=store_timezone),
+        "as_of": datetime.now(UTC).isoformat(),
+        "summary": {
+            "total_products": {
+                "title": "Total Products",
+                "value": _decimal_text(counts["total products"]),
+                "unit": "count",
+                "availability": "available",
+            },
+            "total_stock": {
+                "title": "Total Stock Qty",
+                "value": None,
+                "unit": "count",
+                "availability": "unavailable",
+            },
+            "inventory_value": {
+                "title": "Total Retail Value",
+                "value": _decimal_text(card_values["total retail value"]),
+                "unit": "currency",
+                "currency_code": store_currency,
+                "valuation_basis": "retail",
+                "availability": "available",
+            },
+            "out_of_stock": {
+                "title": "Out of Stock",
+                "value": _decimal_text(counts["out of stock"]),
+                "unit": "count",
+                "availability": "available",
+            },
+            "product_variations": {
+                "title": "Product Variations",
+                "value": _decimal_text(counts["product variations"]),
+                "unit": "count",
+                "availability": "available",
+            },
+        },
+        "series": {"total_products": None, "total_products_sold": sold_series},
+        "unavailable_fields": unavailable,
+        "provenance": {
+            "strategy": "documented_inventory_summary_endpoints",
+            "inventory_basis": "current_snapshot_not_historical_stock",
+            "source_endpoints": [
+                "/commerce/v1/analytics/products?dataset=summary",
+                "/commerce/v1/analytics/products/summary",
+            ],
+            "retail_value_card": "Total Retail Value",
+        },
+        "warnings": [
+            "Bumpa's bundled overview failed; verified summary endpoints supplied these facts.",
+            "Inventory counts and retail value are a current snapshot, not historical stock.",
+            "Stock quantity and the catalog history chart remain unavailable; no zero is inferred.",
+            "Retail value is not inventory cost or profit.",
+        ],
+    }
+    return ProviderDataset(
+        resource="products",
+        dataset="overview",
+        availability="available",
+        payload={
+            "kind": "assembled_inventory_summary",
+            "source_datasets": ["summary", "summary_cards"],
+        },
+        value=counts["total products"],
+        title="Product inventory summary (partial overview)",
+        canonical_payload=canonical,
+        response_from=starts,
+        response_to=ends,
+    )
 
 
 def classify_availability(status_code: int, payload: dict[str, Any]) -> tuple[str, str | None]:

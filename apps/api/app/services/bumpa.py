@@ -755,6 +755,10 @@ def classify_sync_completion(
 def _dataset_has_typed_content(dataset: ProviderDataset) -> bool:
     if dataset.availability != "available" or dataset.error is not None:
         return False
+    # Recovered inventory facts are useful, but cannot certify the missing
+    # stock quantity and catalog chart or advance full-sync freshness.
+    if dataset.canonical_payload.get("completeness") == "partial":
+        return False
     if dataset.value is not None:
         return True
     # Rankings have no honest scalar projection. A schema-valid empty ranking is
