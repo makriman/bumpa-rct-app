@@ -13,7 +13,7 @@ RUN mkdir -p /out \
     && go build -trimpath -buildvcs=false -ldflags='-s -w' -o /out/gosu . \
     && /out/gosu --version
 
-FROM postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36 AS upstream
+FROM postgres:19-alpine@sha256:cac45fb483caee3668946088a1c0532db89d5285c28dbfeac889b4068296e06f AS upstream
 
 # Keep the pinned PostgreSQL binary while applying Alpine security fixes.
 RUN apk add --no-cache --upgrade \
