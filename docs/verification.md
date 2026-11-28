@@ -31,6 +31,11 @@ The first release CI attempt also found that Alpine had replaced the pinned
 `libxml2=2.13.9-r3` package. PostgreSQL/backup builds now pin `2.13.9-r5`; the
 PostgreSQL binary and data format are unchanged. Infrastructure runtime,
 compatibility and image-security gates must pass on the updated pin.
+The voice image's selective Debian security overlay also upgrades PAM packages
+to at least `1.5.2-6+deb12u3` and `libzstd1` to at least
+`1.5.4+dfsg2-5+deb12u1`, with build-time minimum-version assertions. These address
+the five fixable high-severity OS findings discovered by the release image scan;
+voice application behavior and dependency locks are unchanged.
 
 - CI retains backend JUnit/coverage, frontend coverage/Playwright output and local
   image-scan JSON for 14 days. Checked-in synthetic Darwin/Linux baselines use a
