@@ -1323,3 +1323,89 @@ def test_generated_media_path_cannot_escape_artifact_root(tmp_path: Path) -> Non
     )
     with pytest.raises(GeneratedMediaError, match="storage path"):
         generated_media_path(_settings(artifact_root=tmp_path), media)
+
+
+def test_inventory_overview_reads_current_boundary_and_does_not_hide_new_failure() -> None:
+    factory = _factory()
+    with factory() as db:
+        tenant = Tenant(
+            slug="inventory-boundary",
+            name="Inventory",
+            timezone="Africa/Lagos",
+            currency_code="NGN",
+        )
+        other = Tenant(slug="inventory-other", name="Other Inventory")
+        db.add_all([tenant, other])
+        db.flush()
+        connection = BumpaConnection(
+            tenant_id=tenant.id,
+            encrypted_api_key="fixture",
+            scope_type="business_id",
+            scope_id="inventory-test",
+        )
+        other_connection = BumpaConnection(
+            tenant_id=other.id,
+            encrypted_api_key="fixture",
+            scope_type="business_id",
+            scope_id="other-test",
+        )
+        db.add_all([connection, other_connection])
+        db.flush()
+
+        def snapshot(
+            owner: Tenant, conn: BumpaConnection, hour: int, availability: str = "available"
+        ) -> BumpaMetricSnapshot:
+            run = BumpaSyncRun(
+                tenant_id=owner.id,
+                bumpa_connection_id=conn.id,
+                boundary_revision=conn.boundary_revision,
+                status="partial",
+                completion_quality="degraded",
+                partial_reason="dataset_unavailable",
+                requested_from=date(2026, 1, 1),
+                requested_to=date(2026, 1, 31),
+                started_at=datetime(2026, 2, 1, hour, tzinfo=UTC),
+                finished_at=datetime(2026, 2, 1, hour, 10, tzinfo=UTC),
+            )
+            db.add(run)
+            db.flush()
+            metric = BumpaMetricSnapshot(
+                tenant_id=owner.id,
+                sync_run_id=run.id,
+                metric_key="products.overview",
+                availability=availability,
+                value_decimal=Decimal("12") if availability == "available" else None,
+                canonical_payload={
+                    "kind": "products_overview_summary",
+                    "completeness": "partial",
+                    "warnings": ["Stock quantity unavailable."],
+                }
+                if availability == "available"
+                else {},
+                requested_from=run.requested_from,
+                requested_to=run.requested_to,
+            )
+            db.add(metric)
+            db.flush()
+            return metric
+
+        snapshot(tenant, connection, 1)
+        snapshot(other, other_connection, 5)
+        db.commit()
+        current = inventory_overview(db, tenant.id)
+        assert current["metric_key"] == "products.overview"
+        assert current["availability"] == "available"
+        assert current["completeness"] == "partial"
+        assert current["warnings"] == ["Stock quantity unavailable."]
+        snapshot(tenant, connection, 2, "error")
+        db.commit()
+        assert inventory_overview(db, tenant.id)["availability"] == "error"
+        connection.boundary_revision += 1
+        db.commit()
+        assert inventory_overview(db, tenant.id)["availability"] == "unavailable"
+        snapshot(tenant, connection, 3)
+        db.commit()
+        assert inventory_overview(db, tenant.id)["availability"] == "available"
+        connection.status = "disabled"
+        db.commit()
+        assert inventory_overview(db, tenant.id)["availability"] == "unavailable"

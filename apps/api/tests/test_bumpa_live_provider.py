@@ -101,6 +101,8 @@ def _set_analytics_range(
 def _analytics_response(request: httpx.Request) -> httpx.Response:
     area = request.url.path.rsplit("/", 1)[-1]
     dataset = request.url.params["dataset"]
+    if dataset == "summary":
+        return httpx.Response(503)
     payload = deepcopy(ANALYTICS[f"{area}.{dataset}"])
     if "range" in payload:
         expected = _inclusive_local_day_range(
@@ -703,7 +705,7 @@ def test_live_bumpa_sync_persists_one_isolated_exhausted_dataset_failure(
     assert evidence.status_code == expected_status
     assert evidence.failure_kind == expected_kind
     assert evidence.payload == {}
-    assert calls["products.overview"] == 2
+    assert calls["products.overview"] == 1
     assert calls["products.products_sold"] == 1
     assert calls["customers.top_customers_order"] == 1
     assert calls["orders"] == 1
@@ -741,7 +743,7 @@ def test_live_bumpa_sync_isolates_multiple_endpoint_failures_and_still_fetches_o
     }
     assert len(result.datasets) == 10
     assert failed == {"products.overview", "products.products_sold"}
-    assert calls["products.overview"] == 2
+    assert calls["products.overview"] == 1
     assert calls["products.products_sold"] == 1
     assert calls["products.top_selling_products"] == 1
     assert calls["customers.top_customers_order"] == 1
@@ -922,7 +924,7 @@ def test_live_bumpa_sync_never_degrades_global_auth_or_rate_limit_failures(
     assert raised.value.failure_kind == failure_kind
     assert raised.value.retryable is (status_code == 429)
     # Four successful sales datasets precede the failing products overview.
-    assert calls == (5 if status_code == 401 else 6)
+    assert calls == 5
 
 
 @pytest.mark.parametrize(
@@ -967,7 +969,9 @@ def test_isolated_dataset_degradation_is_independent_of_dataset_order(
         (failed_area, failed_dataset)
     ]
     assert len(result.datasets) == 10
-    assert calls[f"{failed_area}.{failed_dataset}"] == 2
+    assert calls[f"{failed_area}.{failed_dataset}"] == (
+        1 if (failed_area, failed_dataset) == ("products", "overview") else 2
+    )
     assert calls["orders"] == 1
 
 
@@ -2344,3 +2348,197 @@ def test_catalog_retries_also_respect_request_start_spacing():
         ) as provider:
             provider.get_orders_page(None, None, 1, max_attempts=2)
     assert len(starts) == 2 and starts[1] - starts[0] >= 0.018
+
+
+def _inventory_components() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    # Synthetic retail and cost values differ; sales here are lifetime only.
+    return {
+        "range": _inclusive_local_day_range(date(2026, 1, 1), date(2026, 1, 31), "Africa/Lagos"),
+        "data": {
+            "summary": [
+                {"title": "Total Products", "value": 12},
+                {"title": "Total Collections", "value": 2},
+                {"title": "Out of stock", "value": 3},
+                {"title": "Product Variations", "value": 20},
+            ]
+        },
+    }, [
+        {"title": "Total Retail Value", "value": "₦60,000.00"},
+        {"title": "Products Sold", "value": "9999.000000"},
+        {"title": "Out of Stock", "value": 3},
+        {"title": "Total Inventory Value", "value": "₦30,000.00"},
+    ]
+
+
+def _inventory_recovery_sync(
+    summary: Any,
+    cards: Any,
+    *,
+    component_status: int = 200,
+    overview_status: int = 504,
+) -> tuple[Any, list[httpx.Request]]:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(200, json=_empty_orders())
+        if request.url.path.endswith("/products/summary"):
+            return httpx.Response(component_status, json=cards)
+        if request.url.params.get("dataset") == "summary":
+            return httpx.Response(component_status, json=summary)
+        if request.url.path.endswith("/products") and request.url.params["dataset"] == "overview":
+            return httpx.Response(overview_status, json={})
+        return _analytics_response(request)
+
+    result = BumpaClient(
+        "secret",
+        "business_id",
+        "business-test",
+        client=_client(httpx.MockTransport(respond)),
+        sleep=lambda _seconds: None,
+    ).sync(date(2026, 1, 1), date(2026, 1, 31))
+    return result, requests
+
+
+def test_inventory_recovery_uses_retail_and_dated_sales_preserving_real_failure() -> None:
+    from app.services.bumpa import SyncCompletion, classify_sync_completion
+
+    result, requests = _inventory_recovery_sync(*_inventory_components())
+    overview = next(
+        row for row in result.datasets if (row.resource, row.dataset) == ("products", "overview")
+    )
+    canonical = overview.canonical_payload
+    assert overview.availability == "available"
+    assert overview.value == 12
+    assert canonical["kind"] == "products_overview_summary"
+    assert canonical["completeness"] == "partial"
+    assert canonical["summary"]["inventory_value"]["value"] == "60000.00"
+    assert canonical["summary"]["inventory_value"]["valuation_basis"] == "retail"
+    assert canonical["summary"]["total_stock"]["value"] is None
+    assert canonical["series"]["total_products"] is None
+    sold = next(row for row in result.datasets if row.dataset == "products_sold")
+    assert (
+        canonical["series"]["total_products_sold"]
+        == sold.canonical_payload["series"]["current_period"]
+    )
+    assert "9999" not in repr(canonical)
+    assert classify_sync_completion(
+        result.datasets, orders_availability="available"
+    ) == SyncCompletion(
+        "partial",
+        "degraded",
+        "dataset_unavailable",
+        False,
+    )
+    receipts = {row.dataset: row for row in result.responses if row.resource == "products"}
+    assert receipts["overview"].status_code == 504
+    assert receipts["overview"].availability == "error"
+    assert receipts["summary"].status_code == 200
+    assert receipts["summary_cards"].payload["kind"] == "upstream_inventory_cards"
+    assert len(result.datasets) == 10
+    components = [
+        row
+        for row in requests
+        if row.url.params.get("dataset") == "summary" or row.url.path.endswith("/products/summary")
+    ]
+    assert len(components) == 2
+    for request in components:
+        assert request.url.params["business_id"] == "business-test"
+        assert "location_id" not in request.url.params
+    assert "from" not in components[1].url.params
+
+
+@pytest.mark.parametrize(
+    "bad_component",
+    [
+        "missing_count",
+        "fractional_count",
+        "negative_count",
+        "duplicate_title",
+        "wrong_range",
+        "missing_retail",
+        "invalid_money",
+        "foreign_currency",
+        "currency_metadata",
+        "mismatched_stock",
+        "list_summary",
+        "object_cards",
+    ],
+)
+def test_inventory_recovery_fails_closed_on_invalid_components(bad_component: str) -> None:
+    summary, cards = _inventory_components()
+    if bad_component == "missing_count":
+        summary["data"]["summary"].pop()
+    elif bad_component == "fractional_count":
+        summary["data"]["summary"][0]["value"] = "1.5"
+    elif bad_component == "negative_count":
+        summary["data"]["summary"][0]["value"] = -1
+    elif bad_component == "duplicate_title":
+        summary["data"]["summary"].append(deepcopy(summary["data"]["summary"][0]))
+    elif bad_component == "wrong_range":
+        summary["range"]["from"] = "2026-01-01T00:00:00Z"
+    elif bad_component == "missing_retail":
+        cards.pop(0)
+    elif bad_component == "invalid_money":
+        cards[0]["value"] = "unknown"
+    elif bad_component == "foreign_currency":
+        cards[0]["value"] = "£60,000"
+    elif bad_component == "currency_metadata":
+        cards[0]["currency"] = "USD"
+    elif bad_component == "mismatched_stock":
+        cards[2]["value"] = 4
+    elif bad_component == "list_summary":
+        summary = []  # type: ignore[assignment]
+    elif bad_component == "object_cards":
+        cards = {"items": cards}  # type: ignore[assignment]
+    result, _requests = _inventory_recovery_sync(summary, cards)
+    overview = next(
+        row for row in result.datasets if row.dataset == "overview" and row.resource == "products"
+    )
+    assert overview.availability == "error"
+    assert overview.value is None
+    assert result.orders_availability == "available"
+    assert (
+        next(
+            row
+            for row in result.responses
+            if row.dataset == "overview" and row.resource == "products"
+        ).status_code
+        == 504
+    )
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_inventory_recovery_never_masks_connection_failures(status: int) -> None:
+    with pytest.raises(BumpaProviderError) as raised:
+        _inventory_recovery_sync(*_inventory_components(), component_status=status)
+    assert raised.value.status_code == status
+
+
+def test_inventory_recovery_does_not_bypass_a_malformed_successful_overview() -> None:
+    result, requests = _inventory_recovery_sync(*_inventory_components(), overview_status=200)
+    assert not any(row.url.params.get("dataset") == "summary" for row in requests)
+    assert (
+        next(
+            row
+            for row in result.datasets
+            if row.resource == "products" and row.dataset == "overview"
+        ).availability
+        == "error"
+    )
+
+
+def test_inventory_recovery_preserves_real_zero_values() -> None:
+    summary, cards = _inventory_components()
+    for row in summary["data"]["summary"]:
+        row["value"] = 0
+    cards[0]["value"] = "₦0.00"
+    cards[2]["value"] = 0
+    result, _requests = _inventory_recovery_sync(summary, cards)
+    overview = next(
+        row for row in result.datasets if row.resource == "products" and row.dataset == "overview"
+    )
+    assert overview.value == 0
+    assert overview.canonical_payload["summary"]["inventory_value"]["value"] == "0.00"
+    assert overview.canonical_payload["summary"]["total_stock"]["value"] is None

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app.core.crypto import FieldCipher
@@ -18,14 +19,17 @@ from app.jobs.runtime import AsyncRuntimeConfig, enqueue_job
 from app.jobs.worker import process_one
 from app.providers.bumpa import BumpaClient
 from app.services import bumpa as bumpa_service
+from app.services.business_tools import inventory_overview
 
 FIXTURES = Path(__file__).parents[3] / "tests" / "contract" / "fixtures" / "bumpa"
 ANALYTICS = json.loads((FIXTURES / "analytics_responses.json").read_text())
 
 
+@pytest.mark.parametrize("recover_inventory", [False, True])
 def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
     monkeypatch,
     client,
+    recover_inventory: bool,
 ) -> None:
     del client  # The app lifespan creates the shared integration-test schema.
     field_key = "async-isolated-degraded-field-key"
@@ -33,6 +37,15 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
     calls: dict[str, int] = {}
 
     def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/products/summary"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"title": "Total Retail Value", "value": "₦60,000.00"},
+                    {"title": "Out of Stock", "value": 3},
+                    {"title": "Total Inventory Value", "value": "₦30,000.00"},
+                ],
+            )
         if request.url.path.endswith("/orders"):
             calls["orders"] = calls.get("orders", 0) + 1
             return httpx.Response(
@@ -54,7 +67,22 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         calls[key] = calls.get(key, 0) + 1
         if key == "products.overview":
             raise httpx.ReadTimeout(private_detail, request=request)
-        payload = deepcopy(ANALYTICS[key])
+        if key == "products.summary":
+            if not recover_inventory:
+                return httpx.Response(503)
+            payload = {
+                "range": {},
+                "data": {
+                    "summary": [
+                        {"title": "Total Products", "value": 12},
+                        {"title": "Total Collections", "value": 2},
+                        {"title": "Out of Stock", "value": 3},
+                        {"title": "Product Variations", "value": 20},
+                    ]
+                },
+            }
+        else:
+            payload = deepcopy(ANALYTICS[key])
         if "range" in payload:
             timezone = ZoneInfo("Africa/Lagos")
             requested_from = date.fromisoformat(request.url.params["from"])
@@ -134,7 +162,9 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
     )
 
     with SessionLocal() as session:
-        tenant = Tenant(slug="async-isolated-degraded", name="Async Isolated Degraded")
+        tenant = Tenant(
+            slug=f"async-isolated-degraded-{recover_inventory}", name="Async Isolated Degraded"
+        )
         session.add(tenant)
         session.flush()
         connection = BumpaConnection(
@@ -157,7 +187,7 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
                 "date_from": "2026-07-01",
                 "date_to": "2026-07-12",
             },
-            idempotency_key="bumpa-isolated-degraded-contract",
+            idempotency_key=f"bumpa-isolated-degraded-contract-{recover_inventory}",
             queue_name=runtime.queue_name,
             max_attempts=5,
             tenant_id=tenant.id,
@@ -181,7 +211,8 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert stored_job.result is not None
         assert stored_job.result["status"] == "partial"
         assert stored_job.result["completion_quality"] == "degraded"
-        assert stored_job.result["partial_reason"] == "dataset_error"
+        reason = "dataset_unavailable" if recover_inventory else "dataset_error"
+        assert stored_job.result["partial_reason"] == reason
 
         run = session.scalar(
             select(BumpaSyncRun).where(BumpaSyncRun.bumpa_connection_id == connection.id)
@@ -189,7 +220,7 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert run is not None
         assert run.status == "partial"
         assert run.completion_quality == "degraded"
-        assert run.partial_reason == "dataset_error"
+        assert run.partial_reason == reason
         assert connection.last_successful_sync_at is None
         assert connection.last_failed_sync_at is not None
         assert run.finished_at is not None
@@ -208,6 +239,14 @@ def test_isolated_products_timeout_finishes_async_job_as_degraded_partial(
         assert raw_failure.failure_kind == "timeout"
         assert private_detail not in (raw_failure.error_message or "")
         assert private_detail not in repr(stored_job.result)
-        assert calls["products.overview"] == 2
+        assert calls["products.overview"] == 1
         assert calls["products.products_sold"] == 1
         assert calls["orders"] == 1
+        inventory = inventory_overview(session, tenant.id)
+        if recover_inventory:
+            assert inventory["availability"] == "available"
+            assert inventory["completeness"] == "partial"
+            assert inventory["details"]["summary"]["inventory_value"]["value"] == "60000.00"
+            assert inventory["details"]["summary"]["total_stock"]["value"] is None
+        else:
+            assert inventory["availability"] == "error"

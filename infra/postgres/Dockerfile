@@ -18,7 +18,7 @@ FROM postgres:16-alpine@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992
 # Keep the pinned PostgreSQL binary while applying Alpine security fixes.
 RUN apk add --no-cache --upgrade \
         krb5-libs=1.22.3-r0 \
-        libxml2=2.13.9-r3 \
+        libxml2=2.13.9-r5 \
         libxslt=1.1.43-r4
 
 COPY --from=gosu-builder /out/gosu /usr/local/bin/gosu

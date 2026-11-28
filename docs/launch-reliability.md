@@ -54,8 +54,9 @@ existing reconstruction fallback.
 
 ## Product overview timeouts
 
-Bumpa product overview has a bounded 90-second read window and at most two
-attempts. A provider HTTP 504 is recorded as an upstream failure; increasing the
+Bumpa product overview has a bounded 90-second read window. A full sync attempts
+it once; direct endpoint probes retain their two-attempt ceiling. A provider HTTP
+504 is recorded as an upstream failure; increasing the
 client timeout cannot repair a gateway that has already returned 504. Other
 validated datasets and orders remain available, and the normal scheduled import
 retries the failed dataset. This failure no longer occupies a WhatsApp consumer
@@ -64,6 +65,24 @@ or prevents an explicitly accepted partial-data account from activating.
 Do not substitute another period, invent an inventory value, relabel foreign
 currency, or turn unavailable data into zero. Escalate persistent provider 504s
 with the endpoint, provider scope, requested local dates and measured latency.
+
+For an isolated timeout, transport failure or HTTP 5xx, the adapter may recover
+inventory facts from the documented `products?dataset=summary` and
+`products/summary` endpoints, using the unchanged connection scope. Both receipts
+and the original failure remain recorded. Authentication/rate limits abort;
+invalid successful overview payloads never trigger recovery. Summary counts
+require the exact requested range, valid integral counts and consistent out-of-stock
+cards. Currency must match the store. The `Total Retail Value` card supplies
+retail valuation; the differently based `Total Inventory Value` card is not used.
+Lifetime `Products Sold` is not substituted for dated sales.
+
+The canonical `products_overview_summary` has `completeness=partial`. Inventory is
+explicitly a current snapshot; stock quantity and catalog-history charts remain
+unavailable. A separately validated, exactly matching dated products-sold series
+may be reused. The run remains degraded and cannot advance full-sync freshness.
+The inventory tool reads the actual `products.overview` metric, scoped to the
+active connection and current boundary; a new failed snapshot cannot be hidden
+by an older success.
 
 ## Evidence and rollout
 

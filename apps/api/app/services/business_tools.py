@@ -630,10 +630,20 @@ def customer_summary(
 def inventory_overview(db: Session, tenant_id: str) -> dict[str, Any]:
     snapshot = db.scalar(
         select(BumpaMetricSnapshot)
+        .join(BumpaSyncRun, BumpaSyncRun.id == BumpaMetricSnapshot.sync_run_id)
+        .join(BumpaConnection, BumpaConnection.id == BumpaSyncRun.bumpa_connection_id)
         .where(
             BumpaMetricSnapshot.tenant_id == tenant_id,
+            BumpaSyncRun.tenant_id == tenant_id,
+            BumpaConnection.tenant_id == tenant_id,
+            BumpaConnection.status == "active",
+            BumpaSyncRun.boundary_revision == BumpaConnection.boundary_revision,
+            BumpaSyncRun.status.in_(("success", "partial")),
+            BumpaSyncRun.finished_at.is_not(None),
+            BumpaSyncRun.error.is_(None),
             BumpaMetricSnapshot.metric_key.in_(
                 (
+                    "products.overview",
                     "products.inventory",
                     "products.inventory_value",
                     "products.low_stock",
@@ -641,7 +651,9 @@ def inventory_overview(db: Session, tenant_id: str) -> dict[str, Any]:
                 )
             ),
         )
-        .order_by(BumpaMetricSnapshot.created_at.desc())
+        # Include failed snapshots: an older success must not hide a fresh
+        # failure, or data from an obsolete connection boundary.
+        .order_by(BumpaSyncRun.finished_at.desc(), BumpaMetricSnapshot.created_at.desc())
     )
     if snapshot is None:
         return {
@@ -652,6 +664,12 @@ def inventory_overview(db: Session, tenant_id: str) -> dict[str, Any]:
     return {
         "source": "Bumpa metrics",
         "availability": snapshot.availability,
+        "completeness": snapshot.canonical_payload.get("completeness", "complete")
+        if snapshot.availability == "available"
+        else "unavailable",
+        "warnings": snapshot.canonical_payload.get("warnings", [])
+        if snapshot.availability == "available"
+        else ["The latest inventory request did not return usable data."],
         "metric_key": snapshot.metric_key,
         "value": str(snapshot.value_decimal) if snapshot.value_decimal is not None else None,
         "details": snapshot.canonical_payload,
