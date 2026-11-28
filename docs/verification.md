@@ -27,6 +27,11 @@ recovery, retail/cost and dated/lifetime distinctions, currency/range rejection,
 tenant/boundary isolation and preservation of original error receipts. Deployment
 and a durable production refresh must be verified before reporting this fix live.
 
+The first release CI attempt also found that Alpine had replaced the pinned
+`libxml2=2.13.9-r3` package. PostgreSQL/backup builds now pin `2.13.9-r5`; the
+PostgreSQL binary and data format are unchanged. Infrastructure runtime,
+compatibility and image-security gates must pass on the updated pin.
+
 - CI retains backend JUnit/coverage, frontend coverage/Playwright output and local
   image-scan JSON for 14 days. Checked-in synthetic Darwin/Linux baselines use a
   200-pixel visual-diff ceiling, and CI runs the Linux browser gate. The publish
